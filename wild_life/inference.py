@@ -1,0 +1,689 @@
+"""
+inference.py — The Wild Life proof / inference engine.
+Corresponds to login.c + lefun.c in the original C source.
+
+The engine is goal-stack based (no Python recursion for the main loop),
+using explicit choice points for backtracking.
+"""
+
+from __future__ import annotations
+import sys
+import time
+from typing import Optional, List, Tuple, Any, Dict
+
+from wild_life.data_structures import (
+    PsiTerm, Definition, GoalType, Goal, ChoicePoint,
+    DefType, FACT, QUERY, ERROR
+)
+from wild_life.unification import (
+    UnificationFailure, CutException, HaltException, AbortException,
+    Trail, Unifier, copy_term, compute_lub, types_compatible
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Engine
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Engine:
+    """
+    The Wild Life inference engine.
+
+    State mirrors the C globals in login.c / lefun.c:
+      goal_stack, choice_stack, undo_stack (trail), aim
+    """
+
+    def __init__(self, wl):
+        self.wl = wl           # WildLifeRuntime singleton
+        self.trail: Trail = Trail()
+        self.unifier: Unifier = Unifier(self.trail)
+        self.goal_stack: Optional[Goal] = None
+        self.choice_stack: Optional[ChoicePoint] = None
+        self.aim: Optional[Goal] = None
+        self.goal_count: int = 0
+        self.interrupted: bool = False
+        self.main_loop_ok: bool = True
+        self.verbose: bool = False
+        self.trace: bool = False
+        self.assert_first: bool = False
+        self.var_occurred: bool = False
+        self.noisy: bool = True
+        self._start_time: float = 0.0
+
+    # ─── goal stack helpers ──────────────────────────────────────────────────
+
+    def push_goal(self, gtype: GoalType, a=None, b=None, c=None) -> Goal:
+        g = Goal(gtype, a, b, c)
+        g.next = self.goal_stack
+        self.goal_stack = g
+        return g
+
+    def push_choice_point(self, gtype: GoalType, a=None, b=None, c=None) -> None:
+        """Create a choice point with an alternative goal."""
+        alt = Goal(gtype, a, b, c)
+        alt.next = self.goal_stack
+        mark = self.trail.mark()
+        cp = ChoicePoint(
+            undo_point=mark,
+            goal_stack=alt,
+            next=self.choice_stack
+        )
+        self.choice_stack = cp
+
+    def backtrack(self) -> bool:
+        """Undo to the previous choice point and set goal_stack to its alt."""
+        if not self.choice_stack:
+            return False
+        cp = self.choice_stack
+        self.trail.undo_to(cp.undo_point)
+        self.goal_stack = cp.goal_stack
+        self.choice_stack = cp.next
+        return True
+
+    def cut_to(self, cut_point) -> None:
+        """Remove choice points up to (not including) cut_point."""
+        while self.choice_stack and self.choice_stack is not cut_point:
+            self.choice_stack = self.choice_stack.next
+
+    # ─── assertion helpers ───────────────────────────────────────────────────
+
+    def add_rule(self, head: PsiTerm, body: Optional[PsiTerm],
+                 typ: DefType) -> bool:
+        """Add a clause to the database (implements assert_clause logic)."""
+        wl = self.wl
+        head = head.deref()
+        defn = head.type
+        if defn is None:
+            return False
+
+        if defn.type == DefType.UNDEF:
+            defn.type = typ
+        elif defn.type != typ:
+            print(f"*** Error: cannot redefine {defn.keyword.symbol} as {typ}.",
+                  file=sys.stderr)
+            return False
+
+        if defn._builtin_func is not None:
+            print(f"*** Error: built-in '{defn.keyword.symbol}' may not be redefined.",
+                  file=sys.stderr)
+            return False
+
+        # Copy head & body to heap-permanent storage
+        head_copy = copy_term(head)
+        if body is not None:
+            body_copy = copy_term(body)
+        else:
+            # Facts: body = succeed
+            body_copy = wl.make_atom('succeed', wl.bi_module)
+            if body_copy is None:
+                body_copy = PsiTerm(type=wl.succeed)
+
+        rule = (head_copy, body_copy)
+
+        if self.assert_first:
+            defn.rule = [rule] + (defn.rule or [])
+        else:
+            if defn.rule is None:
+                defn.rule = []
+            defn.rule.append(rule)
+        return True
+
+    def assert_clause(self, t: PsiTerm) -> None:
+        """Top-level assertion. Dispatch on head functor."""
+        wl = self.wl
+        t = t.deref()
+        sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
+
+        def get_two(attrs):
+            return attrs.get('1'), attrs.get('2')
+
+        if sym == ':-':
+            h, b = get_two(t.attr_list)
+            if h and b:
+                self.add_rule(h, b, DefType.PREDICATE)
+        elif sym == '->':
+            h, b = get_two(t.attr_list)
+            if h and b:
+                self.add_rule(h, b, DefType.FUNCTION)
+        elif sym in ('<|', ':='):
+            self._assert_type(t)
+        else:
+            # Bare fact
+            self.add_rule(t, None, DefType.PREDICATE)
+
+    def _assert_type(self, t: PsiTerm) -> None:
+        """Handle type declarations (<| or :=)."""
+        # Simplified: mark the LHS type as a subtype of the RHS
+        arg1 = t.attr_list.get('1')
+        arg2 = t.attr_list.get('2')
+        if arg1 and arg2:
+            arg1 = arg1.deref()
+            arg2 = arg2.deref()
+            if arg1.type and arg2.type:
+                # Add arg2.type as parent of arg1.type
+                child = arg1.type
+                parent = arg2.type
+                if parent not in child.parents:
+                    child.parents.append(parent)
+                if child not in parent.children:
+                    parent.children.append(child)
+
+    # ─── prove helpers ───────────────────────────────────────────────────────
+
+    def _deref_term(self, t: PsiTerm) -> PsiTerm:
+        return t.deref() if t else t
+
+    def prove_aim(self) -> bool:
+        """Handle a 'prove' goal. Returns success flag."""
+        wl = self.wl
+        aim = self.aim
+        thegoal = aim.a
+        rule_or_sentinel = aim.b  # DEFRULES sentinel or specific rule list
+
+        if not thegoal:
+            return False
+
+        thegoal = thegoal.deref()
+        defn = thegoal.type
+
+        # ── AND (conjunction) ──
+        if defn == wl.and_sym:
+            self.goal_stack = aim.next
+            self.goal_count += 1
+            arg1 = thegoal.attr_list.get('1')
+            arg2 = thegoal.attr_list.get('2')
+            if arg2:
+                self.push_goal(GoalType.PROVE, arg2, _DEFRULES, None)
+            if arg1:
+                self.push_goal(GoalType.PROVE, arg1, _DEFRULES, None)
+            return True
+
+        # ── CUT ──
+        if defn == wl.cut:
+            self.goal_stack = aim.next
+            self.goal_count += 1
+            cut_point = thegoal.value  # stored choice point
+            self.cut_to(cut_point)
+            return True
+
+        # ── OR / disjunction ──
+        if defn == wl.disjunction:
+            self.goal_stack = aim.next
+            self.goal_count += 1
+            arg1 = thegoal.attr_list.get('1')
+            arg2 = thegoal.attr_list.get('2')
+            if arg2:
+                self.push_choice_point(GoalType.PROVE, arg2, _DEFRULES, None)
+            if arg1:
+                self.push_goal(GoalType.PROVE, arg1, _DEFRULES, None)
+            return True
+
+        # ── TRUE / FALSE atoms ──
+        if defn == wl.true:
+            self.goal_stack = aim.next
+            self.goal_count += 1
+            return True
+        if defn == wl.false:
+            self.goal_stack = aim.next
+            self.goal_count += 1
+            return False
+
+        # ── BUILT-IN ──
+        if defn is not None and defn._builtin_func is not None:
+            self.goal_stack = aim.next
+            self.goal_count += 1
+            if self.trace:
+                print(f"[trace] prove built-in {defn.keyword.symbol}", file=sys.stderr)
+            try:
+                result = defn._builtin_func(thegoal, self)
+                return bool(result)
+            except UnificationFailure:
+                return False
+            except CutException as e:
+                self.cut_to(e.cut_point)
+                return True
+            except AbortException:
+                self.main_loop_ok = False
+                return False
+            except HaltException as e:
+                raise
+
+        # ── UNDEFINED or LOOKUP from DEFRULES ──
+        rules = rule_or_sentinel
+        if rules is _DEFRULES:
+            if defn is None:
+                return False
+            if defn.type == DefType.PREDICATE:
+                rules = defn.rule or []
+            elif defn.type == DefType.FUNCTION:
+                rules = defn.rule or []
+            elif defn.type == DefType.UNDEF:
+                # Dynamic predicate with no clauses → fail silently
+                self.goal_stack = aim.next
+                self.goal_count += 1
+                return False
+            else:
+                self.goal_stack = aim.next
+                self.goal_count += 1
+                return False
+        elif rules is None:
+            self.goal_stack = aim.next
+            self.goal_count += 1
+            return False
+
+        # Filter out retracted clauses
+        active = [(h, b) for (h, b) in (rules if rules else [])
+                  if h is not None and b is not None]
+        if not active:
+            self.goal_stack = aim.next
+            self.goal_count += 1
+            return False
+
+        self.goal_stack = aim.next
+        self.goal_count += 1
+
+        if self.trace:
+            sym = defn.keyword.symbol if defn and defn.keyword else '?'
+            print(f"[trace] prove {sym}", file=sys.stderr)
+
+        # Multiple clauses → set up choice point for first, then proceed
+        head_orig, body_orig = active[0]
+        if len(active) > 1:
+            self.push_choice_point(GoalType.PROVE, thegoal, active[1:], None)
+
+        head = copy_term(head_orig)
+        body = copy_term(body_orig)
+
+        # Unify head with goal
+        if body.type != wl.succeed:
+            self.push_goal(GoalType.PROVE, body, _DEFRULES, None)
+
+        # Bind head's coref to thegoal (= head ← thegoal)
+        mark = self.trail.mark()
+        ok = self.unifier.unify(thegoal, head)
+        if not ok:
+            self.trail.undo_to(mark)
+            # Try next clause if any
+            if self.choice_stack and \
+               self.choice_stack.goal_stack.type == GoalType.PROVE and \
+               self.choice_stack.goal_stack.a is thegoal:
+                return self.backtrack_and_succeed()
+            return False
+        return True
+
+    def backtrack_and_succeed(self) -> bool:
+        if not self.choice_stack:
+            return False
+        self.backtrack()
+        return True  # will be re-evaluated in main_prove
+
+    def unify_aim(self) -> bool:
+        """Handle a 'unify' goal."""
+        aim = self.aim
+        u = aim.a
+        v = aim.b
+        if u is None or v is None:
+            return False
+        mark = self.trail.mark()
+        ok = self.unifier.unify(u, v)
+        if not ok:
+            self.trail.undo_to(mark)
+        return ok
+
+    def eval_aim(self) -> bool:
+        """Handle an 'eval' goal (function evaluation)."""
+        wl = self.wl
+        aim = self.aim
+        funct = aim.a
+        result = aim.b
+        rules = aim.c  # rule list
+
+        if funct is None:
+            return False
+        funct = funct.deref()
+
+        if rules is None:
+            return False
+
+        # Built-in function
+        if isinstance(rules, int):
+            # Built-in index — look up in wl.c_rules
+            bi = getattr(wl, '_c_rules', {}).get(rules)
+            if bi:
+                try:
+                    return bool(bi(funct, result, self))
+                except UnificationFailure:
+                    return False
+            return False
+
+        # User-defined function: find first active rule
+        active = [(h, b) for (h, b) in (rules if rules else [])
+                  if h is not None and b is not None]
+        if not active:
+            return False
+
+        head_orig, body_orig = active[0]
+        if len(active) > 1:
+            self.push_choice_point(GoalType.EVAL, funct, result, active[1:])
+
+        head = copy_term(head_orig)
+        body = copy_term(body_orig)
+
+        self.push_goal(GoalType.UNIFY, body, result, None)
+        mark = self.trail.mark()
+        ok = self.unifier.unify(funct, head)
+        if not ok:
+            self.trail.undo_to(mark)
+            return False
+        return True
+
+    def match_aim(self) -> bool:
+        """
+        'match' goal: one-way unification — pattern (b) is unified with
+        call (a), but a may not be changed.
+        """
+        aim = self.aim
+        u = aim.a  # calling term (read-only)
+        v = aim.b  # pattern (from definition)
+        if u is None or v is None:
+            return False
+        u = u.deref()
+        v = v.deref()
+        if u is v:
+            return True
+
+        # Types must be compatible
+        if not types_compatible(u.type, v.type):
+            return False
+
+        # Values must match if both have values
+        if v.value is not None:
+            if u.value is None:
+                return False
+            if u.value != v.value:
+                return False
+
+        # Bind v's coref → u (one-way: v points to u)
+        mark = self.trail.mark()
+        self.trail.trail_psi(v, 'coref')
+        v.coref = u
+
+        # Match attributes
+        for key, vpsi in v.attr_list.items():
+            upsi = u.attr_list.get(key)
+            if upsi is None:
+                self.trail.undo_to(mark)
+                return False
+            self.push_goal(GoalType.MATCH, upsi, vpsi, None)
+        return True
+
+    def clause_aim(self, retract: bool) -> bool:
+        """Handle clause / retract goals."""
+        aim = self.aim
+        head = aim.a
+        body = aim.b
+        rule_list_ref = aim.c  # list (mutable)
+
+        if not rule_list_ref or not isinstance(rule_list_ref, list):
+            return False
+
+        rules = rule_list_ref
+        while rules and (rules[0][0] is None or rules[0][1] is None):
+            rules = rules[1:]
+
+        if not rules:
+            return False
+
+        if len(rules) > 1:
+            next_rules = rules[1:]
+            if retract:
+                self.push_choice_point(GoalType.DEL_CLAUSE, head, body, next_rules)
+            else:
+                self.push_choice_point(GoalType.CLAUSE, head, body, next_rules)
+
+        h0, b0 = rules[0]
+        if retract:
+            self.push_goal(GoalType.RETRACT, rules, None, None)
+
+        rule_head = copy_term(h0)
+        rule_body = copy_term(b0)
+        self.push_goal(GoalType.UNIFY, body, rule_body, None)
+        self.push_goal(GoalType.UNIFY, head, rule_head, None)
+        return True
+
+    def load_file(self, filename: str) -> bool:
+        """Load a LIFE source file."""
+        from wild_life.tokenizer import tokenizer_from_file
+        from wild_life.parser_ import Parser
+        try:
+            ts = tokenizer_from_file(filename)
+        except FileNotFoundError:
+            print(f"*** Error: cannot open file '{filename}'.", file=sys.stderr)
+            return False
+
+        p = Parser(ts)
+        while True:
+            try:
+                term, sort = p.parse()
+            except Exception as e:
+                print(f"*** Syntax error in '{filename}': {e}", file=sys.stderr)
+                break
+
+            if term is None:
+                break
+            t = term.deref()
+            wl = self.wl
+            if t.type == wl.eof:
+                break
+            if sort == FACT:
+                self.assert_first = False
+                self.assert_clause(t)
+            elif sort == QUERY:
+                # Execute query; push as goal
+                self.push_goal(GoalType.PROVE, t, _DEFRULES, None)
+                self.run()
+        return True
+
+    # ─── main loop ──────────────────────────────────────────────────────────
+
+    def run(self) -> bool:
+        """
+        Run the main prove loop (main_prove in login.c).
+        Returns True if the goal_stack was satisfied (at least once).
+        """
+        success = True
+        self.main_loop_ok = True
+        self.goal_count = 0
+
+        while self.main_loop_ok and self.goal_stack:
+            self.aim = self.goal_stack
+
+            try:
+                gtype = self.aim.type
+
+                if gtype == GoalType.PROVE:
+                    success = self.prove_aim()
+
+                elif gtype == GoalType.UNIFY:
+                    self.goal_stack = self.aim.next
+                    self.goal_count += 1
+                    success = self.unify_aim()
+
+                elif gtype == GoalType.UNIFY_NOEVAL:
+                    self.goal_stack = self.aim.next
+                    self.goal_count += 1
+                    success = self.unify_aim()
+
+                elif gtype == GoalType.EVAL:
+                    self.goal_stack = self.aim.next
+                    self.goal_count += 1
+                    success = self.eval_aim()
+
+                elif gtype == GoalType.MATCH:
+                    self.goal_stack = self.aim.next
+                    self.goal_count += 1
+                    success = self.match_aim()
+
+                elif gtype == GoalType.FAIL:
+                    self.goal_stack = self.aim.next
+                    success = False
+
+                elif gtype == GoalType.CLAUSE:
+                    self.goal_stack = self.aim.next
+                    self.goal_count += 1
+                    success = self.clause_aim(False)
+
+                elif gtype == GoalType.DEL_CLAUSE:
+                    self.goal_stack = self.aim.next
+                    self.goal_count += 1
+                    success = self.clause_aim(True)
+
+                elif gtype == GoalType.RETRACT:
+                    self.goal_stack = self.aim.next
+                    self.goal_count += 1
+                    rules = self.aim.a
+                    if rules and isinstance(rules, list) and rules:
+                        rules[0] = (None, None)
+
+                elif gtype == GoalType.WHAT_NEXT:
+                    self.goal_stack = self.aim.next
+                    success = self._what_next_aim()
+
+                elif gtype == GoalType.GENERAL_CUT:
+                    self.goal_stack = self.aim.next
+                    self.goal_count += 1
+                    self.cut_to(self.aim.a)
+
+                else:
+                    print(f"*** Error: unknown goal type {gtype}", file=sys.stderr)
+                    self.goal_stack = self.aim.next
+                    success = False
+
+            except HaltException:
+                raise
+            except AbortException:
+                self.trail.undo_to(0)
+                self.goal_stack = None
+                self.choice_stack = None
+                return False
+            except CutException as e:
+                self.cut_to(e.cut_point)
+                success = True
+
+            if self.main_loop_ok:
+                if not success:
+                    if self.choice_stack:
+                        self.backtrack()
+                        success = True
+                    else:
+                        self.trail.undo_to(0)
+                        if self.noisy:
+                            print("\n*** No", end='', flush=True)
+                        self.main_loop_ok = False
+
+        return success
+
+    def prove(self, goal: PsiTerm) -> bool:
+        """Prove a single goal. Returns True on success."""
+        self.push_goal(GoalType.PROVE, goal, _DEFRULES, None)
+        return self.run()
+
+    def _what_next_aim(self) -> bool:
+        """Handle user interaction at a query result."""
+        aim = self.aim
+        level = aim.c if isinstance(aim.c, int) else 0
+        has_answer = bool(aim.a)
+        wl = self.wl
+
+        from wild_life.print_term import print_variables
+        vt = getattr(wl, '_var_tree', {})
+
+        if has_answer:
+            print("\n*** Yes", end='', flush=True)
+        else:
+            print("\n*** No", end='', flush=True)
+
+        if has_answer or level > 0:
+            print_variables(vt, sys.stdout, wl=wl)
+
+        prompt = '--' * min(level, 4) + '?- '
+        print(prompt, end='', flush=True)
+
+        try:
+            line = sys.stdin.readline()
+        except (EOFError, KeyboardInterrupt):
+            self.trail.undo_to(0)
+            self.goal_stack = None
+            self.choice_stack = None
+            return True
+
+        line = line.rstrip('\n')
+        if line == '' or line == '\n':
+            # Accept (cut remaining choices)
+            while self.choice_stack:
+                self.choice_stack = self.choice_stack.next
+            return True
+
+        if line.startswith(';'):
+            # Request more solutions
+            if self.choice_stack:
+                self.backtrack()
+                return True
+            else:
+                print("*** No more solutions.", flush=True)
+                return True
+
+        if line.startswith('.'):
+            self.trail.undo_to(0)
+            self.goal_stack = None
+            self.choice_stack = None
+            return True
+
+        # Otherwise treat as a new query
+        from wild_life.parser_ import parse_string
+        from wild_life.tokenizer import tokenizer_from_string
+        from wild_life.parser_ import Parser
+        ts = tokenizer_from_string(line)
+        p = Parser(ts)
+        try:
+            t, sort = p.parse()
+        except Exception:
+            return True
+
+        if t and sort == QUERY:
+            if level > 0:
+                self.push_choice_point(GoalType.WHAT_NEXT, False, None, level)
+            self.push_goal(GoalType.WHAT_NEXT, True, self.var_occurred, level + 1)
+            self.push_goal(GoalType.PROVE, t, _DEFRULES, None)
+            return True
+
+        return True
+
+    @property
+    def var_occurred(self) -> bool:
+        return self._var_occurred
+
+    @var_occurred.setter
+    def var_occurred(self, v: bool) -> None:
+        self._var_occurred = v
+
+    _var_occurred: bool = False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sentinel: "use the type's own rule list"
+# ─────────────────────────────────────────────────────────────────────────────
+_DEFRULES = object()  # sentinel — same role as DEFRULES macro in C
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper: collect all clauses for a predicate (for clause/2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_rules_for(defn: Definition):
+    """Return the list of (head, body) pairs for defn, or []."""
+    if defn is None or defn.rule is None:
+        return []
+    if callable(defn.rule):
+        return []  # built-in
+    return list(defn.rule)
