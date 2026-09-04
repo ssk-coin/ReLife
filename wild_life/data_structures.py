@@ -265,10 +265,14 @@ class PsiTerm:
         return t
 
     def is_variable(self) -> bool:
-        """未束縛変数かどうか"""
+        """未束縛変数かどうか。
+        変数は make_var() で type=WL.top、属性なし、resid なし、coref なしとして作られる。
+        WL.variable (シンボル 'variable') は別物なので間違えないこと。
+        """
         from wild_life.runtime import WL  # 遅延import (循環参照回避)
         t = self.deref()
-        return t.type is WL.variable and t.coref is None
+        return (t.type is WL.top and not t.attr_list
+                and not t.resid and t.coref is None)
 
     def is_constant(self) -> bool:
         """定数かどうか (値を持つが属性を持たない)

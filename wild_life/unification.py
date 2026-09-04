@@ -88,85 +88,89 @@ class Trail:
         return len(self._trail)
 
 
-# ==================== 型の LUB (最小上限) 計算 ====================
+# ==================== 型の GLB (最大下限) 計算 ====================
 
 def compute_lub(d1: Definition, d2: Definition) -> Optional[Definition]:
-    """2つの型の最小上限 (LUB: Least Upper Bound) を計算する
-    C版の compute_lub() に対応 (login.c)
+    """後方互換のため残す — compute_glb() を使うこと。"""
+    return compute_glb(d1, d2)
 
-    型階層において d1 と d2 の両方がサブタイプとなる
-    最も特殊な共通スーパータイプを探す。
 
-    d1 と d2 が同じなら d1 を返す。
-    d1 が d2 のサブタイプなら d1 を返す (より特殊)。
+def compute_glb(d1: Definition, d2: Definition) -> Optional[Definition]:
+    """2つの型の最大下限 (GLB: Greatest Lower Bound) を計算する。
+
+    LIFE の型単一化では「最も特殊な共通サブタイプ」が必要。
+    型階層を *下向き* に BFS して d1 と d2 の両方のサブタイプを探す。
+
+    d1 が d2 のサブタイプなら d1 を返す (d1 の方が特殊)。
     d2 が d1 のサブタイプなら d2 を返す。
-    共通スーパータイプがなければ None を返す。
+    共通サブタイプがなければ None を返す (型が非互換)。
+
+    注: 元の C 版の compute_lub() は実際には GLB を計算していた
+    (型単一化は GLB = infimum が必要)。
     """
     if d1 is d2:
         return d1
 
-    # d1 が d2 のサブタイプか?
-    if d1.is_subtype_of(d2):
-        return d2  # d2 の方が一般的 -> d2 を LUB とする
-
-    # d2 が d1 のサブタイプか?
-    if d2.is_subtype_of(d1):
-        return d1  # d1 の方が一般的 -> d1 を LUB とする
-
-    # top は全ての型のスーパータイプ
+    # top (@) との組み合わせ: top は全ての型のスーパータイプ
     if d1 is WL.top:
-        return d2
+        return d2   # d2 の方が特殊 (または同じ)
     if d2 is WL.top:
         return d1
 
-    # 共通スーパータイプを探す (BFS)
-    # d1 の全スーパータイプを収集
-    d1_supers = set()
-    queue = list(d1.parents)
+    # 一方が他方のサブタイプならそちらを返す (より特殊)
+    if d1.is_subtype_of(d2):
+        return d1
+    if d2.is_subtype_of(d1):
+        return d2
+
+    # d1 の全サブタイプを収集 (children 方向に BFS)
+    d1_subs: set = set()
+    queue = list(d1.children)
     while queue:
         d = queue.pop(0)
-        d1_supers.add(d)
-        queue.extend(p for p in d.parents if p not in d1_supers)
+        if d not in d1_subs:
+            d1_subs.add(d)
+            queue.extend(d.children)
 
-    # d2 の全スーパータイプの中で d1_supers に含まれる最も特殊なものを探す
-    d2_supers = []
-    queue = list(d2.parents)
-    visited = set()
+    # d2 の全サブタイプの中で d1_subs に入っているものを探す
+    common = []
+    queue = list(d2.children)
+    visited: set = set()
     while queue:
         d = queue.pop(0)
         if d not in visited:
             visited.add(d)
-            if d in d1_supers:
-                d2_supers.append(d)
-            queue.extend(d.parents)
+            if d in d1_subs:
+                common.append(d)
+            queue.extend(d.children)
 
-    if not d2_supers:
-        # 共通スーパータイプがない
-        return None
+    if not common:
+        return None  # 共通サブタイプなし → 非互換
 
-    # 最も特殊な共通スーパータイプを選ぶ
-    # (他のどれもそのサブタイプでないもの)
-    most_specific = d2_supers[0]
-    for d in d2_supers[1:]:
+    # 最も特殊な共通サブタイプを選ぶ
+    # (他のどの common メンバーのサブタイプでもないもの)
+    most_specific = common[0]
+    for d in common[1:]:
         if d.is_subtype_of(most_specific):
             most_specific = d
-
     return most_specific
 
 
 def types_compatible(d1: Definition, d2: Definition) -> bool:
-    """2つの型が単一化可能かどうか判定
-    共通のサブタイプが存在するかどうか
+    """2つの型が単一化可能かどうか判定。
+
+    共通サブタイプ (GLB) が存在するとき True。
+    integer と real のような直交した基本型は False になる。
     """
     if d1 is d2:
         return True
     if d1 is WL.top or d2 is WL.top:
         return True
-    # d1 か d2 が一方のサブタイプなら compatible
+    # 一方が他方のサブタイプなら互換
     if d1.is_subtype_of(d2) or d2.is_subtype_of(d1):
         return True
-    # より厳密な判定はLUBを計算
-    return compute_lub(d1, d2) is not None
+    # ユーザー定義の共通サブタイプがあれば互換
+    return compute_glb(d1, d2) is not None
 
 
 # ==================== 単一化エンジン ====================
@@ -251,10 +255,12 @@ class Unifier:
         return True
 
     def _unify_types(self, u: PsiTerm, v: PsiTerm) -> bool:
-        """型を単一化する
-        C版の global_unify() の型処理部分に対応
+        """型を単一化する (GLB = infimum を採用)。
+        C版の global_unify() の型処理部分に対応。
 
-        LUB を計算して、両方の型をより特殊な型に更新する。
+        LIFE の型単一化は GLB (Greatest Lower Bound / 最大下限) を使う。
+        2つの型 du, dv を単一化した結果は「より特殊な型 (サブタイプ)」。
+        共通サブタイプがなければ単一化失敗。
         """
         du = u.type
         dv = v.type
@@ -262,36 +268,31 @@ class Unifier:
         if du is dv:
             return True  # 同じ型
 
+        # 一方が top (@) → もう一方の型に制約
         if du is WL.top:
-            # u の型を v の型に設定
             self.bind_type(u, dv)
             return True
-
         if dv is WL.top:
-            # v の型を u の型に設定
             self.bind_type(v, du)
             return True
 
-        # LUB を計算
-        # LIFE では LUB は "最も特殊な共通スーパータイプ" だが、
-        # 実際の単一化では "最も特殊な共通サブタイプ" が必要
-        # (型階層を下に向かって統合)
-
-        # d1 が d2 のサブタイプ -> d1 を使う (より特殊)
+        # サブタイプ関係: より特殊な型 (GLB) を採用
         if du.is_subtype_of(dv):
-            self.bind_type(v, du)
+            self.bind_type(v, du)   # v の型を du (より特殊) に引き上げ
             return True
         if dv.is_subtype_of(du):
-            self.bind_type(u, dv)
+            self.bind_type(u, dv)   # u の型を dv (より特殊) に引き上げ
             return True
 
-        # 型が互換性を持つかチェック
-        # (組み込み型は基本的に互換性がない)
-        if not types_compatible(du, dv):
-            return False
+        # 直交した型 (どちらもサブタイプでない) → 互換性チェック
+        # ユーザー定義の共通サブタイプがあれば GLB が存在する
+        glb = compute_glb(du, dv)
+        if glb is None:
+            return False            # 共通サブタイプなし → 型が非互換
 
-        # 共通サブタイプを探す
-        # 注: 実際の実装ではユーザー定義型の階層を使う
+        # 共通サブタイプが見つかった → 両方の型を GLB に制約
+        self.bind_type(u, glb)
+        self.bind_type(v, glb)
         return True
 
     def _unify_values(self, u: PsiTerm, v: PsiTerm) -> bool:
