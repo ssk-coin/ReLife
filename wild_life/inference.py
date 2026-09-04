@@ -108,10 +108,13 @@ class Engine:
                   file=sys.stderr)
             return False
 
-        # Copy head & body to heap-permanent storage
-        head_copy = copy_term(head)
+        # Copy head & body to heap-permanent storage.
+        # Shared var_map ensures the same original variable maps to the
+        # same fresh copy in both head and body.
+        shared_map: dict = {}
+        head_copy = copy_term(head, shared_map)
         if body is not None:
-            body_copy = copy_term(body)
+            body_copy = copy_term(body, shared_map)
         else:
             # Facts: body = succeed
             body_copy = wl.make_atom('succeed', wl.bi_module)
@@ -293,8 +296,9 @@ class Engine:
         if len(active) > 1:
             self.push_choice_point(GoalType.PROVE, thegoal, active[1:], None)
 
-        head = copy_term(head_orig)
-        body = copy_term(body_orig)
+        _vm: dict = {}
+        head = copy_term(head_orig, _vm)
+        body = copy_term(body_orig, _vm)
 
         # Unify head with goal
         if body.type != wl.succeed:
@@ -368,8 +372,9 @@ class Engine:
         if len(active) > 1:
             self.push_choice_point(GoalType.EVAL, funct, result, active[1:])
 
-        head = copy_term(head_orig)
-        body = copy_term(body_orig)
+        _vm: dict = {}
+        head = copy_term(head_orig, _vm)
+        body = copy_term(body_orig, _vm)
 
         self.push_goal(GoalType.UNIFY, body, result, None)
         mark = self.trail.mark()
@@ -447,8 +452,9 @@ class Engine:
         if retract:
             self.push_goal(GoalType.RETRACT, rules, None, None)
 
-        rule_head = copy_term(h0)
-        rule_body = copy_term(b0)
+        _vm: dict = {}
+        rule_head = copy_term(h0, _vm)
+        rule_body = copy_term(b0, _vm)
         self.push_goal(GoalType.UNIFY, body, rule_body, None)
         self.push_goal(GoalType.UNIFY, head, rule_head, None)
         return True
