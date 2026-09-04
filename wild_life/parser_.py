@@ -644,14 +644,17 @@ class Parser:
 
 # ==================== 文字列からパース ====================
 
-def parse_string(s: str) -> Tuple[Optional[PsiTerm], int]:
+def parse_string(s: str) -> Tuple[Optional[PsiTerm], int, dict]:
     """文字列を LIFE 項としてパースする
 
     Args:
         s: パースする文字列 (例: "f(X,Y)?")
 
     Returns:
-        (parsed_term, kind) or (None, ERROR) on failure
+        (parsed_term, kind, var_tree)
+          parsed_term : パース結果の PsiTerm (失敗時 None)
+          kind        : FACT / QUERY / ERROR
+          var_tree    : {変数名: PsiTerm} — クエリ中の名前付き変数マップ
     """
     if not WL._initialized:
         init()
@@ -661,9 +664,10 @@ def parse_string(s: str) -> Tuple[Optional[PsiTerm], int]:
     ts = tokenizer_from_string(s)
     p = Parser(ts)
     term, kind = p.parse()
+    var_tree = dict(ts.var_tree)   # パース後に変数マップを保存
     if not p.parse_ok:
-        return None, ERROR
-    return term, kind
+        return None, ERROR, {}
+    return term, kind, var_tree
 
 
 def parse_term_string(s: str) -> Optional[PsiTerm]:

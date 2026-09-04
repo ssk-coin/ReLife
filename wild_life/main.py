@@ -133,7 +133,7 @@ def run_repl(
             # ---- Parse the input -------------------------------------------
             try:
                 from wild_life.parser_ import parse_string
-                term, sort = parse_string(line)
+                term, sort, var_tree = parse_string(line)
             except Exception as exc:
                 print(f"Parse error: {exc}", file=sys.stderr)
                 continue
@@ -154,6 +154,8 @@ def run_repl(
 
             if sort == QUERY:
                 # It's a query: ?- Goal
+                # Store named variable map so _print_bindings can use it
+                engine._last_var_tree = var_tree
                 engine.var_occurred = _has_variables(term)
                 try:
                     success = engine.prove(term)
@@ -220,8 +222,12 @@ def run_repl(
 # ---------------------------------------------------------------------------
 
 def _has_variables(term) -> bool:
-    """Return True if the psi-term contains any unbound variables."""
-    from wild_life.data_structures import PsiTerm
+    """Return True if the psi-term contains any unbound variables.
+
+    Variables in Wild Life are PsiTerms with type=WL.top, no value,
+    no attrs, and no coref (unbound).
+    """
+    from wild_life.runtime import WL
     seen = set()
 
     def _walk(t):
@@ -234,7 +240,12 @@ def _has_variables(term) -> bool:
         # Dereference coref chain
         while t.coref is not None:
             t = t.coref
-        if t.type is None and t.value is None and not t.attr_list:
+            tid2 = id(t)
+            if tid2 in seen:
+                return False
+            seen.add(tid2)
+        # Variables have type=WL.top, no value, no attrs, no resid
+        if t.type is WL.top and t.value is None and not t.attr_list and not t.resid:
             return True  # unbound variable
         for v in t.attr_list.values():
             if _walk(v):
