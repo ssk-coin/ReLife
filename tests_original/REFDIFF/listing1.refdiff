@@ -1,0 +1,12 @@
+113d112
+< map(_A,[_B|_C]) -> [apply(_B,functor => _A)|map(_A,_C)].
+114a114
+> map(_A,[_B|_C]) -> [apply(_B,functor => _A)|map(_A,_C)].
+123d122
+< append([_A|_B],_C: list) -> [_A|append(_B,_C)].
+124a124
+> append([_A|_B],_C: list) -> [_A|append(_B,_C)].
+126d125
+< length([@|_A]) -> 1 + length(_A).
+127a127
+> length([@|_A]) -> 1 + length(_A).

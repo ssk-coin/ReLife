@@ -1,0 +1,125 @@
+281,332d280
+<  No manual entry for bitvector
+<  No manual entry for regexp
+<  No manual entry for stream
+<  No manual entry for file_stream
+<  No manual entry for socket_stream
+<  No manual entry for process_no_children
+<  No manual entry for process_exited
+<  No manual entry for process_signaled
+<  No manual entry for process_stopped
+<  No manual entry for process_continued
+<  No manual entry for make_bitvector
+<  No manual entry for bitvector_and
+<  No manual entry for bitvector_or
+<  No manual entry for bitvector_xor
+<  No manual entry for bitvector_not
+<  No manual entry for bitvector_count
+<  No manual entry for bitvector_get
+<  No manual entry for bitvector_set
+<  No manual entry for bitvector_clear
+<  No manual entry for regexp_compile
+<  No manual entry for regexp_execute
+<  No manual entry for int2stream
+<  No manual entry for fopen
+<  No manual entry for fclose
+<  No manual entry for get_buffer
+<  No manual entry for get_record
+<  No manual entry for get_code
+<  No manual entry for ftell
+<  No manual entry for fseek
+<  No manual entry for socket
+<  No manual entry for bind
+<  No manual entry for connect
+<  No manual entry for fwrite
+<  No manual entry for fflush
+<  No manual entry for listen
+<  No manual entry for accept
+<  No manual entry for errno
+<  No manual entry for errmsg
+<  No manual entry for import_symbol
+<  No manual entry for fork
+<  No manual entry for wait
+<  No manual entry for waitpid
+<  No manual entry for kill
+<  No manual entry for cuserid
+<  No manual entry for gethostname
+<  No manual entry for lazy_project
+<  No manual entry for wait_on_feature
+<  No manual entry for my_wait_on_feature
+<  No manual entry for apply1
+<  No manual entry for getpid
+<  No manual entry for stream2sys_stream
+<  No manual entry for sys_stream2stream
+389,393d336
+<  No manual entry for stdin
+<  No manual entry for stdout
+<  No manual entry for stderr
+<  No manual entry for ftruncate
+<  No manual entry for psi2string
+794,795c737,738
+<           Rest1 is Set1  Inter.
+<           Rest2 is Set2  Inter.
+---
+>           Rest1 is Set1 \ Inter.
+>           Rest2 is Set2 \ Inter.
+928,929c871,872
+<           Rest1 is Set1  Inter.
+<           Rest2 is Set2  Inter.
+---
+>           Rest1 is Set1 \ Inter.
+>           Rest2 is Set2 \ Inter.
+1063,1064c1006,1007
+<           Rest1 is Set1  Inter.
+<           Rest2 is Set2  Inter.
+---
+>           Rest1 is Set1 \ Inter.
+>           Rest2 is Set2 \ Inter.
+1115c1058
+<   +>=,+=<,+>,+<,+><,==,+>=,+=<,+>,+<,+><,==
+---
+>   +>=,+=<,+>,+<,+><,==,+\>=,+\=<,+\>,+\<,+\><,\==
+1137c1080
+<   +>=,+=<,+>,+<,+><,==,+>=,+=<,+>,+<,+><,==
+---
+>   +>=,+=<,+>,+<,+><,==,+\>=,+\=<,+\>,+\<,+\><,\==
+1159c1102
+<   +>=,+=<,+>,+<,+><,==,+>=,+=<,+>,+<,+><,==
+---
+>   +>=,+=<,+>,+<,+><,==,+\>=,+\=<,+\>,+\<,+\><,\==
+1181c1124
+<   +>=,+=<,+>,+<,+><,==,+>=,+=<,+>,+<,+><,==
+---
+>   +>=,+=<,+>,+<,+><,==,+\>=,+\=<,+\>,+\<,+\><,\==
+1203c1146
+<   +>=,+=<,+>,+<,+><,==,+>=,+=<,+>,+<,+><,==
+---
+>   +>=,+=<,+>,+<,+><,==,+\>=,+\=<,+\>,+\<,+\><,\==
+1225c1168
+<   +>=,+=<,+>,+<,+><,==,+>=,+=<,+>,+<,+><,==
+---
+>   +>=,+=<,+>,+<,+><,==,+\>=,+\=<,+\>,+\<,+\><,\==
+1247c1190
+<   +>=,+=<,+>,+<,+><,==,+>=,+=<,+>,+<,+><,==
+---
+>   +>=,+=<,+>,+<,+><,==,+\>=,+\=<,+\>,+\<,+\><,\==
+1269c1212
+<   +>=,+=<,+>,+<,+><,==,+>=,+=<,+>,+<,+><,==
+---
+>   +>=,+=<,+>,+<,+><,==,+\>=,+\=<,+\>,+\<,+\><,\==
+1291c1234
+<   +>=,+=<,+>,+<,+><,==,+>=,+=<,+>,+<,+><,==
+---
+>   +>=,+=<,+>,+<,+><,==,+\>=,+\=<,+\>,+\<,+\><,\==
+1313c1256
+<   +>=,+=<,+>,+<,+><,==,+>=,+=<,+>,+<,+><,==
+---
+>   +>=,+=<,+>,+<,+><,==,+\>=,+\=<,+\>,+\<,+\><,\==
+1335c1278
+<   +>=,+=<,+>,+<,+><,==,+>=,+=<,+>,+<,+><,==
+---
+>   +>=,+=<,+>,+<,+><,==,+\>=,+\=<,+\>,+\<,+\><,\==
+1357c1300
+<   +>=,+=<,+>,+<,+><,==,+>=,+=<,+>,+<,+><,==
+---
+>   +>=,+=<,+>,+<,+><,==,+\>=,+\=<,+\>,+\<,+\><,\==
