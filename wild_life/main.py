@@ -62,7 +62,11 @@ def run_repl(
     from wild_life.data_structures import GoalType
     from wild_life.unification import HaltException, AbortException
 
-    # ---- Initialise runtime and register built-ins -------------------------
+    # ---- Initialise runtime (modules, types, operators) --------------------
+    if not WL._initialized:
+        WL.initialize()
+
+    # ---- Register built-ins ------------------------------------------------
     register_all(WL)
 
     # ---- Create the inference engine ---------------------------------------

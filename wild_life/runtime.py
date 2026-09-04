@@ -170,8 +170,8 @@ class WildLifeRuntime:
         # 組み込み演算子の定義
         self._init_operators()
 
-        # 組み込み述語・関数の定義
-        self._init_built_ins()
+        # 注意: 組み込み述語・関数の登録は built_ins.register_all(wl) で行う。
+        # main.py から WL.initialize() の後で呼ぶ。
 
     # ==================== モジュール初期化 ====================
 
@@ -794,6 +794,37 @@ class WildLifeRuntime:
         C版の get_one_arg() に対応
         """
         return attr_list.get("1")
+
+    # ==================== 外部から組み込みを登録するAPI ====================
+
+    def new_built_in(self, name: str, func: Callable,
+                     def_type: "DefType" = None,
+                     module: "Module" = None) -> "Definition":
+        """組み込み述語/関数を登録する公開API
+
+        built_ins.py の register_all() から呼ばれる。
+        module を省略すると bi_module を使用する。
+        def_type を省略すると PREDICATE を使用する。
+        """
+        if def_type is None:
+            def_type = DefType.PREDICATE
+        if module is None:
+            module = self.bi_module
+        defn = self.update_symbol(module, name)
+        defn.type = def_type
+        defn._builtin_func = func
+        defn.evaluate_args = True
+        self.builtin_table[defn] = func
+        return defn
+
+    def add_operator(self, prec: int, op_type: "OperatorType",
+                     name: str, module: "Module" = None) -> None:
+        """演算子を動的に追加する公開API (bi_op から呼ばれる)"""
+        if module is None:
+            module = self.syntax_module
+        defn = self.update_symbol(module, name)
+        op = OperatorData(op_type, prec)
+        defn.op_data = op
 
 
 # ==================== グローバルシングルトン ====================
