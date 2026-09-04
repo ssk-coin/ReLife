@@ -187,7 +187,9 @@ class Engine:
         defn = thegoal.type
 
         # ── AND (conjunction) ──
-        if defn == wl.and_sym:
+        # commasym (',') is the standard Prolog-style conjunction;
+        # and_sym ('&') is the functional-pair form — both split into two goals.
+        if defn == wl.and_sym or defn == wl.commasym:
             self.goal_stack = aim.next
             self.goal_count += 1
             arg1 = thegoal.attr_list.get('1')
