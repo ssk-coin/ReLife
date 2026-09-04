@@ -149,7 +149,13 @@ def run_repl(
             from wild_life.data_structures import QUERY, FACT, ERROR
 
             if sort == ERROR:
-                # Parse error was already reported
+                # Report the parse error so the user knows the input was rejected.
+                # (Previously this was silently skipped, e.g. 'father(ken,tom),'
+                # with a trailing comma would appear to succeed but ken would
+                # never be asserted, leading to mysterious "No" on backtracking.)
+                print(f"*** Syntax error: {line!r}", file=sys.stderr)
+                print("    (Hint: facts end with '.' and queries end with '?')",
+                      file=sys.stderr)
                 continue
 
             if sort == QUERY:
