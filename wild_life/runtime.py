@@ -178,11 +178,21 @@ class WildLifeRuntime:
     def _init_modules(self):
         """モジュールシステムの初期化
         C版の init_modules() に対応 (modules.c)
+
+        C版では全モジュールの定義が一つのグローバルシンボルテーブルで管理され
+        ていたが、Python版ではモジュールごとに symbol_table を持つ。
+        open_modules に syntax / bi を加えることで、
+        update_symbol(None, name) がそれらのシンボルを参照できるようにする。
         """
         self.user_module = self._create_module("user")
         self.bi_module = self._create_module("bi")
         self.syntax_module = self._create_module("syntax")
         self.current_module = self.user_module
+
+        # user_module は bi / syntax を "open" する（演算子・組み込みを参照可能に）
+        self.user_module.open_modules = [self.bi_module, self.syntax_module]
+        # bi_module も syntax を参照できるようにする
+        self.bi_module.open_modules = [self.syntax_module]
 
     def _create_module(self, name: str) -> Module:
         """新しいモジュールを作成して登録"""
@@ -431,8 +441,10 @@ class WildLifeRuntime:
         self.nullsym = self.update_symbol(bi, "null")
         self.boolpredsym = self.update_symbol(bi, "bool_pred")
 
-        self.final_dot = self.update_symbol(syn, ".")
-        self.final_question = self.update_symbol(syn, "?")
+        # 終端トークン用の専用 Definition（演算子 '.' や '?' とは別オブジェクト）
+        # C版では tokenizer が EOF/空白の後の . / ? を special token として区別する
+        self.final_dot = self._new_type(bi, "__END_DOT__")
+        self.final_question = self._new_type(bi, "__END_QUERY__")
 
         self.functor = self.update_symbol(bi, "functor")
         self.apply = self.update_symbol(bi, "apply")
@@ -823,7 +835,8 @@ class WildLifeRuntime:
         if module is None:
             module = self.syntax_module
         defn = self.update_symbol(module, name)
-        op = OperatorData(op_type, prec)
+        # 既存のチェーンを先頭に繋ぐ（同名シンボルに複数の演算子種別が許される）
+        op = OperatorData(op_type, prec, defn.op_data)
         defn.op_data = op
 
 

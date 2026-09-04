@@ -218,6 +218,10 @@ class Parser:
 
             if op1 == OperatorType.NOP:
                 # スタックトップが項 -> 前の演算子を取り出す
+                if len(self.stack) <= limit:
+                    # 直前に演算子がない（項単独）→ 押し戻して終了
+                    self.stack.append(e1)
+                    break
                 e2 = self.pop()
                 t2 = e2.term
                 op2 = e2.op

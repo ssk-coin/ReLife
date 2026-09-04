@@ -24,7 +24,7 @@ import sys
 import math
 import os
 
-from wild_life.data_structures import PsiTerm, Definition, Module
+from wild_life.data_structures import PsiTerm, Definition, Module, DefType
 from wild_life.runtime import WL, init
 
 
@@ -410,7 +410,7 @@ class TokenizerState:
             tok.value = None
 
             # グローバル変数の場合
-            if tok.type.type == 'global':
+            if tok.type.type == DefType.GLOBAL:
                 self.var_occurred = True
 
     def read_token_main(self, for_parser: bool = True) -> PsiTerm:

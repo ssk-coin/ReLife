@@ -440,7 +440,7 @@ def bi_atom(goal: PsiTerm, eng) -> bool:
     if arg is None:
         return False
     wl = eng.wl
-    if _is_var(arg, wl):
+    if _is_var(arg, eng):
         return False
     if arg.value is not None:
         if arg.type and (arg.type.is_subtype_of(wl.real) or

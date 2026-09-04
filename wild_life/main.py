@@ -127,12 +127,8 @@ def run_repl(
                 # blank line or comment — skip
                 continue
 
-            # Remove trailing '.' if present (LIFE convention)
-            if line.endswith("."):
-                line = line[:-1].rstrip()
-
-            if not line:
-                continue
+            # NOTE: '.'' はパーサが FACT の終端として必要なので削除しない。
+            # '?' はクエリの終端。どちらも parse_string に渡す。
 
             # ---- Parse the input -------------------------------------------
             try:
