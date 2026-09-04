@@ -159,16 +159,60 @@ def run_repl(
                 engine.var_occurred = _has_variables(term)
                 try:
                     success = engine.prove(term)
-                    if success:
+                    # ---- Multiple-solution loop --------------------------------
+                    # After the first solution, the user may type ';' to ask for
+                    # the next solution (backtracking).  We keep looping until:
+                    #   - the user accepts (blank / non-';' line, or EOF), or
+                    #   - there are no more choice points, or
+                    #   - the proof fails.
+                    depth = 0
+                    while True:
+                        if not success:
+                            if not quiet:
+                                print("No")
+                            # Clean up any leftover state
+                            engine.trail.undo_to(0)
+                            engine.goal_stack = None
+                            engine.choice_stack = None
+                            break
+
+                        # Print current solution
                         if engine.var_occurred:
-                            # Print variable bindings
                             _print_bindings(engine, term, quiet)
                         else:
                             if not quiet:
                                 print("Yes")
-                    else:
+
+                        # No more alternatives → done
+                        if not engine.choice_stack:
+                            break
+
+                        # Ask the user whether to backtrack
+                        depth += 1
+                        prompt = "-" * (depth * 2) + "?- "
                         if not quiet:
-                            print("No")
+                            print(prompt, end="", flush=True)
+                        try:
+                            resp = input()
+                        except EOFError:
+                            # End of input → accept current solution
+                            engine.trail.undo_to(0)
+                            engine.goal_stack = None
+                            engine.choice_stack = None
+                            break
+
+                        resp = resp.strip()
+                        if resp == ";":
+                            # Backtrack and find next solution
+                            engine.backtrack()
+                            success = engine.run()
+                        else:
+                            # Blank line, '.', or anything else → accept
+                            engine.trail.undo_to(0)
+                            engine.goal_stack = None
+                            engine.choice_stack = None
+                            break
+
                 except HaltException:
                     return 0
                 except AbortException:
@@ -177,6 +221,9 @@ def run_repl(
                 except KeyboardInterrupt:
                     if not quiet:
                         print("\nInterrupted.")
+                    engine.trail.undo_to(0)
+                    engine.goal_stack = None
+                    engine.choice_stack = None
                 except Exception as exc:
                     print(f"Error: {exc}", file=sys.stderr)
                     if engine.verbose:
