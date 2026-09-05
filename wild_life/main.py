@@ -208,8 +208,13 @@ def run_repl(
 
             line_stripped = line.strip()
 
-            # ---- Blank line or comment ------------------------------------
-            if not line_stripped or line_stripped.startswith('%'):
+            # ---- Comment line (%) — ignore, just show prompt ----------------
+            if line_stripped.startswith('%'):
+                _write_prompt(depth)
+                continue
+
+            # ---- Blank line --------------------------------------------------
+            if not line_stripped:
                 if depth == 0:
                     # At top level, blank just re-shows the prompt
                     _write_prompt(0)

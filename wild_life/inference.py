@@ -208,9 +208,11 @@ class Engine:
             return False
 
         if defn._builtin_func is not None:
-            print(f"*** Error: built-in '{defn.keyword.symbol}' may not be redefined.",
-                  file=sys.stderr)
-            return False
+            # Allow user rules to shadow builtins — clear the builtin function
+            # so user-defined rules take over (Wild Life original behavior).
+            defn._builtin_func = None
+            if defn.rule is None:
+                defn.rule = []
 
         # Expand disjunctions in the head before copying.
         # e.g. pick_arg({5;3;7}). → three facts: pick_arg(5). pick_arg(3). pick_arg(7).

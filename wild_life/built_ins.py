@@ -161,6 +161,102 @@ def _try_eval_arith_to_term(t: PsiTerm, eng) -> Optional[PsiTerm]:
     return _make_number(eng, v)
 
 
+def _term_to_display_string(t: PsiTerm, eng) -> str:
+    """Convert a psi-term to its display string (like write/1 would produce)."""
+    import io
+    from wild_life.print_term import write_term
+    buf = io.StringIO()
+    write_term(t, outfile=buf, wl=eng.wl, quoted=False)
+    return buf.getvalue()
+
+
+def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
+    """Try to evaluate string built-in functions (psi2str, str2psi, strcon).
+
+    Returns evaluated PsiTerm or None if not applicable.
+    """
+    if t is None:
+        return None
+    t = t.deref()
+    sym = _get_sym(t)
+
+    if sym == 'psi2str':
+        # psi2str(T) -> string representation of T
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return None
+        a1 = a1.deref()
+        s = _term_to_display_string(a1, eng)
+        return _make_string(eng, s)
+
+    elif sym == 'str2psi':
+        # str2psi(S) -> atom from string S
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return None
+        a1 = a1.deref()
+        if a1.type and a1.type is eng.wl.quoted_string and a1.value is not None:
+            name = str(a1.value)
+        elif a1.type and a1.type.keyword:
+            name = a1.type.keyword.symbol
+        else:
+            name = _term_to_display_string(a1, eng)
+        return _make_atom(eng, name)
+
+    elif sym == 'strcon':
+        # strcon(A, B) -> concatenation of strings A and B
+        a1 = t.attr_list.get('1')
+        a2 = t.attr_list.get('2')
+        if a1 is None or a2 is None:
+            return None
+        a1, a2 = a1.deref(), a2.deref()
+        # Recursively evaluate if needed
+        a1e = _try_eval_string_func(a1, eng)
+        if a1e is not None:
+            a1 = a1e
+        a2e = _try_eval_string_func(a2, eng)
+        if a2e is not None:
+            a2 = a2e
+        s1 = _term_to_display_string(a1, eng)
+        s2 = _term_to_display_string(a2, eng)
+        return _make_string(eng, s1 + s2)
+
+    elif sym == 'root_sort' or sym == 'sort':
+        # root_sort(T) -> atom naming the sort of T
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return None
+        a1 = a1.deref()
+        defn = a1.type
+        if defn is None or defn.keyword is None:
+            return None
+        return _make_atom(eng, defn.keyword.symbol)
+
+    elif sym == 'features':
+        # features(T) -> list of attribute labels
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return None
+        a1 = a1.deref()
+        keys = list(a1.attr_list.keys())
+        wl = eng.wl
+        lst = PsiTerm(type_def=wl.nil)
+        lst.type = wl.nil
+        for key in reversed(keys):
+            try:
+                n = int(key)
+                kterm = wl.make_integer(n)
+            except (ValueError, TypeError):
+                kterm = _make_atom(eng, key)
+            pair = PsiTerm()
+            pair.type = wl.alist
+            pair.attr_list = {'1': kterm, '2': lst}
+            lst = pair
+        return lst
+
+    return None
+
+
 def _unify(eng, a: PsiTerm, b: PsiTerm) -> bool:
     from wild_life.unification import Trail
     mark = eng.trail.mark()
@@ -196,6 +292,10 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
         t_eval = _try_eval_arith_to_term(t, eng)
         if t_eval is not None:
             t = t_eval
+        else:
+            t_str = _try_eval_string_func(t, eng)
+            if t_str is not None:
+                t = t_str
     except RecursionError:
         pass
     write_term(t, outfile=stream or sys.stdout, quoted=quoted, wl=eng.wl,
@@ -642,6 +742,14 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     b_arith = _try_eval_arith_to_term(b_d, eng)
     if b_arith is not None:
         b_d = b_arith
+    # Try string function evaluation on RHS (psi2str, str2psi, strcon)
+    b_str = _try_eval_string_func(b_d, eng)
+    if b_str is not None:
+        b_d = b_str
+    else:
+        a_str = _try_eval_string_func(a_d, eng)
+        if a_str is not None:
+            a_d = a_str
     return _unify(eng, a_d, b_d)
 
 
@@ -2066,3 +2174,156 @@ def register_all(wl) -> None:
             eng.push_goal(_GT.PROVE, arg2.deref(), None, None)
         return True
     _reg('delay_until', _bi_delay_until)
+
+    # ── LIFE string built-ins ─────────────────────────────────────────────────
+    def _bi_psi2str(goal, eng):
+        """psi2str(T, S): S = string representation of T."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None:
+            return False
+        a1 = a1.deref()
+        s = _term_to_display_string(a1, eng)
+        result = _make_string(eng, s)
+        if a2 is None:
+            # Unary form psi2str(T): print and return
+            return True
+        return _unify(eng, a2.deref(), result)
+    _reg('psi2str', _bi_psi2str)
+
+    def _bi_str2psi(goal, eng):
+        """str2psi(S, T): T = atom parsed from string S."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None:
+            return False
+        a1 = a1.deref()
+        if a1.type and a1.type is eng.wl.quoted_string and a1.value is not None:
+            name = str(a1.value)
+        elif a1.type and a1.type.keyword:
+            name = a1.type.keyword.symbol
+        else:
+            name = _term_to_display_string(a1, eng)
+        result = _make_atom(eng, name)
+        if a2 is None:
+            return True
+        return _unify(eng, a2.deref(), result)
+    _reg('str2psi', _bi_str2psi)
+
+    def _bi_strcon(goal, eng):
+        """strcon(A, B, C): C = A ++ B (string concatenation)."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        a3 = goal.attr_list.get('3')
+        if a1 is None or a2 is None:
+            return False
+        a1, a2 = a1.deref(), a2.deref()
+        # Evaluate nested string funcs
+        a1e = _try_eval_string_func(a1, eng)
+        if a1e is not None: a1 = a1e
+        a2e = _try_eval_string_func(a2, eng)
+        if a2e is not None: a2 = a2e
+        s1 = _term_to_display_string(a1, eng)
+        s2 = _term_to_display_string(a2, eng)
+        result = _make_string(eng, s1 + s2)
+        if a3 is None:
+            return True
+        return _unify(eng, a3.deref(), result)
+    _reg('strcon', _bi_strcon)
+
+    # ── LIFE type/sort built-ins ───────────────────────────────────────────────
+    def _bi_root_sort(goal, eng):
+        """root_sort(T): return the sort (functor name) of T."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None:
+            return False
+        t = a1.deref()
+        defn = t.type
+        if defn is None or defn.keyword is None:
+            return False
+        result = eng.wl.make_atom(defn.keyword.symbol, eng.wl.user_module)
+        if a2 is None:
+            # Functional form: return the sort as value (display it)
+            return True
+        return _unify(eng, a2.deref(), result)
+    _reg('root_sort', _bi_root_sort)
+
+    def _bi_features(goal, eng):
+        """features(T): return list of attribute labels of T."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None:
+            return False
+        t = a1.deref()
+        # Build list of attribute keys
+        keys = list(t.attr_list.keys())
+        # Build WL list from keys
+        wl = eng.wl
+        lst = wl.nil
+        for key in reversed(keys):
+            # Key may be numeric ("1","2") or named
+            try:
+                n = int(key)
+                kterm = wl.make_integer(n)
+            except (ValueError, TypeError):
+                kterm = wl.make_atom(key, wl.user_module)
+            pair = PsiTerm()
+            pair.type = wl.alist
+            pair.attr_list = {'1': kterm, '2': lst}
+            lst = pair
+        if a2 is None:
+            return True
+        return _unify(eng, a2.deref(), lst)
+    _reg('features', _bi_features)
+
+    def _bi_strip(goal, eng):
+        """strip(T): return T without sort constraints (just top-level copy)."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None:
+            return False
+        t = a1.deref()
+        # Return the term as-is (stripping sort annotation not implemented)
+        if a2 is None:
+            return True
+        return _unify(eng, a2.deref(), t)
+    _reg('strip', _bi_strip)
+
+    def _bi_sort_of(goal, eng):
+        """sort_of(T): synonym for root_sort."""
+        return _bi_root_sort(goal, eng)
+    _reg('sort', _bi_sort_of)
+
+    def _bi_is_sort(goal, eng):
+        """is_sort(T): succeed if T is a sort (type definition)."""
+        from wild_life.data_structures import DefType as _DT
+        a1 = _get_one_arg(goal)
+        if a1 is None:
+            return False
+        t = a1.deref()
+        defn = t.type
+        return defn is not None and defn.type == _DT.TYPE
+    _reg('is_sort', _bi_is_sort)
+
+    def _bi_is_function(goal, eng):
+        """is_function(T): succeed if T is a user-defined function."""
+        from wild_life.data_structures import DefType as _DT
+        a1 = _get_one_arg(goal)
+        if a1 is None:
+            return False
+        t = a1.deref()
+        defn = t.type
+        return defn is not None and defn.type == _DT.FUNCTION
+    _reg('is_function', _bi_is_function)
+
+    def _bi_is_predicate(goal, eng):
+        """is_predicate(T): succeed if T is a user-defined predicate."""
+        from wild_life.data_structures import DefType as _DT
+        a1 = _get_one_arg(goal)
+        if a1 is None:
+            return False
+        t = a1.deref()
+        defn = t.type
+        return defn is not None and defn.type == _DT.PREDICATE
+    _reg('is_predicate', _bi_is_predicate)
