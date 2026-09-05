@@ -2028,3 +2028,41 @@ def register_all(wl) -> None:
 
     # Alias / sort manipulation
     _reg('alias', bi_alias)
+
+    # ── LIFE meta-predicates (no-ops or minimal stubs) ─────────────────────
+    def _bi_non_strict(goal, eng):
+        """non_strict(P): mark P as non-strict (lazy). No-op in this impl."""
+        return True
+    _reg('non_strict', _bi_non_strict)
+
+    def _bi_delay_check(goal, eng):
+        """delay_check(P): register delay checking for P. No-op here."""
+        return True
+    _reg('delay_check', _bi_delay_check)
+
+    def _bi_dynamic(goal, eng):
+        """dynamic(P): declare P as dynamic. Ensure the predicate has an empty rule list."""
+        arg = _get_one_arg(goal)
+        if arg is None:
+            return True
+        arg = arg.deref()
+        # If the type has no rule, set it to an empty list so assert/retract work
+        if arg.type and arg.type.rule is None:
+            arg.type.rule = []
+        return True
+    _reg('dynamic', _bi_dynamic)
+
+    def _bi_persistent(goal, eng):
+        """persistent(P): declare P as persistent. No-op here."""
+        return True
+    _reg('persistent', _bi_persistent)
+
+    def _bi_delay_until(goal, eng):
+        """delay_until(Cond,Goal): simplified — just try to prove Goal immediately."""
+        from wild_life.data_structures import GoalType as _GT
+        arg1 = goal.attr_list.get('1')
+        arg2 = goal.attr_list.get('2')
+        if arg2:
+            eng.push_goal(_GT.PROVE, arg2.deref(), None, None)
+        return True
+    _reg('delay_until', _bi_delay_until)

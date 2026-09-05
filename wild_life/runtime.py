@@ -318,14 +318,15 @@ class WildLifeRuntime:
         self.constant.type = DefType.TYPE
         self._make_type_link(self.constant, self.top)
 
-        # integer, real
-        self.integer = self.update_symbol(bi, "integer")
-        self.integer.type = DefType.TYPE
-        self._make_type_link(self.integer, self.top)
-
+        # real (supertype of integer)
         self.real = self.update_symbol(bi, "real")
         self.real.type = DefType.TYPE
         self._make_type_link(self.real, self.top)
+
+        # integer <| real (integer is a subtype of real)
+        self.integer = self.update_symbol(bi, "integer")
+        self.integer.type = DefType.TYPE
+        self._make_type_link(self.integer, self.real)
 
         # quoted_string
         self.quoted_string = self.update_symbol(bi, "quoted_string")
