@@ -340,11 +340,15 @@ def run_repl(
                     success = engine.prove(term, cs_barrier=cs_before)
                 except HaltException:
                     return 0
-                except AbortException:
+                except AbortException as _ae:
                     engine.goal_stack = None
                     engine.trail.undo_to(pre_mark)
                     engine.choice_stack = cs_before
-                    sys.stdout.write("\n")
+                    # When the aborthook ran it already wrote its output (ending
+                    # with a newline), so we skip the leading '\n' to keep the
+                    # next prompt on its own line without an extra blank line.
+                    if not _ae.hook_called:
+                        sys.stdout.write("\n")
                     _write_prompt(depth)
                     continue
                 except KeyboardInterrupt:

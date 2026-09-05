@@ -1826,8 +1826,39 @@ def bi_halt(goal: PsiTerm, eng) -> bool:
 
 
 def bi_abort(goal: PsiTerm, eng) -> bool:
-    """abort — abort current query."""
-    raise AbortException()
+    """abort — call aborthook (if set), then abort current query.
+
+    The aborthook is a predicate name stored via setq(aborthook, foo).
+    When set, we call it before raising AbortException.  The hook's output
+    appears on the same line as the already-printed prompt ('> ').
+    """
+    hook_called = False
+    wl = eng.wl
+
+    # Look up the 'aborthook' symbol — the user sets it via setq(aborthook, foo).
+    # update_symbol returns the existing Definition (creating one if new, but an
+    # unset symbol will have rule=None or an empty list).
+    try:
+        hook_defn = wl.update_symbol(None, 'aborthook')
+        if hook_defn is not None and isinstance(hook_defn.rule, list) and hook_defn.rule:
+            # rule is a list of (head_copy, v_term) tuples stored by bi_setq.
+            _, v_term = hook_defn.rule[0]
+            hook_psi = v_term.deref() if v_term is not None else None
+            if hook_psi is not None:
+                try:
+                    # Prove the hook predicate (e.g. foo, which writes "I'm outta here!")
+                    eng.prove(hook_psi)
+                except AbortException:
+                    raise  # propagate nested abort
+                except Exception:
+                    pass  # ignore hook failures
+                hook_called = True
+    except AbortException:
+        raise
+    except Exception:
+        pass
+
+    raise AbortException(hook_called=hook_called)
 
 
 def bi_nl_err(goal: PsiTerm, eng) -> bool:

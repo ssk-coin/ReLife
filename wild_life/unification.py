@@ -46,8 +46,13 @@ class CutException(Exception):
 
 
 class AbortException(Exception):
-    """abort 例外"""
-    pass
+    """abort 例外
+
+    hook_called: True ならば aborthook が既に呼ばれ、改行なしで出力が終わっている。
+    その場合 main.py の例外ハンドラは余分な '\\n' を書かない。
+    """
+    def __init__(self, hook_called: bool = False):
+        self.hook_called = hook_called
 
 
 class HaltException(Exception):

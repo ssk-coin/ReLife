@@ -366,8 +366,7 @@ class Engine:
                 self.cut_to(e.cut_point)
                 return True
             except AbortException:
-                self.main_loop_ok = False
-                return False
+                raise  # propagate to main.py (AbortException carries hook_called flag)
             except HaltException as e:
                 raise
 
@@ -768,10 +767,7 @@ class Engine:
             except HaltException:
                 raise
             except AbortException:
-                self.trail.undo_to(0)
-                self.goal_stack = None
-                self.choice_stack = None
-                return False
+                raise  # propagate to main.py (AbortException carries hook_called flag)
             except CutException as e:
                 self.cut_to(e.cut_point)
                 success = True
