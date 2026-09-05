@@ -61,6 +61,16 @@ class HaltException(Exception):
         self.code = code
 
 
+class SortCycleException(Exception):
+    """ソート階層にサイクルが検出されたときに送出される例外。
+
+    cycle_path: サイクルを形成する Definition オブジェクトのリスト
+                (parent から child まで、child を末尾に含む)
+    """
+    def __init__(self, cycle_path: list):
+        self.cycle_path = cycle_path
+
+
 # ==================== トレイル (アンドゥスタック) ====================
 
 class Trail:

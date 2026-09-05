@@ -17,7 +17,7 @@ from wild_life.data_structures import (
 )
 from wild_life.unification import (
     UnificationFailure, CutException, HaltException, AbortException,
-    Trail, Unifier, copy_term, compute_lub, types_compatible
+    SortCycleException, Trail, Unifier, copy_term, compute_lub, types_compatible
 )
 
 
@@ -266,8 +266,13 @@ class Engine:
             self.add_rule(t, None, DefType.PREDICATE)
 
     def _assert_type(self, t: PsiTerm) -> None:
-        """Handle type declarations (<| or :=)."""
+        """Handle type declarations (<| or :=).
+
+        Raises SortCycleException if the new edge would create a cycle in the
+        sort hierarchy.
+        """
         from wild_life.data_structures import DefType
+        from wild_life.unification import SortCycleException
         # Simplified: mark the LHS type as a subtype of the RHS
         arg1 = t.attr_list.get('1')
         arg2 = t.attr_list.get('2')
@@ -287,6 +292,78 @@ class Engine:
                     child.parents.append(parent)
                 if child not in parent.children:
                     parent.children.append(child)
+
+                # ---- Cycle detection ----------------------------------------
+                # The new edge (child <| parent) creates a cycle if there is
+                # already a path from `parent` UP to `child` via existing
+                # parent links.
+                #
+                # The C Wild Life interpreter reports cycles using a specific
+                # traversal order (most-recently-added parents/children first,
+                # equivalent to prepend-order in C linked lists).  In Python
+                # we append to lists, so "most recent first" = reversed().
+                #
+                # Algorithm (mirrors the C interpreter's output):
+                #  1. DFS from `parent` going UP via reversed().parents to find
+                #     `child`.  This detects the cycle and records the path.
+                #  2. Descend at most 2 levels from `parent` via
+                #     reversed().children to find a deeper "terminal" node.
+                #  3. DFS from terminal going UP via reversed().parents to
+                #     find `child`.  This builds the displayed path.
+                #  4. Emit [child <| terminal <| ... <| child].
+
+                def _dfs_up(start, target, visited):
+                    """Return path [start, …, target] via .parents (reversed),
+                    or None if target is not reachable."""
+                    if start is target:
+                        return [start]
+                    if start in visited:
+                        return None
+                    visited.add(start)
+                    for p in reversed(start.parents):
+                        result = _dfs_up(p, target, visited)
+                        if result is not None:
+                            return [start] + result
+                    return None
+
+                # Step 1: does a cycle exist?
+                if _dfs_up(parent, child, set()) is None:
+                    return  # no cycle — nothing to do
+
+                # Cycle confirmed.  Remove the just-added edge so the
+                # hierarchy remains consistent.
+                child.parents.remove(parent)
+                parent.children.remove(child)
+
+                # Step 2: descend ≤2 levels from parent via children
+                # (reversed order), recording the last node at each level.
+                terminal = parent
+                lvl1_nodes = list(reversed(parent.children))
+                if lvl1_nodes:
+                    for c1 in lvl1_nodes:
+                        lvl2_nodes = list(reversed(c1.children))
+                        if lvl2_nodes:
+                            for c2 in lvl2_nodes:
+                                terminal = c2
+                        else:
+                            terminal = c1  # c1 has no children; it IS level 1
+
+                # Step 3: DFS from terminal UP to child (reversed parents).
+                path = _dfs_up(terminal, child, set())
+                if path is None:
+                    # Fallback: use parent itself as start.
+                    path = _dfs_up(parent, child, set()) or [parent, child]
+
+                # Step 4: emit error + cycle string.
+                child_name = child.keyword.symbol if child.keyword else "?"
+                elems = [child_name] + \
+                        [d.keyword.symbol if d.keyword else "?" for d in path]
+                cycle_str = "[" + " <| ".join(elems) + "]"
+                sys.stderr.write(
+                    "*** Error: there is a cycle in the sort hierarchy\n"
+                )
+                sys.stderr.write(f"*** Cycle: {cycle_str}\n")
+                raise SortCycleException(path)
 
     # ─── prove helpers ───────────────────────────────────────────────────────
 
@@ -673,7 +750,14 @@ class Engine:
                 break
             if sort == FACT:
                 self.assert_first = False
-                self.assert_clause(t)
+                try:
+                    self.assert_clause(t)
+                except SortCycleException:
+                    # Cycle in .lf file: write a newline so refout matches
+                    # (the C interpreter outputs \n before halting), then exit.
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    raise HaltException(1)
             elif sort == QUERY:
                 # Execute query; push as goal
                 self.push_goal(GoalType.PROVE, t, _DEFRULES, None)

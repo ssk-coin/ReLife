@@ -118,7 +118,7 @@ def run_repl(
     from wild_life.built_ins import register_all
     from wild_life.inference import Engine
     from wild_life.parser_ import parse_string
-    from wild_life.unification import HaltException, AbortException
+    from wild_life.unification import HaltException, AbortException, SortCycleException
     from wild_life.data_structures import QUERY, FACT, ERROR
 
     # ---- Initialise runtime (modules, types, operators) --------------------
@@ -418,6 +418,11 @@ def run_repl(
                     engine.assert_first = False
                     engine.assert_clause(term)
                     sys.stdout.write("\n*** Yes\n")
+                except SortCycleException:
+                    # Sort cycle detected interactively: error already written to
+                    # stderr by _assert_type.  Do NOT output *** Yes/No or a prompt;
+                    # just silently continue to the next input line.
+                    continue
                 except HaltException:
                     return 0
                 except Exception as exc:
