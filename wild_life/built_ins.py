@@ -441,9 +441,9 @@ def bi_read_term(goal: PsiTerm, eng) -> bool:
 # Arithmetic
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _eval_arith(t: PsiTerm, eng) -> Tuple[bool, float]:
+def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     """Evaluate an arithmetic expression. Returns (ok, value)."""
-    if t is None:
+    if t is None or _depth > 20:
         return False, 0.0
     t = t.deref()
     wl = eng.wl
@@ -452,10 +452,33 @@ def _eval_arith(t: PsiTerm, eng) -> Tuple[bool, float]:
     if t.value is not None and t.type and t.type.is_subtype_of(wl.real):
         return True, float(t.value)
 
+    # User-defined function: try to evaluate it inline (no condition case)
+    if t.type is not None and t.type.type == DefType.FUNCTION and t.type.rule:
+        active = [(h, b) for (h, b) in t.type.rule if h is not None and b is not None]
+        if active:
+            from wild_life.unification import copy_term
+            h0, b0 = active[0]
+            _vm: dict = {}
+            head = copy_term(h0, _vm)
+            body = copy_term(b0, _vm)
+            body_d = body.deref()
+            # Handle conditional: body = (value | condition) — skip if conditioned
+            if body_d.type is not None and body_d.type is wl.such_that:
+                pass  # Can't evaluate conditionals without engine; skip
+            else:
+                # Unify head with t to bind arguments
+                mark = eng.trail.mark()
+                ok = eng.unifier.unify(t, head)
+                if ok:
+                    result = _eval_arith(body_d, eng, _depth + 1)
+                    eng.trail.undo_to(mark)
+                    return result
+                eng.trail.undo_to(mark)
+
     # Binary operators
     arg1, arg2 = _get_two_args(t)
-    ok1, v1 = _eval_arith(arg1, eng) if arg1 else (False, 0.0)
-    ok2, v2 = _eval_arith(arg2, eng) if arg2 else (False, 0.0)
+    ok1, v1 = _eval_arith(arg1, eng, _depth + 1) if arg1 else (False, 0.0)
+    ok2, v2 = _eval_arith(arg2, eng, _depth + 1) if arg2 else (False, 0.0)
 
     ops2 = {
         '+': lambda a, b: a + b,
@@ -468,6 +491,12 @@ def _eval_arith(t: PsiTerm, eng) -> Tuple[bool, float]:
         '^': lambda a, b: a ** b,
         'max': lambda a, b: max(a, b),
         'min': lambda a, b: min(a, b),
+        # Bitwise operators
+        '/\\': lambda a, b: float(int(a) & int(b)),
+        '\\/': lambda a, b: float(int(a) | int(b)),
+        'xor': lambda a, b: float(int(a) ^ int(b)),
+        '>>': lambda a, b: float(int(a) >> int(b)),
+        '<<': lambda a, b: float(int(a) << int(b)),
     }
     if sym in ops2 and ok1 and ok2:
         try:
@@ -497,6 +526,8 @@ def _eval_arith(t: PsiTerm, eng) -> Tuple[bool, float]:
         'float_fractional_part': lambda a: a - math.trunc(a),
         'sign': lambda a: (1.0 if a > 0 else (-1.0 if a < 0 else 0.0)),
         'msb': lambda a: int(math.log2(max(1, int(a)))),
+        # Bitwise NOT
+        '\\': lambda a: float(~int(a)),
     }
     if sym in ops1 and ok1:
         try:
@@ -520,12 +551,54 @@ def bi_is(goal: PsiTerm, eng) -> bool:
     return _unify(eng, arg1, result)
 
 
+def _push_deferred_cmp(goal: PsiTerm, eng, a, b, oka, okb) -> bool:
+    """If one arg is an unevaluated user function, defer via EVAL + PROVE.
+
+    Returns True if goals were pushed (evaluation deferred), False otherwise.
+    After EVAL binds R to the function's value, also unifies the original arg
+    with R so that subsequent uses of that variable see the computed value.
+    """
+    from wild_life.inference import _DEFRULES
+    wl = eng.wl
+
+    def _defer(func_arg, other_arg, func_is_first: bool) -> bool:
+        """Push EVAL(func) + UNIFY(func_arg, R) + PROVE(cmp(R, other))."""
+        func_d = func_arg.deref()
+        if not _is_user_function(func_d):
+            return False
+        R = wl.make_var()
+        # Build new comparison goal term with R substituted for func_arg
+        new_goal = PsiTerm(type_def=goal.type)
+        if func_is_first:
+            new_goal.attr_list = {'1': R, '2': other_arg}
+        else:
+            new_goal.attr_list = {'1': other_arg, '2': R}
+        # Push in LIFO order (goals execute in reverse push order):
+        #   1. EVAL(func → R)     — evaluate the function, binding R
+        #   2. UNIFY(func_arg, R) — bind the original arg to R so it's shared
+        #   3. PROVE(cmp(R, b))   — run the comparison with the now-known value
+        eng.push_goal(GoalType.PROVE, new_goal, _DEFRULES, None)
+        eng.push_goal(GoalType.UNIFY, func_d, R, None)
+        eng.push_goal(GoalType.EVAL, func_d, R, func_d.type.rule)
+        return True
+
+    if not oka and a is not None:
+        if _defer(a, b, True):
+            return True
+    if not okb and b is not None:
+        if _defer(b, a, False):
+            return True
+    return False
+
+
 def bi_arith_eq(goal: PsiTerm, eng) -> bool:
     """X =:= Y — arithmetic equality."""
     a, b = _get_two_args(goal)
     oka, va = _eval_arith(a, eng)
     okb, vb = _eval_arith(b, eng)
-    return oka and okb and va == vb
+    if oka and okb:
+        return va == vb
+    return _push_deferred_cmp(goal, eng, a, b, oka, okb)
 
 
 def bi_arith_ne(goal: PsiTerm, eng) -> bool:
@@ -533,7 +606,9 @@ def bi_arith_ne(goal: PsiTerm, eng) -> bool:
     a, b = _get_two_args(goal)
     oka, va = _eval_arith(a, eng)
     okb, vb = _eval_arith(b, eng)
-    return oka and okb and va != vb
+    if oka and okb:
+        return va != vb
+    return _push_deferred_cmp(goal, eng, a, b, oka, okb)
 
 
 def bi_arith_lt(goal: PsiTerm, eng) -> bool:
@@ -541,7 +616,9 @@ def bi_arith_lt(goal: PsiTerm, eng) -> bool:
     a, b = _get_two_args(goal)
     oka, va = _eval_arith(a, eng)
     okb, vb = _eval_arith(b, eng)
-    return oka and okb and va < vb
+    if oka and okb:
+        return va < vb
+    return _push_deferred_cmp(goal, eng, a, b, oka, okb)
 
 
 def bi_arith_le(goal: PsiTerm, eng) -> bool:
@@ -549,7 +626,9 @@ def bi_arith_le(goal: PsiTerm, eng) -> bool:
     a, b = _get_two_args(goal)
     oka, va = _eval_arith(a, eng)
     okb, vb = _eval_arith(b, eng)
-    return oka and okb and va <= vb
+    if oka and okb:
+        return va <= vb
+    return _push_deferred_cmp(goal, eng, a, b, oka, okb)
 
 
 def bi_arith_gt(goal: PsiTerm, eng) -> bool:
@@ -557,7 +636,9 @@ def bi_arith_gt(goal: PsiTerm, eng) -> bool:
     a, b = _get_two_args(goal)
     oka, va = _eval_arith(a, eng)
     okb, vb = _eval_arith(b, eng)
-    return oka and okb and va > vb
+    if oka and okb:
+        return va > vb
+    return _push_deferred_cmp(goal, eng, a, b, oka, okb)
 
 
 def bi_arith_ge(goal: PsiTerm, eng) -> bool:
@@ -565,7 +646,9 @@ def bi_arith_ge(goal: PsiTerm, eng) -> bool:
     a, b = _get_two_args(goal)
     oka, va = _eval_arith(a, eng)
     okb, vb = _eval_arith(b, eng)
-    return oka and okb and va >= vb
+    if oka and okb:
+        return va >= vb
+    return _push_deferred_cmp(goal, eng, a, b, oka, okb)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -660,6 +743,21 @@ def _expand_term_disjunctions(t: PsiTerm, eng) -> list:
         new_term.attr_list = attrs
         result.append(new_term)
     return result
+
+
+def _eval_user_function_deferred(t: PsiTerm, eng, result: PsiTerm) -> bool:
+    """Push EVAL + deferred goals when t is a user function.
+
+    Returns True if goals were pushed (t is a user function that needs
+    evaluation). The caller should push additional continuation goals
+    AFTER this call (they will execute after EVAL produces result).
+    """
+    t_d = t.deref()
+    if not _is_user_function(t_d):
+        return False
+    from wild_life.data_structures import GoalType
+    eng.push_goal(GoalType.EVAL, t_d, result, t_d.type.rule)
+    return True
 
 
 def _is_user_function(t: PsiTerm) -> bool:
@@ -969,7 +1067,10 @@ def bi_not(goal: PsiTerm, eng) -> bool:
     gs_save = eng.goal_stack
     eng.push_goal(GoalType.PROVE, arg, _DEFRULES_SENTINEL, None)
     old_main_loop_ok = eng.main_loop_ok
-    result = eng.run()
+    # Use _INNER_RUN_BARRIER so run() does not undo trail to position 0 on failure;
+    # that would destroy outer bindings (e.g. N=1 set before the not() call).
+    _barrier = cp_save if cp_save is not None else _INNER_RUN_BARRIER
+    result = eng.run(cs_barrier=_barrier)
     eng.trail.undo_to(mark)
     eng.choice_stack = cp_save
     eng.goal_stack = gs_save
@@ -995,11 +1096,48 @@ def bi_once(goal: PsiTerm, eng) -> bool:
     cp_save = eng.choice_stack
     gs_save = eng.goal_stack
     eng.push_goal(GoalType.PROVE, arg, _DEFRULES_SENTINEL, None)
-    result = eng.run()
+    _barrier = cp_save if cp_save is not None else _INNER_RUN_BARRIER
+    result = eng.run(cs_barrier=_barrier)
     if not result:
         eng.trail.undo_to(mark)
     eng.choice_stack = cp_save
     return result
+
+
+def bi_cond(goal: PsiTerm, eng) -> bool:
+    """cond(Cond, Then) — if Cond succeeds then prove Then, else succeed.
+
+    This is the Wild Life conditional: always succeeds (like (Cond -> Then ; true)).
+    """
+    args = list(goal.attr_list.values()) if goal.attr_list else []
+    if len(args) < 2:
+        return True  # degenerate: succeed
+    cond_g = args[0].deref()
+    then_g = args[1].deref()
+
+    mark = eng.trail.mark()
+    cp_save = eng.choice_stack
+    gs_save = eng.goal_stack
+    eng.push_goal(GoalType.PROVE, cond_g, _DEFRULES_SENTINEL, None)
+    old_main_loop_ok = eng.main_loop_ok
+    # Use _INNER_RUN_BARRIER to prevent run() from undoing the trail to position 0
+    # on failure — that would destroy outer bindings (e.g. N=1 set before this call).
+    _barrier = cp_save if cp_save is not None else _INNER_RUN_BARRIER
+    cond_ok = eng.run(cs_barrier=_barrier)
+    eng.main_loop_ok = old_main_loop_ok
+
+    if cond_ok:
+        # Cond succeeded — cut alternatives, prove Then
+        eng.choice_stack = cp_save  # discard choice points created by cond
+        eng.goal_stack = gs_save
+        eng.push_goal(GoalType.PROVE, then_g, _DEFRULES_SENTINEL, None)
+        return True
+    else:
+        # Cond failed — undo any bindings made during Cond and succeed silently
+        eng.trail.undo_to(mark)
+        eng.choice_stack = cp_save
+        eng.goal_stack = gs_save
+        return True
 
 
 def bi_findall(goal: PsiTerm, eng) -> bool:
@@ -1080,7 +1218,13 @@ def bi_asserta(goal: PsiTerm, eng) -> bool:
 
 
 def bi_retract(goal: PsiTerm, eng) -> bool:
-    """retract(Clause) — remove first matching clause (non-deterministic)."""
+    """retract(Clause) — remove first matching clause (non-deterministic).
+
+    Handles both :- and -> clause forms:
+      retract((head :- body))   for predicate rules
+      retract((head -> value))  for functional rules
+      retract(head)             for facts / any rule
+    """
     from wild_life.data_structures import GoalType as _GT
     arg = _get_one_arg(goal)
     if arg is None:
@@ -1088,7 +1232,8 @@ def bi_retract(goal: PsiTerm, eng) -> bool:
     arg = arg.deref()
     wl = eng.wl
     sym = arg.type.keyword.symbol if arg.type and arg.type.keyword else ''
-    if sym == ':-':
+    if sym in (':-', '->'):
+        # Clause or functional rule: (head :- body) or (head -> value)
         head = arg.attr_list.get('1')
         body = arg.attr_list.get('2')
     else:
@@ -1100,15 +1245,107 @@ def bi_retract(goal: PsiTerm, eng) -> bool:
     defn = head.type
     if defn is None or defn.rule is None or callable(defn.rule):
         return False
-    # Build a body term if none given (unifies with 'true')
+    # Build a body term if none given (unifies with 'true' / any body)
     if body is None:
         body = PsiTerm(type_def=wl.top)  # fresh var — will match any body
     # Use the engine's non-deterministic clause_aim machinery:
-    # Push a DEL_CLAUSE goal with the full rule list.
-    # clause_aim will handle choosing the first match and pushing choice points.
+    # Push a DEL_CLAUSE goal with (master_list, start_idx=0) so clause_aim
+    # always deletes from the master list at the correct position.
     rule_list = defn.rule  # live mutable list
-    eng.push_goal(_GT.DEL_CLAUSE, head, body, rule_list)
+    eng.push_goal(_GT.DEL_CLAUSE, head, body, (rule_list, 0))
     return True
+
+
+def bi_setq(goal: PsiTerm, eng) -> bool:
+    """setq(X, V) — set (global) functional fact X -> V.
+
+    Retracts all existing X -> @ rules and asserts X -> V.
+    Used for global variable assignment:  setq(counter, 5).
+    """
+    args = list(goal.attr_list.values()) if goal.attr_list else []
+    if len(args) < 2:
+        return False
+    x_term = args[0].deref()
+    v_term = args[1].deref()
+    wl = eng.wl
+
+    defn = x_term.type
+    if defn is None:
+        return False
+
+    # Make X dynamic if it is not already
+    from wild_life.data_structures import DefType
+    if defn.rule is None or callable(defn.rule):
+        defn.rule = []
+
+    # Remove ALL existing -> rules for X (retract all functional clauses)
+    # A functional rule is stored as (head, body) where head matches x_term
+    rule_list = defn.rule
+    new_rules = [(h, b) for (h, b) in rule_list if h is None]  # keep tombstones? No — clear all
+    defn.rule = []  # wipe all rules
+
+    # Assert X -> V  (a single-arg functional rule)
+    # Build head = x_term (fresh copy) with value = v_term
+    from wild_life.unification import copy_term
+    _vm: dict = {}
+    head_copy = copy_term(x_term, _vm)
+    # The rule body for -> is the return value directly
+    defn.rule.append((head_copy, v_term))
+    return True
+
+
+def bi_clause(goal: PsiTerm, eng) -> bool:
+    """clause(Head) / clause(Head, Body) — non-deterministically match clauses.
+
+    Succeeds once for each matching clause of the predicate or function.
+    For a fact p, clause(p) succeeds if p has at least one clause.
+    For clause(Head, Body), unifies Head and Body with each matching clause.
+    """
+    from wild_life.data_structures import GoalType as _GT
+    args_raw = list(goal.attr_list.values()) if goal.attr_list else []
+    if not args_raw:
+        return False
+    head = args_raw[0].deref()
+    body = args_raw[1].deref() if len(args_raw) >= 2 else None
+    wl = eng.wl
+
+    defn = head.type
+    if defn is None or defn.rule is None or callable(defn.rule):
+        # Try treating it as a 0-arity predicate/fact
+        return False
+
+    rule_list = defn.rule
+    if not rule_list:
+        return False
+
+    # Use body = fresh var if not supplied (for clause/1 form)
+    if body is None:
+        body = wl.make_var()
+
+    eng.push_goal(_GT.CLAUSE, head, body, rule_list)
+    return True
+
+
+def bi_children(goal: PsiTerm, eng) -> bool:
+    """children(Sort, List) — unify List with immediate subtypes of Sort."""
+    wl = eng.wl
+    a1 = goal.attr_list.get('1')
+    a2 = goal.attr_list.get('2')
+    if a1 is None or a2 is None:
+        return False
+    sort_term = a1.deref()
+    defn = sort_term.type
+    if defn is None:
+        return _unify(eng, a2, wl.make_atom('[]', wl.user_module))
+    # Collect subtypes
+    children = []
+    for mod in wl._all_modules():
+        for sym_name, child_defn in mod.symbol_table.items():
+            if child_defn.parent is defn:
+                child_atom = wl.make_atom(sym_name, mod)
+                children.append(child_atom)
+    result_list = wl.make_list(children)
+    return _unify(eng, a2, result_list)
 
 
 def bi_abolish(goal: PsiTerm, eng) -> bool:
@@ -1750,26 +1987,62 @@ def bi_statistics(goal: PsiTerm, eng) -> bool:
 
 
 def bi_listing(goal: PsiTerm, eng) -> bool:
-    """listing(F) — list clauses for functor F."""
+    """listing(F) — list clauses for functor F.
+
+    Expected output format (matching original Wild Life):
+      - Empty predicate: % 'NAME' is a user-defined predicate with an empty definition.\\n
+      - Non-empty predicate:
+          \\ndynamic(NAME)?
+          HEAD :-
+                  BODY.
+      - Functional rules:
+          \\ndynamic(NAME)?
+          HEAD -> VALUE.
+    """
     arg = _get_one_arg(goal)
     if arg is None:
         return False
     defn = arg.type if arg.type else None
     if defn is None:
         return False
-    rules = defn.rule or []
+
+    from wild_life.data_structures import DefType
     from wild_life.print_term import term_to_string
-    for h, b in rules:
-        if h is None:
-            continue
-        hs = term_to_string(h, wl=eng.wl)
-        bs = term_to_string(b, wl=eng.wl)
-        wl = eng.wl
-        succeed_sym = wl.succeed.keyword.symbol if wl.succeed and wl.succeed.keyword else 'succeed'
-        if b and b.type and b.type.keyword and b.type.keyword.symbol != succeed_sym:
-            print(f"{hs} :- {bs}.")
+
+    wl = eng.wl
+    func_name = defn.keyword.symbol if defn.keyword else '?'
+
+    # Collect non-deleted rules
+    active_rules = [(h, b) for h, b in (defn.rule or []) if h is not None]
+
+    if not active_rules:
+        # Empty definition
+        print(f"% '{func_name}' is a user-defined predicate with an empty definition.\n")
+        return True
+
+    # Print dynamic declaration header (with leading blank line)
+    print(f"\ndynamic({func_name})?")
+
+    is_function = (defn.type == DefType.FUNCTION)
+    succeed_sym = wl.succeed.keyword.symbol if wl.succeed and wl.succeed.keyword else 'succeed'
+
+    for h, b in active_rules:
+        hs = term_to_string(h, wl=wl)
+        if is_function:
+            # Functional rule: HEAD -> VALUE.
+            vs = term_to_string(b, wl=wl) if b is not None else 'true'
+            print(f"{hs} -> {vs}.")
         else:
-            print(f"{hs}.")
+            # Regular predicate clause
+            has_body = (b is not None and b.type is not None
+                        and b.type.keyword is not None
+                        and b.type.keyword.symbol != succeed_sym)
+            if has_body:
+                bs = term_to_string(b, wl=wl)
+                print(f"{hs} :-\n        {bs}.")
+            else:
+                print(f"{hs}.")
+
     return True
 
 
@@ -1997,7 +2270,7 @@ def bi_alias(goal: PsiTerm, eng) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 # Sentinel used inside inference.py
 # ─────────────────────────────────────────────────────────────────────────────
-from wild_life.inference import _DEFRULES
+from wild_life.inference import _DEFRULES, _INNER_RUN_BARRIER
 _DEFRULES_SENTINEL = _DEFRULES
 
 
@@ -2063,6 +2336,7 @@ def register_all(wl) -> None:
     _reg('\\+', bi_not)
     _reg('call', bi_call)
     _reg('once', bi_once)
+    _reg('cond', bi_cond)
     _reg('findall', bi_findall)
     _reg('bagof', bi_findall)   # simplified
     _reg('setof', bi_findall)   # simplified
@@ -2074,7 +2348,12 @@ def register_all(wl) -> None:
     _reg('asserta', bi_asserta)
     _reg('retract', bi_retract)
     _reg('abolish', bi_abolish)
+    _reg('clause', bi_clause)
+    _reg('setq', bi_setq)
     _reg('listing', bi_listing)
+
+    # Type hierarchy
+    _reg('children', bi_children)
 
     # Term manipulation
     _reg('functor', bi_functor)
@@ -2118,10 +2397,10 @@ def register_all(wl) -> None:
     # System
     _reg('halt', bi_halt)
     _reg('abort', bi_abort)
-    # gc — in Wild Life, gc commits all choice points (like a global cut)
-    # so backtracking past a gc call is impossible.
+    # gc — garbage collection (memory management).  In Python the GC is
+    # automatic; this is a no-op that simply succeeds.  It does NOT touch
+    # the choice stack (it is not a cut operation).
     def _bi_gc(goal, eng):
-        eng.choice_stack = None
         return True
     _reg('gc', _bi_gc)
     _reg('garbage_collect', _bi_gc)

@@ -180,8 +180,9 @@ class Unifier:
     C版の global_unify(), global_unify_attr() などに対応 (login.c)
     """
 
-    def __init__(self, trail: Trail):
+    def __init__(self, trail: Trail, engine=None):
         self.trail = trail
+        self.engine = engine  # back-reference to Engine (may be None)
 
     def bind(self, var: PsiTerm, val: PsiTerm):
         """変数 var を val に束縛する (バックトラック可能)
@@ -229,16 +230,83 @@ class Unifier:
         u_is_var = (u.type is WL.top and not u.attr_list and not u.resid)
         v_is_var = (v.type is WL.top and not v.attr_list and not v.resid)
 
+        # Sort-constrained function variables (X:sort where sort is a user-defined
+        # function) are treated as bindable variables — in LIFE, a sort-annotated
+        # variable can be bound once the sort's function produces a concrete value.
+        # We recognise them as variables when they have no concrete value and no attrs.
+        if not u_is_var and not v_is_var:
+            from wild_life.data_structures import DefType, QUOTED_TRUE
+            if (u.value is None and not u.attr_list and not u.resid and
+                    not (u.flags & QUOTED_TRUE) and
+                    u.type is not None and u.type.type == DefType.FUNCTION and
+                    u.type._builtin_func is None):
+                u_is_var = True
+            if (v.value is None and not v.attr_list and not v.resid and
+                    not (v.flags & QUOTED_TRUE) and
+                    v.type is not None and v.type.type == DefType.FUNCTION and
+                    v.type._builtin_func is None):
+                v_is_var = True
+
         if u_is_var:
-            self.bind(u, v)
-            # 残留ゴールの覚醒
-            self._wakeup_resid(u, v)
+            # If u is a function-sort variable (type != WL.top) and v is a plain
+            # top variable, bind v→u so that dereferencing v returns u (which
+            # retains its sort constraint).  This preserves sort information for
+            # later _is_user_function checks (e.g. pick_op(X':ran) unifying with
+            # the head parameter A1 of the rule body).
+            u_is_fn_sort = (u.type is not WL.top)
+            if u_is_fn_sort and v_is_var:
+                self.bind(v, u)   # v.coref = u; v.deref() = u (ran_def sort kept)
+                self._wakeup_resid(u, v)
+            else:
+                self.bind(u, v)
+                self._wakeup_resid(u, v)
             return True
 
         if v_is_var:
+            # Eagerly evaluate pure arithmetic expressions to prevent deeply-nested
+            # expression chains in recursive predicates like loop(N-1).
+            # Only apply when u is a compound arithmetic op (not a function sort or var).
+            if self.engine is not None and not u_is_var:
+                _arith_ops = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+                                        'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
+                _sym = u.type.keyword.symbol if u.type and u.type.keyword else ''
+                if _sym in _arith_ops:
+                    try:
+                        from wild_life.built_ins import _eval_arith as _ea, _make_number as _mn
+                        _ok, _val = _ea(u, self.engine)
+                        if _ok:
+                            _u_num = _mn(self.engine, _val)
+                            self.bind(v, _u_num)
+                            self._wakeup_resid(v, _u_num)
+                            return True
+                    except Exception:
+                        pass
             self.bind(v, u)
             self._wakeup_resid(v, u)
             return True
+
+        # Arithmetic evaluation: if one term is a concrete number and the other
+        # is an arithmetic expression (compound with arithmetic op), evaluate the
+        # expression and retry unification.  This is needed for LIFE's automatic
+        # evaluation of numeric sub-terms, e.g. loop(N-1) where N=3.
+        u_is_num = (u.type is WL.integer or u.type is WL.real) and u.value is not None and not u.attr_list
+        v_is_num = (v.type is WL.integer or v.type is WL.real) and v.value is not None and not v.attr_list
+        if (u_is_num or v_is_num) and self.engine is not None:
+            try:
+                from wild_life.built_ins import _eval_arith as _ea, _make_number as _mn
+                eng = self.engine
+                if not u_is_num:
+                    ok_u, val_u = _ea(u, eng)
+                    if ok_u:
+                        u2 = _mn(eng, val_u)
+                        return self.unify(u2, v)
+                if not v_is_num:
+                    ok_v, val_v = _ea(v, eng)
+                    if ok_v:
+                        v2 = _mn(eng, val_v)
+                        return self.unify(u, v2)
+            except Exception:
+                pass  # evaluation failed, proceed with structural unification
 
         # 型の単一化
         if not self._unify_types(u, v):
@@ -424,6 +492,20 @@ def copy_term(t: PsiTerm, var_map: Optional[Dict[int, PsiTerm]] = None) -> PsiTe
         if tid not in var_map:
             new_var = PsiTerm()
             new_var.type = WL.top
+            var_map[tid] = new_var
+        return var_map[tid]
+
+    # Sort-constrained function variable (X:ran where ran is DefType.FUNCTION)
+    # These must be copied as fresh constrained variables, not as constants.
+    if (t.value is None and not t.attr_list and not t.resid and
+            t.type is not None and t.type is not WL.top and
+            t.type.type == DefType.FUNCTION and t.type._builtin_func is None and
+            not (t.flags & 1)):  # not QUOTED_TRUE
+        tid = id(t)
+        if tid not in var_map:
+            new_var = PsiTerm()
+            new_var.type = t.type  # same sort constraint
+            new_var.flags = t.flags
             var_map[tid] = new_var
         return var_map[tid]
 

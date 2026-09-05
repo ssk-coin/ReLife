@@ -334,7 +334,10 @@ def run_repl(
                 saved_noisy = engine.noisy
                 engine.noisy = False
                 try:
-                    success = engine.prove(term)
+                    # Pass cs_before as barrier so this fresh query does NOT
+                    # backtrack into choice points from enclosing (outer) queries.
+                    # At depth=0 cs_before is None (no barrier), which is fine.
+                    success = engine.prove(term, cs_barrier=cs_before)
                 except HaltException:
                     return 0
                 except AbortException:
@@ -400,11 +403,9 @@ def run_repl(
                     engine.choice_stack = cs_before
                     engine.goal_stack = None
                     sys.stdout.write("\n*** No\n")
-                    if depth > 0:
-                        # In a nested session: pop one frame on failure
-                        parent_bindings = _pop_frame()
-                        if parent_bindings:
-                            sys.stdout.write(parent_bindings + "\n")
+                    # Do NOT pop the frame on fresh-query failure at depth > 0:
+                    # the outer query's frame (and its choice points) remain active.
+                    # The user can type ';' or '.' to navigate, or another query.
                     _write_prompt(depth)
 
             # ---- Fact / rule: assert into database ------------------------

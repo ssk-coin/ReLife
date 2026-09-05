@@ -141,8 +141,13 @@ def run_one(
     err_path.write_text(stderr_text)
 
     # Compare against reference
-    ref_out = refout.read_text(errors="replace") if refout.exists() else ""
-    ref_err = referr.read_text(errors="replace") if referr.exists() else ""
+    # When a reference file does not exist, treat the test as passing for that
+    # channel (mirrors the original csh check script: diff against /dev/null
+    # gives empty output → no diff → pass).
+    ref_out_exists = refout.exists()
+    ref_err_exists = referr.exists()
+    ref_out = refout.read_text(errors="replace") if ref_out_exists else ""
+    ref_err = referr.read_text(errors="replace") if ref_err_exists else ""
 
     def _diff(a: str, b: str, from_file: str, to_file: str) -> str:
         a_lines = a.splitlines(keepends=True)
@@ -151,12 +156,19 @@ def run_one(
                                             fromfile=from_file,
                                             tofile=to_file))
 
-    out_diff_text = _diff(stdout_text, ref_out,
-                          str(out_path.relative_to(test_dir)),
-                          str(refout.relative_to(test_dir)))
-    err_diff_text = _diff(stderr_text, ref_err,
-                          str(err_path.relative_to(test_dir)),
-                          str(referr.relative_to(test_dir)))
+    if ref_out_exists:
+        out_diff_text = _diff(stdout_text, ref_out,
+                              str(out_path.relative_to(test_dir)),
+                              str(refout.relative_to(test_dir)))
+    else:
+        out_diff_text = ""  # no REFOUT → treat stdout as passing
+
+    if ref_err_exists:
+        err_diff_text = _diff(stderr_text, ref_err,
+                              str(err_path.relative_to(test_dir)),
+                              str(referr.relative_to(test_dir)))
+    else:
+        err_diff_text = ""  # no REFERR → treat stderr as passing
 
     out_ok = not out_diff_text
     err_ok = not err_diff_text

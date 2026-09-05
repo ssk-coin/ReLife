@@ -140,7 +140,7 @@ class Engine:
     def __init__(self, wl):
         self.wl = wl           # WildLifeRuntime singleton
         self.trail: Trail = Trail()
-        self.unifier: Unifier = Unifier(self.trail)
+        self.unifier: Unifier = Unifier(self.trail, engine=self)
         self.goal_stack: Optional[Goal] = None
         self.choice_stack: Optional[ChoicePoint] = None
         self.aim: Optional[Goal] = None
@@ -495,12 +495,46 @@ class Engine:
         head = copy_term(head_orig, _vm)
         body = copy_term(body_orig, _vm)
 
-        self.push_goal(GoalType.UNIFY, body, result, None)
+        # Handle conditional functional rule: body = (value | condition)
+        # where '|' is the such-that / function-guard operator.
+        # We must prove 'condition' as a goal and unify result with 'value'.
+        body_d = body.deref()
+        if body_d.type is not None and body_d.type is wl.such_that:
+            val_part  = body_d.attr_list.get('1')  # return value
+            cond_part = body_d.attr_list.get('2')  # condition to prove
+            if val_part is not None and cond_part is not None:
+                # Push: unify result with val_part AFTER cond_part is proven
+                self.push_goal(GoalType.UNIFY, val_part, result, None)
+                self.push_goal(GoalType.PROVE, cond_part, _DEFRULES, None)
+                mark = self.trail.mark()
+                ok = self.unifier.unify(funct, head)
+                if not ok:
+                    self.trail.undo_to(mark)
+                    return False
+                return True
+
+        # Unify head with funct first (to bind head arguments)
         mark = self.trail.mark()
         ok = self.unifier.unify(funct, head)
         if not ok:
             self.trail.undo_to(mark)
             return False
+
+        # Now that head args are bound, try arithmetic evaluation of body
+        body_d2 = body.deref()
+        from wild_life.built_ins import _eval_arith, _make_number
+        arith_ok, arith_val = _eval_arith(body_d2, self)
+        if arith_ok:
+            # Body evaluated to a number — unify result with it immediately
+            num_term = _make_number(self, arith_val)
+            ok2 = self.unifier.unify(result, num_term)
+            if not ok2:
+                self.trail.undo_to(mark)
+                return False
+            return True
+
+        # Body is not pure arithmetic — push as a UNIFY goal for later resolution
+        self.push_goal(GoalType.UNIFY, body_d2, result, None)
         return True
 
     def match_aim(self) -> bool:
@@ -548,42 +582,48 @@ class Engine:
         aim = self.aim
         head = aim.a
         body = aim.b
-        rule_list_ref = aim.c  # list (mutable) — always the MASTER rule list
+        # For CLAUSE: rule_list_ref is a list of rules (possibly a slice).
+        # For DEL_CLAUSE (retract): rule_list_ref is (master_list, start_idx) tuple
+        # so we always delete from the master list.
+        rule_list_ref = aim.c
 
-        if not rule_list_ref or not isinstance(rule_list_ref, list):
-            return False
-
-        # Find the index of the first non-deleted rule in the master list.
-        # We scan by index (not by slicing) so that RETRACT can modify the
-        # master list at the correct position.
-        idx = 0
-        while idx < len(rule_list_ref) and (
-                rule_list_ref[idx][0] is None or rule_list_ref[idx][1] is None):
-            idx += 1
-
-        if idx >= len(rule_list_ref):
-            return False
-
-        # If there are more rules after idx, push a choice point.
-        # For retract, always store the MASTER list so the next retry also
-        # scans from the front, skipping newly-deleted entries.
-        has_more = any(
-            rule_list_ref[i][0] is not None
-            for i in range(idx + 1, len(rule_list_ref))
-        )
-        if has_more:
-            if retract:
-                # Re-use the master list; after RETRACT marks rule_list_ref[idx]
-                # as (None, None), the next scan will find the right successor.
-                self.push_choice_point(GoalType.DEL_CLAUSE, head, body, rule_list_ref)
-            else:
-                next_rules = rule_list_ref[idx + 1:]
-                self.push_choice_point(GoalType.CLAUSE, head, body, next_rules)
-
-        h0, b0 = rule_list_ref[idx]
         if retract:
-            # Store (master_list, index) so RETRACT modifies the correct slot.
-            self.push_goal(GoalType.RETRACT, (rule_list_ref, idx), None, None)
+            # Unpack (master_list, start_from) for retract
+            if isinstance(rule_list_ref, tuple):
+                master_list, start_from = rule_list_ref
+            else:
+                master_list, start_from = rule_list_ref, 0
+            # Find the first non-deleted rule starting from start_from
+            idx = start_from
+            while idx < len(master_list) and (
+                    master_list[idx][0] is None or master_list[idx][1] is None):
+                idx += 1
+            if idx >= len(master_list):
+                return False
+            # Push choice point to retry from idx+1 (using master_list with new start)
+            has_more = any(
+                master_list[i][0] is not None for i in range(idx + 1, len(master_list))
+            )
+            if has_more:
+                self.push_choice_point(GoalType.DEL_CLAUSE, head, body, (master_list, idx + 1))
+            h0, b0 = master_list[idx]
+            # Store (master_list, idx) so RETRACT modifies the correct master slot.
+            self.push_goal(GoalType.RETRACT, (master_list, idx), None, None)
+        else:
+            if not rule_list_ref or not isinstance(rule_list_ref, list):
+                return False
+            # Find the first non-deleted rule
+            idx = 0
+            while idx < len(rule_list_ref) and (
+                    rule_list_ref[idx][0] is None or rule_list_ref[idx][1] is None):
+                idx += 1
+            if idx >= len(rule_list_ref):
+                return False
+            # Push choice point with the remaining slice
+            next_rules = rule_list_ref[idx + 1:]
+            if next_rules:
+                self.push_choice_point(GoalType.CLAUSE, head, body, next_rules)
+            h0, b0 = rule_list_ref[idx]
 
         _vm: dict = {}
         rule_head = copy_term(h0, _vm)
@@ -627,10 +667,14 @@ class Engine:
 
     # ─── main loop ──────────────────────────────────────────────────────────
 
-    def run(self) -> bool:
+    def run(self, cs_barrier=None) -> bool:
         """
         Run the main prove loop (main_prove in login.c).
         Returns True if the goal_stack was satisfied (at least once).
+
+        cs_barrier: if set, do not backtrack past this choice point.
+            Used when proving fresh queries at depth > 0 to prevent the new
+            query from consuming choice points belonging to an outer query.
         """
         success = True
         self.main_loop_ok = True
@@ -718,21 +762,35 @@ class Engine:
 
             if self.main_loop_ok:
                 if not success:
-                    if self.choice_stack:
+                    # Backtrack to the most recent choice point, but not past
+                    # cs_barrier (which marks the boundary of this fresh query).
+                    can_backtrack = (
+                        self.choice_stack is not None
+                        and (cs_barrier is None or self.choice_stack is not cs_barrier)
+                    )
+                    if can_backtrack:
                         self.backtrack()
                         success = True
                     else:
-                        self.trail.undo_to(0)
+                        if cs_barrier is None:
+                            # No barrier: full cleanup (top-level query)
+                            self.trail.undo_to(0)
+                        # With barrier: don't undo trail — caller (main.py) handles it
                         if self.noisy:
                             print("\n*** No", end='', flush=True)
                         self.main_loop_ok = False
 
         return success
 
-    def prove(self, goal: PsiTerm) -> bool:
-        """Prove a single goal. Returns True on success."""
+    def prove(self, goal: PsiTerm, cs_barrier=None) -> bool:
+        """Prove a single goal. Returns True on success.
+
+        cs_barrier: if set, do not backtrack past this choice point.
+            Pass engine.choice_stack to prevent this fresh query from
+            consuming choice points that belong to an enclosing query.
+        """
         self.push_goal(GoalType.PROVE, goal, _DEFRULES, None)
-        return self.run()
+        return self.run(cs_barrier=cs_barrier)
 
     def _what_next_aim(self) -> bool:
         """Handle user interaction at a query result."""
@@ -820,6 +878,12 @@ class Engine:
 # Sentinel: "use the type's own rule list"
 # ─────────────────────────────────────────────────────────────────────────────
 _DEFRULES = object()  # sentinel — same role as DEFRULES macro in C
+
+# Sentinel used as cs_barrier when a built-in (bi_not, bi_once, bi_cond, …)
+# calls eng.run() for a sub-proof.  When cs_barrier is this sentinel (non-None),
+# run() will NOT undo trail entries to position 0 on failure — it only sets
+# main_loop_ok=False and returns False, leaving outer bindings intact.
+_INNER_RUN_BARRIER = object()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

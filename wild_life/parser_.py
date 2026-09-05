@@ -162,12 +162,26 @@ class Parser:
             a2 = arg2.deref()
             if a1 is not a2:
                 if a1.type is WL.top and not a1.attr_list and not a1.resid:
-                    # a1 が未束縛変数 -> a2 に束縛
-                    a1.coref = arg2
-                    result = arg1
-                    result.attr_list = {}
-                    result.resid = None
-                    return result
+                    # a1 が未束縛変数 -> sort 制約を設定する
+                    # a2 が具体的な型定義を持つ場合は、a1.type にその型を設定する
+                    # (coref ではなく type を設定することで copy_term が新しい変数を作れる)
+                    from wild_life.data_structures import DefType
+                    if (a2.type is not None and a2.type is not WL.top and
+                            a2.value is None and not a2.attr_list and not a2.resid and
+                            a2.type.type == DefType.FUNCTION):
+                        # sort-annotated variable: X:ran -> set a1.type = ran_def
+                        a1.type = a2.type
+                        result = arg1
+                        result.attr_list = {}
+                        result.resid = None
+                        return result
+                    else:
+                        # 通常の束縛 (not a function sort)
+                        a1.coref = arg2
+                        result = arg1
+                        result.attr_list = {}
+                        result.resid = None
+                        return result
                 elif a2.type is WL.top and not a2.attr_list and not a2.resid:
                     # a2 が未束縛変数 -> a1 に束縛
                     a2.coref = arg1
