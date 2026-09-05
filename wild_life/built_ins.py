@@ -189,7 +189,17 @@ def _psi_to_python(t: Optional[PsiTerm], eng):
 
 def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
     from wild_life.print_term import write_term
-    write_term(t, outfile=stream or sys.stdout, quoted=quoted, wl=eng.wl)
+    var_tree = getattr(eng, '_last_var_tree', None)
+    # Evaluate arithmetic expressions before printing (e.g. 23+23 → 46)
+    # Guard against cyclic terms (e.g. X = s(X)) causing infinite recursion
+    try:
+        t_eval = _try_eval_arith_to_term(t, eng)
+        if t_eval is not None:
+            t = t_eval
+    except RecursionError:
+        pass
+    write_term(t, outfile=stream or sys.stdout, quoted=quoted, wl=eng.wl,
+               var_tree=var_tree)
 
 
 def _term_to_str(t: PsiTerm, eng, quoted=True) -> str:
@@ -462,24 +472,105 @@ def bi_arith_ge(goal: PsiTerm, eng) -> bool:
 # Unification / comparison
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _collect_disjunction(t: PsiTerm, eng) -> list:
+    """Collect all leaf elements from a disjunction linked-list into a flat list.
+
+    {1;2;3} is stored as disj(1, disj(2, disj(3, disj_nil))).
+    Returns [term1, term2, term3].
+    """
+    elems = []
+    node = t
+    disj_nil = eng.wl.disj_nil
+    while node is not None:
+        node = node.deref()
+        if node.type is None:
+            break
+        if node.type is disj_nil or node.type is eng.wl.disj_nil:
+            break
+        if node.type is eng.wl.disjunction:
+            head = node.attr_list.get('1')
+            tail = node.attr_list.get('2')
+            if head is not None:
+                elems.append(head.deref())
+            node = tail.deref() if tail else None
+        else:
+            # Not a disjunction node — treat as leaf
+            elems.append(node)
+            break
+    return elems
+
+
+def _is_user_function(t: PsiTerm) -> bool:
+    """Return True if t is a user-defined function call (has -> rules)."""
+    if t is None:
+        return False
+    t = t.deref()
+    defn = t.type
+    if defn is None:
+        return False
+    if defn.type != DefType.FUNCTION:
+        return False
+    if defn._builtin_func is not None:
+        return False
+    if not defn.rule:
+        return False
+    return True
+
+
 def bi_unify(goal: PsiTerm, eng) -> bool:
     """X = Y — LIFE sort unification (with functional evaluation)."""
     a, b = _get_two_args(goal)
     if a is None or b is None:
         return a is b
-    # Try to evaluate functional terms before unifying
-    b_evaled = _try_eval_bool(b, eng)
+
+    a_d = a.deref()
+    b_d = b.deref()
+
+    # Try to evaluate b as a user-defined function call (f -> result style)
+    if _is_user_function(b_d):
+        result = PsiTerm(type_def=eng.wl.top)
+        # LIFO: push UNIFY first, then EVAL on top (EVAL executes first)
+        eng.push_goal(GoalType.UNIFY, a_d, result, None)
+        eng.push_goal(GoalType.EVAL, b_d, result, b_d.type.rule)
+        return True
+
+    # Try to evaluate a as a user-defined function call
+    if _is_user_function(a_d):
+        result = PsiTerm(type_def=eng.wl.top)
+        eng.push_goal(GoalType.UNIFY, result, b_d, None)
+        eng.push_goal(GoalType.EVAL, a_d, result, a_d.type.rule)
+        return True
+
+    # Handle disjunction on RHS: A = {b1;b2;...} → try A=b1, choice for rest
+    if b_d.type is not None and b_d.type is eng.wl.disjunction:
+        elems = _collect_disjunction(b_d, eng)
+        if elems:
+            # Push choice points in reverse order (last alternative first)
+            for alt in reversed(elems[1:]):
+                eng.push_choice_point(GoalType.UNIFY, a_d, alt, None)
+            return _unify(eng, a_d, elems[0])
+
+    # Handle disjunction on LHS: {a1;a2} = B → try a1=B with choice for rest
+    if a_d.type is not None and a_d.type is eng.wl.disjunction:
+        elems = _collect_disjunction(a_d, eng)
+        if elems:
+            for alt in reversed(elems[1:]):
+                eng.push_choice_point(GoalType.UNIFY, alt, b_d, None)
+            return _unify(eng, elems[0], b_d)
+
+    # Try to evaluate functional terms before unifying (boolean ops)
+    b_evaled = _try_eval_bool(b_d, eng)
     if b_evaled is not None:
-        b = b_evaled
+        b_d = b_evaled
     else:
-        a_evaled = _try_eval_bool(a, eng)
+        a_evaled = _try_eval_bool(a_d, eng)
         if a_evaled is not None:
-            a = a_evaled
+            a_d = a_evaled
     # Try arithmetic evaluation on the RHS (for A = 1+2 style)
-    b_arith = _try_eval_arith_to_term(b, eng)
+    b_arith = _try_eval_arith_to_term(b_d, eng)
     if b_arith is not None:
-        b = b_arith
-    return _unify(eng, a, b)
+        b_d = b_arith
+    return _unify(eng, a_d, b_d)
 
 
 def bi_not_unify(goal: PsiTerm, eng) -> bool:

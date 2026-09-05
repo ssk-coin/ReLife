@@ -212,7 +212,8 @@ class Engine:
             return True
 
         # ── OR / disjunction ──
-        if defn == wl.disjunction:
+        # Both wl.disjunction ({a;b} curly form) and wl.life_or (a;b infix form)
+        if defn == wl.disjunction or defn == wl.life_or:
             self.goal_stack = aim.next
             self.goal_count += 1
             arg1 = thegoal.attr_list.get('1')

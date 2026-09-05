@@ -49,7 +49,8 @@ def title(quiet: bool = False) -> None:
 #   pre_mark     - trail mark BEFORE proving this query (for undo on pop)
 #   bindings_str - formatted variable bindings string (e.g. "A = 1, B = 2.")
 #   cs_before    - choice_stack BEFORE proving (for restoring on pop)
-Frame = namedtuple('Frame', ['pre_mark', 'bindings_str', 'cs_before'])
+#   var_tree     - the variable tree for this query (to merge at deeper levels)
+Frame = namedtuple('Frame', ['pre_mark', 'bindings_str', 'cs_before', 'var_tree'])
 
 
 def _prompt(depth: int) -> str:
@@ -64,18 +65,28 @@ def _prompt(depth: int) -> str:
     return "--" * depth + str(depth) + "> "
 
 
-def _format_bindings(var_tree: dict, engine) -> str:
+def _format_bindings(var_tree: dict, engine, extra_var_trees=None) -> str:
     """Format all named variables as a single-line string like 'A = 1, B = 2.'
 
     Returns empty string if there are no named variables (or all anonymous).
+    If extra_var_trees is a list of additional var_tree dicts, they are merged
+    in (for nested constraint sessions showing accumulated bindings).
     """
     from wild_life.print_term import print_variables
 
-    if not var_tree:
+    # Merge all var_trees (current + parent frames)
+    merged = {}
+    for vt in (extra_var_trees or []):
+        if vt:
+            merged.update(vt)
+    if var_tree:
+        merged.update(var_tree)
+
+    if not merged:
         return ""
 
     buf = io.StringIO()
-    had_vars = print_variables(var_tree, outfile=buf, wl=engine.wl)
+    had_vars = print_variables(merged, outfile=buf, wl=engine.wl)
     result = buf.getvalue()
     # print_variables now writes "." at end without newline
     if not had_vars:
@@ -219,8 +230,15 @@ def run_repl(
                 if depth == 0 or not frame_stack:
                     _write_prompt(depth)
                     continue
-                if not engine.choice_stack:
-                    # No more alternatives — pop one level
+                # Check if there are alternatives for THIS depth level specifically.
+                # The current frame's cs_before is the choice stack state before
+                # the current query was proved. Alternatives "above" cs_before
+                # belong to the current depth; cs_before itself belongs to outer levels.
+                current_cs_before = frame_stack[-1].cs_before if frame_stack else None
+                has_own_choices = (engine.choice_stack is not None and
+                                   engine.choice_stack is not current_cs_before)
+                if not has_own_choices:
+                    # No more alternatives at this depth — pop one level
                     parent_bindings = _pop_frame()
                     sys.stdout.write("\n*** No\n")
                     if parent_bindings:
@@ -238,8 +256,13 @@ def run_repl(
                     engine.noisy = saved_noisy
 
                 if success:
-                    var_tree = getattr(engine, '_last_var_tree', {})
-                    bindings_str = _format_bindings(var_tree, engine)
+                    # Use the CURRENT frame's var_tree (not engine._last_var_tree
+                    # which may point to a deeper/popped query's variables)
+                    var_tree = frame_stack[-1].var_tree if frame_stack else {}
+                    # Include parent frames' vars in the display
+                    parent_var_trees = [f.var_tree for f in frame_stack[:-1] if f.var_tree]
+                    bindings_str = _format_bindings(var_tree, engine,
+                                                    extra_var_trees=parent_var_trees)
                     # Update current frame's stored bindings
                     if frame_stack:
                         frame_stack[-1] = frame_stack[-1]._replace(
@@ -247,7 +270,21 @@ def run_repl(
                     sys.stdout.write("\n*** Yes\n")
                     if bindings_str:
                         sys.stdout.write(bindings_str + "\n")
-                    _write_prompt(depth)
+                    # Check if this was the LAST alternative (no more own choices).
+                    # Auto-pop ONLY if the current frame has no own variable bindings
+                    # (pure side-effect alternatives like write/disjunction in goal pos).
+                    # If the frame has own variables, stay at current depth so the user
+                    # can inspect bindings before popping.
+                    current_cs_before2 = frame_stack[-1].cs_before if frame_stack else None
+                    still_has_own = (engine.choice_stack is not None and
+                                     engine.choice_stack is not current_cs_before2)
+                    frame_has_own_vars = bool(frame_stack[-1].var_tree) if frame_stack else False
+                    if not still_has_own and not frame_has_own_vars:
+                        # Last alternative consumed, no own vars → auto-pop to parent level
+                        _pop_frame()
+                        _write_prompt(depth)
+                    else:
+                        _write_prompt(depth)
                 else:
                     # Exhausted alternatives — pop one level
                     parent_bindings = _pop_frame()
@@ -317,24 +354,37 @@ def run_repl(
                     engine.noisy = saved_noisy
 
                 if success:
-                    bindings_str = _format_bindings(var_tree, engine)
                     # Detect new choice points: cs_before was None and now it's not,
                     # or cs_before was a node and now there are more nodes above it.
                     has_new_choices = (engine.choice_stack is not None and
                                        engine.choice_stack is not cs_before)
-                    if bindings_str or has_new_choices:
-                        # Query has bindings or remaining choice points → enter a new depth level
-                        frame_stack.append(Frame(pre_mark, bindings_str, cs_before))
+                    # Check if the CURRENT QUERY has own named variables
+                    # (not just inherited from parent frames)
+                    own_bindings_str = _format_bindings(var_tree, engine)
+                    if own_bindings_str or has_new_choices:
+                        # Query has own bindings or new choice points → enter a new depth level
+                        # Compute the merged display string (including parent frames' vars)
+                        parent_var_trees = [f.var_tree for f in frame_stack if f.var_tree]
+                        bindings_str = _format_bindings(var_tree, engine,
+                                                        extra_var_trees=parent_var_trees)
+                        frame_stack.append(Frame(pre_mark, bindings_str, cs_before, var_tree))
                         depth += 1
                         sys.stdout.write("\n*** Yes\n")
                         if bindings_str:
                             sys.stdout.write(bindings_str + "\n")
                     else:
-                        # No variables, no choice points → stay at current depth, undo trail
+                        # No own variables, no choice points → stay at current depth, undo trail
                         engine.trail.undo_to(pre_mark)
                         engine.choice_stack = cs_before
                         engine.goal_stack = None
                         sys.stdout.write("\n*** Yes\n")
+                        # Show accumulated parent bindings (if any) even without own vars
+                        if depth > 0:
+                            parent_var_trees = [f.var_tree for f in frame_stack if f.var_tree]
+                            merged_str = _format_bindings({}, engine,
+                                                          extra_var_trees=parent_var_trees)
+                            if merged_str:
+                                sys.stdout.write(merged_str + "\n")
                     _write_prompt(depth)
                 else:
                     # Failure: undo failed attempt
