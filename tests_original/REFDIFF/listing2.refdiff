@@ -1,0 +1,25 @@
+--- OUT/listing2.out
++++ REFOUT/listing2.refout
+@@ -1,11 +1,16 @@
++
++:: _A: positive | _A > 0.
++positive <| int.
++
++:: _A: zero | _A = 0.
++zero <| @.
+ 
+ *** Yes
+ > > 
++*** No
++> 
+ *** Yes
+-A = zero.
++> 
++*** Yes
++A = 0: zero.
+ --1> 
+-*** Yes
+---1> 
+-*** Yes
+-A = zero.
+-----2> 

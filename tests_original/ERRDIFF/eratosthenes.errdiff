@@ -1,0 +1,9 @@
+--- ERR/eratosthenes.err
++++ REFERR/eratosthenes.referr
+@@ -1,6 +0,0 @@
+-*** Syntax error: '20'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: '100'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: '100'
+-    (Hint: facts end with '.' and queries end with '?')

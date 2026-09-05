@@ -1,0 +1,33 @@
+--- OUT/compose.out
++++ REFOUT/compose.refout
+@@ -2,11 +2,25 @@
+ *** Yes
+ > > 
+ *** Yes
+-X = add3.
++X = comp(func1 => comp(func1 => succ,func2 => succ),func2 => succ).
+ --1> 
+ *** Yes
+-X = @, Y = apply(23,functor => X).
+-----2> > > 
++X = comp(func1 => comp(func1 => succ,func2 => succ),func2 => succ), Y = 26.
++----2> > 
+ *** Yes
+-X = @, Y = apply(0,functor => X).
+---1> > 
++X = comp(func1 => comp(func1 => comp(func1 => comp(func1 => succ,func2 => succ),
++                                     func2 => succ),
++                       func2 => comp(func1 => comp(func1 => succ,func2 => succ),
++                                     func2 => succ)),
++         func2 => succ).
++
++--1> 
++*** Yes
++X = comp(func1 => comp(func1 => comp(func1 => comp(func1 => succ,func2 => succ),
++                                     func2 => succ),
++                       func2 => comp(func1 => comp(func1 => succ,func2 => succ),
++                                     func2 => succ)),
++         func2 => succ), 
++Y = 7.
++
++----2> > 

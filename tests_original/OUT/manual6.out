@@ -2,8 +2,8 @@
 *** Yes
 > > 
 *** Yes
-R = rectangle(area => 16,length => 4,width => 4).
+R = rectangle(area => 16,width => 4).
 --1> 
 *** Yes
-R = square(area => 16,length => _A: 4,side => _A,width => _A).
+R = square.
 ----2> > 

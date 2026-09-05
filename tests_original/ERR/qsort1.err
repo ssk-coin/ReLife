@@ -1,0 +1,29 @@
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got '['
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ']'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: ')' missing
+*** Syntax error: expected '?' or '.' but got '\\'
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: expected '?' or '.' but got 'where'
+*** Syntax error: ')' missing
+*** Syntax error: ')' missing
+*** Syntax error: expected '?' or '.' but got '\\'
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: expected '?' or '.' but got 'dqsort'
+*** Syntax error: ')' missing
+*** Syntax error: expected '?' or '.' but got '\\'
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: expected '?' or '.' but got 'dqsort'
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: expected '?' or '.' but got '\\'
+*** Error: cannot redefine @ as DefType.PREDICATE.

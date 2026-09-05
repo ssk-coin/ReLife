@@ -2,62 +2,60 @@
 *** Yes
 > > > aa
 *** Yes
-A = W + E, E = @, W = @.
+A = parse("W+E.").
 --1> 
 *** Yes
-A = W + E, E = @, W = 34.
+W = 34.
 ----2> 
 *** Yes
-A = W + E, E = 45, W = 34.
+E = 45.
 ------3> bb
 *** Yes
-A = W + E, B = 79, E = 45, W = 34.
+A = @, B = eval(A).
 --------4> > 
 *** Yes
 X = 34.
 --1> cc
 *** Yes
-X = 34, Y = X + X.
+Y = parse("X+X.").
 ----2> dd
 *** Yes
-X = 34, Y = X + X, Z = 68.
+Y = @, Z = eval(Y).
 ------3> > 
 *** Yes
 W = 1.
 --1> 
 *** No
-W = 1.
---1> 
+> 
 *** No
-W = 1.
---1> > 
+> > 
 *** Yes
 A = parse.
 --1> 
 *** Yes
-A = parse, Q = @~, X = @.
+A = @, Q = @, X = apply(Q,functor => A).
 ----2> 
 *** Yes
-A = parse, Q = "1+2.", X = 1 + 2.
+Q = "1+2.".
 ------3> 
 *** Yes
-A = parse, B = 3, Q = "1+2.", X = 1 + 2.
+B = eval(X), X = @.
 --------4> > 
 *** Yes
-A = "1+2.".
+A = parse("""1+2."".").
 --1> 
 *** Yes
-A = "1+2.", B = 1 + 2.
+A = @, B = parse(A).
 ----2> 
 *** Yes
-A = "1+2.", B = 1 + 2, C = 3.
+B = @, C = eval(B).
 ------3> > 
 *** Yes
-A = @, S = @~.
+A = parse(S), S = @.
 --1> 
 *** Yes
-A = 1 + 2, S = "1+2.".
+S = "1+2.".
 ----2> 
 *** Yes
-A = 1 + 2, C = 3, S = "1+2.".
+A = @, C = eval(A).
 ------3> > > 

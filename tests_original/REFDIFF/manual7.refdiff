@@ -1,0 +1,9 @@
+--- OUT/manual7.out
++++ REFOUT/manual7.refout
+@@ -5,5 +5,5 @@
+ A = person.
+ --1> 
+ *** Yes
+-A = @(nose => pretty).
++A = cleopatra(best_friend => julius,nose => pretty,occupation => queen).
+ ----2> 

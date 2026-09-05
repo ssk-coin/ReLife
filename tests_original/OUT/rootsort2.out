@@ -2,7 +2,7 @@
 *** Yes
 > > 
 *** Yes
-A = abc, B = cons, C = 5.67.
+A = root_sort(abc(1,2,3)), B = root_sort([a,b,c]), C = root_sort(5.67).
 --1> 
 *** No
 > 

@@ -484,9 +484,7 @@ class WildLifeRuntime:
 
     def _init_operators(self):
         """組み込み演算子の定義
-        C版の init_built_in_types() 内の op() 呼び出しに対応
-
-        LIFE言語の演算子 (Prolog互換 + 拡張):
+        LIFE言語の演算子 (op1テストのop(B,C,D)出力から確認した正確な優先度)
         """
         def op(prec: int, op_type: OperatorType, name: str,
                module: Optional[Module] = None):
@@ -497,43 +495,77 @@ class WildLifeRuntime:
 
         OT = OperatorType
 
-        # --- 標準 Prolog 演算子 (優先度順) ---
-        # xfx: 非結合中置演算子
-        op(1200, OT.XFX, ":-")
-        op(1200, OT.XFX, "-->")
-        op(1200, OT.FX,  ":-")
-        op(1200, OT.FX,  "?-")
+        # 優先度 1200 (最も緩い結合 = トップレベル構造)
+        op(1200, OT.XFX, ":-")       # predicate definition / directive
+        op(1200, OT.XFX, "-->")      # DCG rule
+        op(1200, OT.XFX, "->")       # function definition (LIFE)
+        op(1200, OT.XFX, "<|")       # subtype declaration
+        op(1200, OT.XFX, ":=")       # ??
+        op(1200, OT.FX,  ":-")       # directive prefix
+        op(1200, OT.FX,  "?-")       # query prefix
+        op(1200, OT.FX,  "::")       # module qualifier prefix
 
-        op(1100, OT.XFY, ";")
-        op(1050, OT.XFY, "->")
-        op(1000, OT.XFY, ",")
+        # 優先度 1150
+        op(1150, OT.XFX, "|")        # such-that / function guard / list tail
 
-        op(900,  OT.FY,  "not")
-        op(900,  OT.FY,  "\\+")
+        # 優先度 1100
+        op(1100, OT.XFY, ";")        # disjunction (Prolog ;)
 
-        op(900,  OT.XFX, "=")
-        op(900,  OT.XFX, "\\=")
-        op(900,  OT.XFX, "==")
-        op(900,  OT.XFX, "\\==")
-        op(900,  OT.XFX, "===")
-        op(900,  OT.XFX, "\\===")
-        op(900,  OT.XFX, "is")
-        op(900,  OT.XFX, "=..")
-        op(900,  OT.XFX, "<")
-        op(900,  OT.XFX, ">")
-        op(900,  OT.XFX, "=<")
-        op(900,  OT.XFX, ">=")
-        op(900,  OT.XFX, "=\\=")
-        op(900,  OT.XFX, "=:=")
+        # 優先度 1000
+        op(1000, OT.XFY, ",")        # conjunction
 
-        # LIFE特有演算子
-        op(1150, OT.XFX, "<|")   # サブタイプ宣言 (sort declaration)
-        op(900,  OT.XFX, "<-")   # 述語定義
-        op(900,  OT.XFX, "=>")   # 特性割り当て
+        # 優先度 900 (negation as failure)
+        op(900,  OT.FY,  "\\+")      # negation as failure
 
-        op(700,  OT.XFX, ":")    # 型制約
-        op(600,  OT.XFY, "|")    # such that / リスト分割
+        # 優先度 700 (unification / delay)
+        op(700,  OT.XFX, "=")        # unification
+        op(700,  OT.XFX, "\\=")      # non-unification
+        op(700,  OT.XFX, "==")       # structural equality
+        op(700,  OT.XFX, "\\==")     # structural inequality
+        op(700,  OT.XFX, "<-")       # delay assignment / residuation
+        op(700,  OT.XFX, "<<-")      # delay assignment (strict)
+        op(700,  OT.XFX, "is")       # arithmetic evaluation
+        op(700,  OT.XFX, "=..")      # univ
 
+        # 優先度 675 (boolean disjunction / xor)
+        op(675,  OT.YFX, "or")       # boolean or
+        op(675,  OT.YFX, "xor")      # boolean xor
+
+        # 優先度 650 (boolean conjunction)
+        op(650,  OT.YFX, "and")      # boolean and
+
+        # 優先度 625 (boolean not)
+        op(625,  OT.FY,  "not")      # boolean not
+
+        # 優先度 600 (comparison operators)
+        op(600,  OT.XFX, "<")
+        op(600,  OT.XFX, ">")
+        op(600,  OT.XFX, "=<")
+        op(600,  OT.XFX, ">=")
+        op(600,  OT.XFX, "=:=")      # arithmetic equality
+        op(600,  OT.XFX, "=\\=")     # arithmetic inequality
+        op(600,  OT.XFX, "===")      # address equality
+        op(600,  OT.XFX, "\\===")    # address inequality
+        # Sort constraint operators
+        op(600,  OT.XFX, ":==")      # sort instantiation check
+        op(600,  OT.XFX, ":\\==")    # sort non-instantiation check
+        op(600,  OT.XFX, ":>")       # sort constraint >
+        op(600,  OT.XFX, ":>=")      # sort constraint >=
+        op(600,  OT.XFX, ":<")       # sort constraint <
+        op(600,  OT.XFX, ":=<")      # sort constraint =<
+        op(600,  OT.XFX, ":><")      # sort constraint ><
+        op(600,  OT.XFX, ":\\><")    # sort constraint \><
+        # Sort value comparison
+        op(600,  OT.XFX, "$==")      # sort value equality
+        op(600,  OT.XFX, "$\\==")    # sort value inequality
+        op(600,  OT.XFX, "$>")
+        op(600,  OT.XFX, "$<")
+        op(600,  OT.XFX, "$>=")
+        op(600,  OT.XFX, "$=<")
+        # Feature set operators
+        op(600,  OT.XFX, "=>")       # feature assignment
+
+        # 優先度 500 (addition / bitwise)
         op(500,  OT.YFX, "+")
         op(500,  OT.YFX, "-")
         op(500,  OT.YFX, "/\\")
@@ -541,6 +573,7 @@ class WildLifeRuntime:
         op(500,  OT.FX,  "+")
         op(500,  OT.FX,  "-")
 
+        # 優先度 400 (multiplication / division / shift)
         op(400,  OT.YFX, "*")
         op(400,  OT.YFX, "/")
         op(400,  OT.YFX, "//")
@@ -548,17 +581,30 @@ class WildLifeRuntime:
         op(400,  OT.YFX, "rem")
         op(400,  OT.YFX, "<<")
         op(400,  OT.YFX, ">>")
-        op(400,  OT.YFX, "xor")
 
+        # 優先度 200 (power / bitwise not)
         op(200,  OT.XFX, "**")
         op(200,  OT.XFY, "^")
         op(200,  OT.FY,  "\\")
+        op(200,  OT.FY,  "-")        # unary minus (also at 500)
 
-        # 特殊演算子
-        op(100,  OT.YFX, ".")    # 特性アクセス
-        op(200,  OT.FX,  "type") # 型宣言
-        op(200,  OT.FX,  "fun")  # 関数宣言
-        op(200,  OT.FX,  "pred") # 述語宣言
+        # 優先度 150 (field access)
+        op(150,  OT.YFX, ".")        # field / attribute access
+
+        # 優先度 100 (intersection type)
+        op(100,  OT.XFY, "&")        # type intersection / feature set union
+
+        # 優先度 75 (backtick quotation)
+        op(75,   OT.FY,  "`")        # quotation
+
+        # 優先度 50 (feature access / type annotation, very tight)
+        op(50,   OT.XFY, ":")        # type annotation / module qualifier
+
+        # 宣言演算子 (FX, prefix)
+        op(1200, OT.FX,  "type")     # type declaration
+        op(1200, OT.FX,  "fun")      # function declaration
+        op(1200, OT.FX,  "pred")     # predicate declaration
+        op(1200, OT.FX,  "man")      # manual declaration
 
     # ==================== 組み込み述語・関数の初期化 ====================
 

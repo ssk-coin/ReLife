@@ -1,0 +1,48 @@
+*** Syntax error: 'hands => clumsy,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'brain => slow_witted,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: "favorite_exclamation => 'arghh!!',"
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'teeth => yellow);'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'known_letters => [a,b,c,y,t,w,i,o],'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'brain => hurts);'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'length => short),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'beauty => gorgon_like)},'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'spots => ugly),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'mother => witch,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'father => tax_collector)),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'Y = copy_term(X),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'hands => clumsy,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'brain => slow_witted,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: "favorite_exclamation => 'arghh!!',"
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'teeth => yellow);'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'known_letters => [a,b,c,y,t,w,i,o],'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'brain => hurts);'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'length => short),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'beauty => gorgon_like)},'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'spots => ugly),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'mother => witch,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'father => tax_collector)),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'Y = copy_term(X),'
+    (Hint: facts end with '.' and queries end with '?')

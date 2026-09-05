@@ -1,0 +1,21 @@
+--- OUT/query_decl.out
++++ REFOUT/query_decl.refout
+@@ -5,12 +5,16 @@
+ A = real.
+ --1> 
+ *** Yes
+---1> b(@ & int,@).
++A = real.
++--1> 
++b(real & int,@) :-
++        succeed.
+ 
+ *** Yes
++A = real.
+ --1> 
+ *** Yes
+-C = @ & int, D = @.
++A = real, C = int, D = @.
+ ----2> 
+ *** No
+ A = real.

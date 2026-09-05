@@ -1,0 +1,5 @@
+--- ERR/anyorder.err
++++ REFERR/anyorder.referr
+@@ -1,2 +0,0 @@
+-*** Error: cannot redefine last as DefType.FUNCTION.
+-*** Error: cannot redefine last as DefType.FUNCTION.

@@ -1,0 +1,33 @@
+--- OUT/psi2str.out
++++ REFOUT/psi2str.refout
+@@ -2,25 +2,25 @@
+ *** Yes
+ > > 
+ *** Yes
+-A = psi2str(abc).
++A = "abc".
+ --1> 
+ *** No
+ > 
+ *** Yes
+-A = psi2str("abc").
++A = "abc".
+ --1> 
+ *** No
+ > 
+ *** Yes
+-A = psi2str(5).
++A = "5".
+ --1> 
+ *** No
+ > 
+ *** Yes
+-A = psi2str(2.33).
++A = "2.33".
+ --1> 
+ *** No
+ > 
+ *** Yes
+-A = psi2str(!).
++A = "!".
+ --1> 

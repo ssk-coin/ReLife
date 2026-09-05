@@ -1,0 +1,14 @@
+--- OUT/module_test3.out
++++ REFOUT/module_test3.refout
+@@ -1,9 +1,7 @@
+ 
+ *** Yes
+ > > 
+-*** No
+-> b(c => d).
+-b(c => d,e => f).
+-
+ *** Yes
+ > 
++*** Yes
++> 

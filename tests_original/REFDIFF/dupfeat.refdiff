@@ -1,0 +1,16 @@
+--- OUT/dupfeat.out
++++ REFOUT/dupfeat.refout
+@@ -1,12 +1,3 @@
+ 
+ *** Yes
+-> > 
+-*** Yes
+-A = f(a).
+---1> 
+-*** Yes
+-A = f(a,s,foo => q).
+-----2> 
+-*** Yes
+-A = f(q,w,e).
+-------3> 
++> > > > > 

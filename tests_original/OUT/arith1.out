@@ -2,149 +2,149 @@
 *** Yes
 > > 
 *** Yes
-A = real~, B = real~, C = real~.
+A = B + C, B = @, C = @.
 --1> 
 *** Yes
-A = real, B = 0, C = A.
+B = 0.
 ----2> 
 *** No
-A = real~, B = real~, C = real~.
+A = B + C, B = @, C = @.
 --1> 
 *** Yes
-A = real, B = A, C = 0.
+C = 0.
 ----2> 
 *** No
-A = real~, B = real~, C = real~.
+A = B + C, B = @, C = @.
 --1> 
 *** Yes
-A = real, B = A, C = 0.
+A = @, B = @.
 ----2> 
 *** No
-A = real~, B = real~, C = real~.
+A = B + C, B = @, C = @.
 --1> 
 *** Yes
-A = real, B = 0, C = A.
+A = @, C = @.
 ----2> 
 *** No
-A = real~, B = real~, C = real~.
+A = B + C, B = @, C = @.
 --1> 
 *** Yes
-A = real~, B = real~, C = B.
+B = @, C = @.
 ----2> 
 *** Yes
-A = 23, B = 11.5, C = B.
+A = 23.
 ------3> 
 *** No
-A = real~, B = real~, C = B.
+B = @, C = @.
 ----2> 
 *** Yes
-A = 46, B = 23, C = B.
+B = 23.
 ------3> > 
 *** Yes
-A = real~, B = real~, C = real~.
+A = B * C, B = @, C = @.
 --1> 
 *** Yes
-A = 0, B = 0, C = real.
+B = 0.
 ----2> 
 *** No
-A = real~, B = real~, C = real~.
+A = B * C, B = @, C = @.
 --1> 
 *** Yes
-A = real, B = 1, C = A.
+B = 1.
 ----2> 
 *** No
-A = real~, B = real~, C = real~.
+A = B * C, B = @, C = @.
 --1> 
 *** Yes
-A = 0, B = real, C = 0.
+C = 0.
 ----2> 
 *** No
-A = real~, B = real~, C = real~.
+A = B * C, B = @, C = @.
 --1> 
 *** Yes
-A = real, B = A, C = 1.
+C = 1.
 ----2> 
 *** No
-A = real~, B = real~, C = real~.
+A = B * C, B = @, C = @.
 --1> 
 *** Yes
-A = real~, B = A, C = real~.
+A = @, B = @.
 ----2> 
 *** No
-A = real~, B = real~, C = real~.
+A = B * C, B = @, C = @.
 --1> 
 *** Yes
-A = real~, B = real~, C = B.
+B = @, C = @.
 ----2> > 
 *** Yes
-A = real~, B = real~, C = real~.
+A = B - C, B = @, C = @.
 --1> 
 *** Yes
-A = real, B = A, C = 0.
+C = 0.
 ----2> 
 *** No
-A = real~, B = real~, C = real~.
+A = B - C, B = @, C = @.
 --1> 
 *** Yes
-A = real, B = A, C = 0.
+A = @, B = @.
 ----2> 
 *** No
-A = real~, B = real~, C = real~.
+A = B - C, B = @, C = @.
 --1> 
 *** Yes
-A = 0, B = real, C = B.
+A = 0.
 ----2> 
 *** No
-A = real~, B = real~, C = real~.
+A = B - C, B = @, C = @.
 --1> 
 *** Yes
-A = 0, B = real, C = B.
+B = @, C = @.
 ----2> > 
 *** Yes
-A = real~, B = real~.
+A = B + B, B = @.
 --1> 
 *** Yes
-A = 10, B = 5.
+A = 10.
 ----2> 
 *** No
-A = real~, B = real~.
+A = B + B, B = @.
 --1> 
 *** Yes
-A = 20, B = 10.
+B = 10.
 ----2> > 
 *** Yes
-A = real~, B = real~.
+A = @, B = A -(B).
 --1> 
 *** Yes
-A = 34, B = 17.
+A = 34.
 ----2> 
 *** No
-A = real~, B = real~.
+A = @, B = A -(B).
 --1> 
 *** Yes
-A = 68, B = 34.
+B = 34.
 ----2> > 
 *** Yes
-A = real~, B = real~.
+A = B *(A), B = @.
 --1> 
 *** Yes
-A = 1, B = 1.
+A = 1.
 ----2> 
 *** No
-A = real~, B = real~.
+A = B *(A), B = @.
 --1> 
 *** Yes
-A = real, B = 1.
+B = 1.
 ----2> 
 *** No
-A = real~, B = real~.
+A = B *(A), B = @.
 --1> 
 *** Yes
-A = 0, B = 0.
+B = 0.
 ----2> 
 *** No
-A = real~, B = real~.
+A = B *(A), B = @.
 --1> 
 *** Yes
-A = 0, B = real.
+A = 0.
 ----2> > 

@@ -5,14 +5,14 @@
 A = [].
 --1> 
 *** Yes
-A = [].
+A = features(A).
 ----2> > 
 *** Yes
 A = [1,2].
 --1> 
 *** Yes
-A = [1,2].
+A = features(A).
 ----2> > 
 *** Yes
-A = [day,hour,minute,month,second,weekday,year].
+A = features(local_time).
 --1> > 

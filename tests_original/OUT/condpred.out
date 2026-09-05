@@ -2,12 +2,12 @@
 *** Yes
 > > 
 *** Yes
-A = 1, B = 2.
+A = cond(p(a),1,2), B = cond(p(b),1,2).
 --1> 
 *** No
 > 
 *** Yes
-A = 3, X = x.
+A = cond(p(X),3,4), X = @.
 --1> 
 *** No
 > 

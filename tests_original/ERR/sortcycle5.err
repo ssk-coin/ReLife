@@ -1,2 +1,0 @@
-*** Error: there is a cycle in the sort hierarchy
-*** Cycle: [o <| b <| d <| e <| j <| o]

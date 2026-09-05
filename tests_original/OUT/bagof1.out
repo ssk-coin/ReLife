@@ -1,9 +1,9 @@
 
 *** Yes
-> > [3,2,1]
+> > bagof(_A,p(_A))
 
 *** Yes
-> [2.23607,49,120]
+> bagof(apply(5,functor => _A),q(_A))
 
 *** Yes
 > 

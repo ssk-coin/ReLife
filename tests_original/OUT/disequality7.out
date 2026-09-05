@@ -2,22 +2,23 @@
 *** Yes
 > > 
 *** Yes
-X1 = int~, X2 = @~, Y = @.
---1> 
-*** No
-X1 = int~, X2 = @~, Y = @.
+X1 = int, X2 = @, Y = f(a(a(X1)),a(a(X2))).
 --1> 
 *** Yes
-X1 = int~, X2 = int~, Y = @.
+X2 = string.
 ----2> 
 *** Yes
-X1 = int, X2 = X1, Y = @.
+X2 = int.
+------3> 
+*** Yes
+X1 = @, X2 = @.
+--------4> 
+*** No
+X2 = int.
 ------3> 
 *** No
-X1 = int~, X2 = int~, Y = @.
+X2 = string.
 ----2> 
 *** No
-X1 = int~, X2 = @~, Y = @.
+X1 = int, X2 = @, Y = f(a(a(X1)),a(a(X2))).
 --1> 
-*** No
-> 

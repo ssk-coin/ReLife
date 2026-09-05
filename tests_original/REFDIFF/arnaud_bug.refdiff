@@ -1,0 +1,29 @@
+--- OUT/arnaud_bug.out
++++ REFOUT/arnaud_bug.refout
+@@ -1,5 +1,25 @@
+ 
+ *** Yes
+-> > abc
++> > abcu1dee1fghkpl
++0
++bcu1dee1fghkpl
++1
++bcu1dee1fghkpl
++2
++bcu1dee1fghkpl
++3
++bcu1dee1fghkpl
++4
++bcu1dee1fghkpl
++5
++bcu1dee1fghkpl
++6
++bcu1dee1fghkpl
++7
++bcu1dee1fghkpl
++8
++bcu1dee1fghkpl
++9
++
+ *** No
+ > 

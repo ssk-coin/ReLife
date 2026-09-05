@@ -1,0 +1,4 @@
+--- ERR/consult.err
++++ REFERR/consult.referr
+@@ -1 +0,0 @@
+-*** Error: cannot open file 'LF/consult.lf'.

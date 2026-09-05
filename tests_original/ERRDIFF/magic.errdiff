@@ -1,0 +1,4 @@
+--- ERR/magic.err
++++ REFERR/magic.referr
+@@ -1 +0,0 @@
+-*** Error: cannot redefine number as DefType.FUNCTION.

@@ -1,0 +1,15 @@
+--- OUT/unary.out
++++ REFOUT/unary.refout
+@@ -2,10 +2,10 @@
+ *** Yes
+ > > 
+ *** Yes
+-A = + B, B = @.
++A = +(B), B = real.
+ --1> > 
+ *** Yes
+-A = - B, B = @.
++A = real~, B = real~.
+ --1> > 
+ *** Yes
+ A = +(2 => B), B = @.

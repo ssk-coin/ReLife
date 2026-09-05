@@ -5,35 +5,33 @@
 > 
 *** Yes
 > 
-*** Yes
+*** No
 > 
 *** Yes
 > 
+*** Yes
+> 
+*** Yes
+> p(b).
+p(c).
+p(d).
+
 *** Yes
 > 
 *** No
 > 
-p(a) :-
-        succeed.
-p(b) :-
-        succeed.
-
+*** No
+> > 
 *** Yes
 > 
-*** Yes
+*** No
 > 
 *** Yes
---1> > 
-*** Yes
-> 
-*** Yes
-> 
-*** Yes
-> 
-p(b) :-
-        succeed.
-p(e) :-
-        succeed.
+> p(b).
+p(c).
+p(d).
+p(e).
+p(f).
 
 *** Yes
 > 

@@ -1,0 +1,16 @@
+--- ERR/printvar.err
++++ REFERR/printvar.referr
+@@ -1,13 +0,0 @@
+-*** Error: cannot open file 'LF/printvar.lf'.
+-*** Syntax error: ';'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: ';'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: ';'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: ';'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: ';'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: ';'
+-    (Hint: facts end with '.' and queries end with '?')

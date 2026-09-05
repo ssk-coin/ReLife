@@ -1,0 +1,48 @@
+--- OUT/op2.out
++++ REFOUT/op2.refout
+@@ -1,29 +1,29 @@
+ 
+ *** Yes
+ > > 
+-*** Yes
++*** No
+ > 
+-*** Yes
++*** No
+ > 
+-*** Yes
++*** No
+ > 
+-*** Yes
+-A = @.
+---1> 
++*** No
++> > 
++*** No
++> 
++*** No
++> 
++*** No
++> 
+ *** No
+ > 
+ *** No
+ > 
+ *** Yes
+-> 
++--1> 
+ *** Yes
+-> 
++A = quick asd fox.
++----2> 
+ *** Yes
+-> 
+-*** No
+-> 
+-*** Yes
+-> > 
+-*** Yes
+-A = @, B = root_sort(A).
+---1> > > 
++A = quick asd fox, B = asd.
++------3> > > 

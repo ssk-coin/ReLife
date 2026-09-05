@@ -1,0 +1,30 @@
+--- OUT/retract6.out
++++ REFOUT/retract6.refout
+@@ -1,5 +1,25 @@
+ 
+ *** Yes
+ > > 
+-*** No
+-> > > 
++@
++
++dynamic(f)?
++f(2) -> 'Second result--'.
++f(3) -> 'Third result---'.
++
++Third result---
++
++*** Yes
++--1> Second result--
++
++*** Yes
++--1> 
++@
++
++dynamic(f)?
++f(3) -> 'Third result---'.
++
++Third result---
++
++*** Yes
++--1> 

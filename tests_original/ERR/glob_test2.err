@@ -1,3 +1,52 @@
-*** Error: cannot unify persistent values
-
-*** Abort
+*** Syntax error: 'check :-'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'a=",a,"'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'b=",b,"'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'c=",c,"'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'd=",d,"'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'e=",e,"'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'f=",f,"'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: '").'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'arms => long,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'teeth => yellow,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'eyes => red,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'voice => cracked,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nails => {black;broken},'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nose => pimples,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'breath => bad,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'gun_rack => full,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'fuel_consumption => enormous,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'size => much_too_big,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'speed => really_slow,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'location => in_front_of_you),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'feet => smelly,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'armpits => worse,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'belly => hangs_out,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'fingers => gnarled,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'mouth => full_of_beer,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'hand => down_his_pants) ?'
+    (Hint: facts end with '.' and queries end with '?')

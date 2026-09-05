@@ -2,25 +2,25 @@
 *** Yes
 > > 
 *** Yes
-X = bike.
+X = two_wheels & vehicle.
 --1> 
 *** No
 > > 
 *** Yes
-X = truck.
+X = four_wheels & vehicle.
 --1> 
+*** No
+> > 
 *** Yes
-X = car.
+X = two_wheels & four_wheels.
 --1> > 
-*** No
-> > 
 *** Yes
-X = rolls_royce.
+X = rolls_royce & car.
 --1> 
 *** No
 > > 
 *** Yes
-X = truck.
+X = truck & @.
 --1> 
 *** No
 > > 

@@ -1,0 +1,15 @@
+--- OUT/disj3.out
++++ REFOUT/disj3.refout
+@@ -1,7 +1,11 @@
+ 
+ *** Yes
+ > > 
+-{{x;y;z};w;q}
++aax
++bby
++ccz
++ddw
++eeq
+ 
+ *** No
+ > 

@@ -1,1 +1,2 @@
-*** Warning: local definition of '+' overrides 'syntax#+'
+*** Syntax error: expected '?' or '.' but got 'syntax#+'
+*** Error: cannot redefine @ as DefType.PREDICATE.

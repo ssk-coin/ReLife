@@ -1,0 +1,23 @@
+--- OUT/constr.out
++++ REFOUT/constr.refout
+@@ -4,12 +4,18 @@
+ *** Yes
+ > 
+ *** Yes
+-> 
++> foo
+ *** Yes
+ X = foo.
+---1> > 
++--1> > bar
+ *** Yes
+ X = bar.
+ --1> > 
++:: _A: foo | write(_A).
++foo <| @.
++
++:: _A: bar | write(_A).
++bar <| @.
++
+ *** Yes
+ > 

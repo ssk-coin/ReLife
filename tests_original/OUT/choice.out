@@ -1,72 +1,60 @@
 
 *** Yes
 > > 
-*** Yes
+*** No
 > 
+*** No
+> > 
+*** No
+> > 
+*** No
+> > > 
 *** Yes
---1> > 
+A1 = get_choice - g, A2 = get_choice - g, B = {a;b}, C = exists_choice(A1 + g,A2 + g).
+--1> 
+*** No
+> > 
 *** Yes
-A = 0, B = a.
+A1 = get_choice - g, A2 = get_choice - g, C = exists_choice(A1 + g,A2 + g).
 --1> 
 *** No
 > 
 *** Yes
-A = 2, B = a.
+A1 = get_choice - g.
 --1> 
 *** Yes
-A = 2, B = b.
+B = {a;b}.
+----2> 
+*** No
+A1 = get_choice - g.
 --1> 
 *** No
 > 
 *** Yes
-A1 = 2, A2 = 3, B = a, C = true.
+A1 = get_choice - g.
 --1> 
 *** Yes
-A1 = 2, A2 = 3, B = b, C = false.
+A1 = @, B = exists_choice(A1 + g,get_choice).
+----2> 
+*** No
+A1 = get_choice - g.
 --1> 
 *** No
 > 
 *** Yes
-A1 = 3, A2 = 3, C = false.
---1> 
-*** No
-> 
-*** Yes
-A1 = 3.
+A1 = get_choice - g.
 --1> 
 *** Yes
-A1 = 3, B = a.
+A2 = get_choice - g.
 ----2> 
 *** Yes
-A1 = 3, B = a.
+A1 = @, A2 = @, B = exists_choice(A1 + g,A2 + g).
 ------3> 
 *** No
-> 
-*** Yes
-A1 = 6.
---1> 
-*** Yes
-A1 = 6, B = true.
+A2 = get_choice - g.
 ----2> 
 *** No
-A1 = 6.
---1> 
-*** No
-> 
-*** Yes
-A1 = 7.
---1> 
-*** Yes
-A1 = 7, A2 = 8.
-----2> 
-*** Yes
-A1 = 7, A2 = 8, B = true.
-------3> 
-*** No
-A1 = 7, A2 = 8.
-----2> 
-*** No
-A1 = 7.
+A1 = get_choice - g.
 --1> 
 *** No
 > 

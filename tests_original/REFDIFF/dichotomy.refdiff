@@ -1,0 +1,23 @@
+--- OUT/dichotomy.out
++++ REFOUT/dichotomy.refout
+@@ -2,14 +2,14 @@
+ *** Yes
+ > > 
+ *** Yes
+-X1 = solve(poly,-5,0).
++X1 = -3.
+ --1> 
+ *** Yes
+-X2 = solve(poly,0,3).
++X1 = -3, X2 = 2.
+ ----2> 
+ *** Yes
+-X3 = solve(poly,3,6).
++X1 = -3, X2 = 2, X3 = 5.
+ ------3> 
+-*** Yes
+-X = solve(poly,-5,4).
+---------4> 
++*** No
++X1 = -3, X2 = 2, X3 = 5.
++------3> 

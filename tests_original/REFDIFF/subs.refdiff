@@ -1,0 +1,19 @@
+--- OUT/subs.out
++++ REFOUT/subs.refout
+@@ -2,13 +2,13 @@
+ *** Yes
+ > > 
+ *** Yes
+-S = [c,d,b,a,a,a,b,a,b,b,...].
++S = [c,d,b,a,a,a,b,a,b,b,a].
+ --1> 
+ *** Yes
+-S = [a,b,b,a,a,c,d,a,b,b,...].
++S = [a,b,b,a,a,c,d,a,b,b,a].
+ --1> 
+ *** Yes
+-S = [a,b,b,a,a,a,b,c,d,b,...].
++S = [a,b,b,a,a,a,b,c,d,b,a].
+ --1> 
+ *** No
+ > 

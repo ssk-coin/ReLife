@@ -1,0 +1,43 @@
+--- OUT/curry5.out
++++ REFOUT/curry5.refout
+@@ -5,13 +5,13 @@
+ A = ===(X), X = @.
+ --1> 
+ *** Yes
+-A = @, B = apply(2 => X,functor => A), X = @.
++A = ===(X), B = true, X = @.
+ ----2> 
+ *** No
+ A = ===(X), X = @.
+ --1> 
+ *** Yes
+-A = @, B = apply(2 => A,functor => A).
++A = ===(X), B = false, X = @.
+ ----2> 
+ *** No
+ A = ===(X), X = @.
+@@ -22,13 +22,13 @@
+ A = ===(2 => X), X = @.
+ --1> 
+ *** Yes
+-A = @, B = apply(Y,functor => A), Y = @.
++A = ===(2 => X), B = false, X = @, Y = @.
+ ----2> 
+ *** No
+ A = ===(2 => X), X = @.
+ --1> 
+ *** Yes
+-A = @, B = apply(X,functor => A), X = @.
++A = ===(2 => X), B = true, X = @.
+ ----2> 
+ *** No
+ A = ===(2 => X), X = @.
+@@ -39,7 +39,7 @@
+ A = ===(X), B = ===(2 => X), X = @.
+ --1> 
+ *** Yes
+-A = @, B = @, Q = apply(2 => X,functor => A), R = apply(X,functor => B), X = @.
++A = ===(X), B = ===(2 => X), Q = true, R = true, X = @.
+ ----2> 
+ *** No
+ A = ===(X), B = ===(2 => X), X = @.

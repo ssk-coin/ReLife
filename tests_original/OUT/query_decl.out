@@ -5,16 +5,12 @@
 A = real.
 --1> 
 *** Yes
-A = real.
---1> 
-b(real & int,@) :-
-        succeed.
+--1> b(@ & int,@).
 
 *** Yes
-A = real.
 --1> 
 *** Yes
-A = real, C = int, D = @.
+C = @ & int, D = @.
 ----2> 
 *** No
 A = real.

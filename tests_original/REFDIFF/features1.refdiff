@@ -1,0 +1,20 @@
+--- OUT/features1.out
++++ REFOUT/features1.refout
+@@ -5,14 +5,14 @@
+ A = [].
+ --1> 
+ *** Yes
+-A = features(A).
++A = [].
+ ----2> > 
+ *** Yes
+ A = [1,2].
+ --1> 
+ *** Yes
+-A = features(A).
++A = [1,2].
+ ----2> > 
+ *** Yes
+-A = features(local_time).
++A = [day,hour,minute,month,second,weekday,year].
+ --1> > 

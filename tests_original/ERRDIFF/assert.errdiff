@@ -1,0 +1,4 @@
+--- ERR/assert.err
++++ REFERR/assert.referr
+@@ -1 +0,0 @@
+-*** Error: cannot open file 'LF/assert.lf'.

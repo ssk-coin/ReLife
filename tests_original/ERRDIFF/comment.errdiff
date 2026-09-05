@@ -1,0 +1,4 @@
+--- ERR/comment.err
++++ REFERR/comment.referr
+@@ -1 +0,0 @@
+-*** Error: cannot open file 'LF/comment.lf'.

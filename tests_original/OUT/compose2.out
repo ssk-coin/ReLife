@@ -1,22 +1,13 @@
 
 *** Yes
 > > 
-*** No
-> > 
 *** Yes
-X = comp(func1 => comp(func1 => succ,func2 => succ),func2 => succ).
+X = add3 & @(23).
 --1> 
 *** No
 > 
-*** No
-> > 
 *** Yes
-X = comp(func1 => comp(func1 => comp(func1 => comp(func1 => succ,func2 => succ),
-                                     func2 => succ),
-                       func2 => comp(func1 => comp(func1 => succ,func2 => succ),
-                                     func2 => succ)),
-         func2 => succ).
-
+X = add3.
 --1> 
 *** No
-> 
+> > > > > 

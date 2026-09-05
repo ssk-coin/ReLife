@@ -1,0 +1,36 @@
+--- OUT/tripeq.out
++++ REFOUT/tripeq.refout
+@@ -5,28 +5,26 @@
+ A = ===(X), X = a.
+ --1> 
+ *** Yes
+-A = @, B = apply(2 => X,functor => A), X = @.
++A = ===(X), B = true, X = a.
+ ----2> 
+ *** No
+ A = ===(X), X = a.
+ --1> 
+ *** Yes
+-A = @, B = apply(2 => X,functor => A), X = @.
++A = ===(X), B = true, X = a.
+ ----2> 
+ *** No
+ A = ===(X), X = a.
+ --1> 
+ *** Yes
+-A = @, B = apply(2 => a,functor => A).
++A = ===(X), B = false, X = a.
+ ----2> 
+ *** No
+ A = ===(X), X = a.
+ --1> 
+ *** Yes
+-A = @, B = apply(2 => a,functor => A).
++A = ===(X), B = false, X = a.
+ ----2> 
+ *** No
+ A = ===(X), X = a.
+---1> 
+-*** No
+-> > 
++--1> --1> --1> 

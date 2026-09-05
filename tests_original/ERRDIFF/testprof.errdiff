@@ -1,0 +1,4 @@
+--- ERR/testprof.err
++++ REFERR/testprof.referr
+@@ -0,0 +1 @@
++*** Warning: non-numeric argument(s) in '"something" + 1'.

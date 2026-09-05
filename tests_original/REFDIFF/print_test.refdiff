@@ -1,0 +1,149 @@
+--- OUT/print_test.out
++++ REFOUT/print_test.refout
+@@ -9,37 +9,37 @@
+ > > [a,b|c]
+ 
+ *** Yes
+-> > [a,b,_A: c,d,_A]
++> > [a,b,C: c,d,C]
+ 
+ *** Yes
+ C = c.
+ --1> 
+ *** No
+-> [a,b|_A: [c,d,_A,e]]
++> [a,b|L: [c,d,L,e]]
+ 
+ *** Yes
+ L = [c,d,L,e].
+ --1> 
+ *** No
+-> _A: [a,b,_A]
++> A: [a,b,A]
+ 
+ *** Yes
+ A = [a,b,A].
+ --1> 
+ *** No
+-> _A: [a,b|_A]
++> A: [a,b|A]
+ 
+ *** Yes
+ A = [a,b|A].
+ --1> 
+ *** No
+-> cons([],[])
++> [[]]
+ 
+ *** Yes
+-> > _A: cons(_A,_A)
++> > A: [A|A]
+ 
+ *** Yes
+-A = cons(A,A).
++A = [A|A].
+ --1> 
+ *** No
+ > cons(a)
+@@ -60,7 +60,7 @@
+ > > [a,b|nil(1,2,3)]
+ 
+ *** Yes
+-> > cons(a,cons(b,cons(c,[]),d))
++> > [a|cons(b,[c],d)]
+ 
+ *** Yes
+ > > > 
+@@ -68,72 +68,72 @@
+ > mud(a,mud(b,mud(c,[])))
+ 
+ *** Yes
+-> > > ` {}
++> > > {}
+ 
+ *** Yes
+-> > ` {(a, b, c)}
++> > {(a, b, c)}
+ 
+ *** Yes
+-> > ` {(a, b)|c}
++> > {(a, b)|c}
+ 
+ *** Yes
+-> > ` {(a, b, _A: c, d, _A)}
++> > {(a, b, C: c, d, C)}
+ 
+ *** Yes
+ C = c.
+ --1> 
+ *** No
+-> ` {(a, b)|_A: (` {(c, d, _A, e)})}
++> {(a, b)|L: (` {(c, d, L, e)})}
+ 
+ *** Yes
+ L = ` {(c, d, L, e)}.
+ --1> 
+ *** No
+-> _A: (` {(a, b, _A)})
++> A: {(a, b, A)}
+ 
+ *** Yes
+-A = ` {(a, b, A)}.
++A = {(a, b, A)}.
+ --1> 
+ *** No
+-> _A: (` {(a, b)|_A})
++> A: {(a, b)|A}
+ 
+ *** Yes
+-A = ` {(a, b)|A}.
++A = {(a, b)|A}.
+ --1> 
+ *** No
+-> ` disj({},{})
++> {{}}
+ 
+ *** Yes
+-> > _A: (` disj(_A,_A))
++> > A: {A|A}
+ 
+ *** Yes
+-A = ` disj(A,A).
++A = {A|A}.
+ --1> 
+ *** No
+-> ` disj(a)
++> disj(a)
+ 
+ *** Yes
+-> > ` disj(2 => b)
++> > disj(2 => b)
+ 
+ *** Yes
+-> > ` {a;b|disj(2 => c)}
++> > {a;b|disj(2 => c)}
+ 
+ *** Yes
+-> > ` {a;b|disj(c)}
++> > {a;b|disj(c)}
+ 
+ *** Yes
+-> > ` {a;b|disj(2 => {})}
++> > {a;b|disj(2 => {})}
+ 
+ *** Yes
+-> > ` {a;b|disj_nil(1,2,3)}
++> > {a;b|{}(1,2,3)}
+ 
+ *** Yes
+-> > ` disj(a,disj(b,disj(c,{}),d))
++> > {a|disj(b,{c},d)}
+ 
+ *** Yes
+ > > 
+ *** Yes
+-A = bagof(X,X = disj(a,disj(b,disj(c,{}),d))), X = @.
++A = [c,b,a], X = @.
+ --1> 
+ *** No
+ > 

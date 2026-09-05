@@ -1,0 +1,4 @@
+--- ERR/glob_gc.err
++++ REFERR/glob_gc.referr
+@@ -1 +0,0 @@
+-*** Error: built-in 'print' may not be redefined.

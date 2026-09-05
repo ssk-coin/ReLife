@@ -2,104 +2,104 @@
 *** Yes
 > > 
 *** Yes
-A = bool~, B = bool~, C = bool~.
+A = B and C, B = @, C = @.
 --1> 
 *** Yes
-A = false, B = false, C = bool.
+B = false.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B and C, B = @, C = @.
 --1> 
 *** Yes
-A = false, B = bool, C = false.
+C = false.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B and C, B = @, C = @.
 --1> 
 *** Yes
-A = bool, B = true, C = A.
+B = true.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B and C, B = @, C = @.
 --1> 
 *** Yes
-A = false, B = false, C = bool.
+B = false.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B and C, B = @, C = @.
 --1> 
 *** Yes
-A = bool, B = A, C = A.
+B = @, C = @.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B and C, B = @, C = @.
 --1> 
 *** Yes
-A = bool~, B = A, C = bool~.
+A = @, B = A.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B and C, B = @, C = @.
 --1> 
 *** Yes
-A = true, B = true, C = true.
+A = true.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B and C, B = @, C = @.
 --1> 
 *** Yes
-A = false, B = bool~, C = bool~.
+A = false.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B and C, B = @, C = @.
 --1> > 
 *** Yes
-A = bool~, B = bool~, C = bool~.
+A = B or C, B = @, C = @.
 --1> 
 *** Yes
-A = bool, B = false, C = A.
+B = false.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B or C, B = @, C = @.
 --1> 
 *** Yes
-A = bool, B = A, C = false.
+C = false.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B or C, B = @, C = @.
 --1> 
 *** Yes
-A = true, B = true, C = bool.
+B = true.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B or C, B = @, C = @.
 --1> 
 *** Yes
-A = bool, B = false, C = A.
+B = false.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B or C, B = @, C = @.
 --1> 
 *** Yes
-A = bool, B = A, C = A.
+B = @, C = @.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B or C, B = @, C = @.
 --1> 
 *** Yes
-A = bool~, B = A, C = bool~.
+A = @, B = A.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B or C, B = @, C = @.
 --1> 
 *** Yes
-A = true, B = bool~, C = bool~.
+A = true.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B or C, B = @, C = @.
 --1> 
 *** Yes
-A = false, B = false, C = false.
+A = false.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B or C, B = @, C = @.
 --1> > 

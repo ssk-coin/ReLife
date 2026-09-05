@@ -2,12 +2,12 @@
 *** Yes
 > > 
 *** Yes
-F = f(X,g(Y,X)), Status = declaration, X = @, Y = @.
+F = parse("f(X,g(Y,X)).",Status), Status = @.
 --1> 
 *** No
 > 
 *** Yes
-F = (X = 2), S = error, V = true, X = @.
+F = parse("X=2",S,V), S = @, V = @.
 --1> 
 *** No
 > 

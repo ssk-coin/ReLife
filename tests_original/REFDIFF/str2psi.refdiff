@@ -1,0 +1,11 @@
+--- OUT/str2psi.out
++++ REFOUT/str2psi.refout
+@@ -2,7 +2,7 @@
+ *** Yes
+ > > 
+ *** Yes
+-A = str2psi("abc").
++A = abc.
+ --1> 
+ *** No
+ > 

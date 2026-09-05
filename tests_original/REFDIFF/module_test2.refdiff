@@ -1,0 +1,12 @@
+--- OUT/module_test2.out
++++ REFOUT/module_test2.refout
+@@ -1,8 +1,5 @@
+ 
+ *** Yes
+ > > 
+-*** No
+-> 
+ *** Yes
+-A = @.
+---1> 
++> > 

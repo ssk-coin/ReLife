@@ -1,0 +1,4 @@
+--- ERR/hamming.err
++++ REFERR/hamming.referr
+@@ -1 +0,0 @@
+-Error: maximum recursion depth exceeded

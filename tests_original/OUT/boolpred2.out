@@ -1,33 +1,29 @@
 
 *** Yes
 > > 
+*** No
+> 
 *** Yes
-X = @~, Y = @~, Z = @~.
+A = s(X,Y,Z), X = @, Y = @, Z = @.
 --1> 
 *** Yes
-A = s(X,Y,Z), X = @~, Y = @~, Z = @~.
-----2> 123
+A = s(write(1),write(2),write(3)).
+----2> > 
+*** No
+> 
 *** Yes
-A = s(X,Y,Z), X = write(1), Y = write(2), Z = write(3).
-------3> > 
-*** Yes
-X = @~, Y = @~, Z = @~.
+A = s(Z,Y,X), X = @, Y = @, Z = @.
 --1> 
 *** Yes
-A = s(Z,Y,X), X = @~, Y = @~, Z = @~.
-----2> 123
-*** Yes
-A = s(Z,Y,X), X = write(3), Y = write(2), Z = write(1).
-------3> > 
-*** Yes
-X = @~.
---1> 23
+A = s(write(1),write(2),write(3)).
+----2> > 
+*** No
+> 
 *** Yes
 X = write(23).
-----2> > 
-*** Yes
-X = @~.
---1> 23
+--1> > 
+*** No
+> 
 *** Yes
 X = write(23).
-----2> > 
+--1> > 

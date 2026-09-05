@@ -2,13 +2,13 @@
 *** Yes
 > > 
 *** Yes
-S = [c,d,b,a,a,a,b,a,b,b,a].
+S = [c,d,b,a,a,a,b,a,b,b,...].
 --1> 
 *** Yes
-S = [a,b,b,a,a,c,d,a,b,b,a].
+S = [a,b,b,a,a,c,d,a,b,b,...].
 --1> 
 *** Yes
-S = [a,b,b,a,a,a,b,c,d,b,a].
+S = [a,b,b,a,a,a,b,c,d,b,...].
 --1> 
 *** No
 > 

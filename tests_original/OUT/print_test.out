@@ -9,37 +9,37 @@
 > > [a,b|c]
 
 *** Yes
-> > [a,b,C: c,d,C]
+> > [a,b,_A: c,d,_A]
 
 *** Yes
 C = c.
 --1> 
 *** No
-> [a,b|L: [c,d,L,e]]
+> [a,b|_A: [c,d,_A,e]]
 
 *** Yes
 L = [c,d,L,e].
 --1> 
 *** No
-> A: [a,b,A]
+> _A: [a,b,_A]
 
 *** Yes
 A = [a,b,A].
 --1> 
 *** No
-> A: [a,b|A]
+> _A: [a,b|_A]
 
 *** Yes
 A = [a,b|A].
 --1> 
 *** No
-> [[]]
+> cons([],[])
 
 *** Yes
-> > A: [A|A]
+> > _A: cons(_A,_A)
 
 *** Yes
-A = [A|A].
+A = cons(A,A).
 --1> 
 *** No
 > cons(a)
@@ -60,7 +60,7 @@ A = [A|A].
 > > [a,b|nil(1,2,3)]
 
 *** Yes
-> > [a|cons(b,[c],d)]
+> > cons(a,cons(b,cons(c,[]),d))
 
 *** Yes
 > > > 
@@ -68,72 +68,72 @@ A = [A|A].
 > mud(a,mud(b,mud(c,[])))
 
 *** Yes
-> > > {}
+> > > ` {}
 
 *** Yes
-> > {(a, b, c)}
+> > ` {(a, b, c)}
 
 *** Yes
-> > {(a, b)|c}
+> > ` {(a, b)|c}
 
 *** Yes
-> > {(a, b, C: c, d, C)}
+> > ` {(a, b, _A: c, d, _A)}
 
 *** Yes
 C = c.
 --1> 
 *** No
-> {(a, b)|L: (` {(c, d, L, e)})}
+> ` {(a, b)|_A: (` {(c, d, _A, e)})}
 
 *** Yes
 L = ` {(c, d, L, e)}.
 --1> 
 *** No
-> A: {(a, b, A)}
+> _A: (` {(a, b, _A)})
 
 *** Yes
-A = {(a, b, A)}.
+A = ` {(a, b, A)}.
 --1> 
 *** No
-> A: {(a, b)|A}
+> _A: (` {(a, b)|_A})
 
 *** Yes
-A = {(a, b)|A}.
+A = ` {(a, b)|A}.
 --1> 
 *** No
-> {{}}
+> ` disj({},{})
 
 *** Yes
-> > A: {A|A}
+> > _A: (` disj(_A,_A))
 
 *** Yes
-A = {A|A}.
+A = ` disj(A,A).
 --1> 
 *** No
-> disj(a)
+> ` disj(a)
 
 *** Yes
-> > disj(2 => b)
+> > ` disj(2 => b)
 
 *** Yes
-> > {a;b|disj(2 => c)}
+> > ` {a;b|disj(2 => c)}
 
 *** Yes
-> > {a;b|disj(c)}
+> > ` {a;b|disj(c)}
 
 *** Yes
-> > {a;b|disj(2 => {})}
+> > ` {a;b|disj(2 => {})}
 
 *** Yes
-> > {a;b|{}(1,2,3)}
+> > ` {a;b|disj_nil(1,2,3)}
 
 *** Yes
-> > {a|disj(b,{c},d)}
+> > ` disj(a,disj(b,disj(c,{}),d))
 
 *** Yes
 > > 
 *** Yes
-A = [c,b,a], X = @.
+A = bagof(X,X = disj(a,disj(b,disj(c,{}),d))), X = @.
 --1> 
 *** No
 > 

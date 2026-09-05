@@ -2,25 +2,25 @@
 *** Yes
 > > 
 *** Yes
-A = "abc".
+A = psi2str(abc).
 --1> 
 *** No
 > 
 *** Yes
-A = "abc".
+A = psi2str("abc").
 --1> 
 *** No
 > 
 *** Yes
-A = "5".
+A = psi2str(5).
 --1> 
 *** No
 > 
 *** Yes
-A = "2.33".
+A = psi2str(2.33).
 --1> 
 *** No
 > 
 *** Yes
-A = "!".
+A = psi2str(!).
 --1> 

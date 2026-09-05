@@ -1,0 +1,4 @@
+--- ERR/disequality5.err
++++ REFERR/disequality5.referr
+@@ -1 +0,0 @@
+-Error: maximum recursion depth exceeded

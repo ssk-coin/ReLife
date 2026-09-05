@@ -2,122 +2,122 @@
 *** Yes
 > > 
 *** Yes
-X = @(@(titi(arg => 1),Y),pb(action => @(Y))), Y = titi(arg => 1).
+X = foo(foo(titi,Y),pb(action => @(Y))), Y = titi.
 --1> 
 *** No
 > 
 *** Yes
-X = @(@(@,Y),pb(action => @(Y))), Y = titi(arg => 1).
+X = foo(foo(@,Y),pb(action => @(Y))), Y = titi.
 --1> 
 *** No
 > 
 *** Yes
-X = pair(t(_A: titi_a(1)),s_a(@(_A))).
+X = pair(foo_a(titi_a),s_a(@(titi_a))).
 --1> 
 *** No
 > 
 *** Yes
-B = @(Y), X = pair(t(Y),s_b(B)), Y = titi_b(1).
+B = @(Y), X = pair(foo_b(Y),s_b(B)), Y = titi_b.
 --1> 
 *** No
 > 
 *** Yes
-X = pair(t(Y),s_b(Y)), Y = titi_b(1).
+X = pair(foo_b(Y),s_b(Y)), Y = titi_b.
 --1> 
 *** No
 > 
 *** Yes
-X = pair(t(_A: titi_b(1)),s_b(@(_A))).
+X = pair(foo_b(titi_b),s_b(@(titi_b))).
 --1> 
 *** No
 > 
 *** Yes
-X = pair(t(_A: titi_b(1)),s_b(_A)).
+X = pair(foo_b(titi_b),s_b(titi_b)).
 --1> 
 *** No
 > 
 *** Yes
-A = @, B = @(Y), X = @(@(A,Y),p_c(B)), Y = titi_c(1).
+A = @, B = @(Y), X = foo_c(foo_c(A,Y),p_c(B)), Y = titi_c.
 --1> 
 *** No
 > 
 *** Yes
-A = @, X = @(@(A,Y),p_c(Y)), Y = titi_c(1).
+A = @, X = foo_c(foo_c(A,Y),p_c(Y)), Y = titi_c.
 --1> 
 *** No
 > 
 *** Yes
-A = @, B = @(Y), X = @(A,Y), Y = titi_c(1), Z = p_c(B).
+A = @, B = @(Y), X = foo_c(A,Y), Y = titi_c, Z = p_c(B).
 --1> 
 *** No
 > 
 *** Yes
-A = @, B = @(Y), X = @(A,Y), Y = titi_c(1), Z = p_c(B).
+A = @, B = @(Y), X = foo_c(A,Y), Y = titi_c, Z = p_c(B).
 --1> 
 *** No
 > 
 *** Yes
-X = @(p_c(@(Y)),@(@,Y)), Y = titi_c(1).
+X = foo_c(p_c(@(Y)),foo_c(@,Y)), Y = titi_c.
 --1> 
 *** No
 > 
 *** Yes
-X = @(p_c(@(Y)),@(@,@(Y))), Y = titi_c(1).
+X = foo_c(p_c(@(Y)),foo_c(@,@(Y))), Y = titi_c.
 --1> 
 *** No
 > 
 *** Yes
-X = @(p_c(Y),@(@,Y)), Y = titi_c(1).
+X = foo_c(p_c(Y),foo_c(@,Y)), Y = titi_c.
 --1> 
 *** No
 > 
 *** Yes
-X = @(@(@,Y),p_d(@(@(Y)))), Y = titi_d(1).
+X = foo_d(foo_d(@,Y),p_d(@(@(Y)))), Y = titi_d.
 --1> 
 *** No
 > 
 *** Yes
-X = @(@(@,Y),p_d(@(Y))), Y = titi_d(1).
+X = foo_d(foo_d(@,Y),p_d(@(Y))), Y = titi_d.
 --1> 
 *** No
 > 
 *** Yes
-X = @(@(@,Y),p_d(Y)), Y = titi_d(1).
+X = foo_d(foo_d(@,Y),p_d(Y)), Y = titi_d.
 --1> 
 *** No
 > 
 *** Yes
-X = @(@(@,_A: titi_d(1)),p_d(@(@(_A)))).
+X = foo_d(foo_d(@,titi_d),p_d(@(@(titi_d)))).
 --1> 
 *** No
 > 
 *** Yes
-X = @(@(@,_A: titi_d(1)),p_d(@(_A))).
+X = foo_d(foo_d(@,titi_d),p_d(@(titi_d))).
 --1> 
 *** No
 > 
 *** Yes
-X = @(@(@,_A: titi_d(1)),p_d(_A)).
+X = foo_d(foo_d(@,titi_d),p_d(titi_d)).
 --1> 
 *** No
 > 
 *** Yes
-X = @(@(@,Y),p_e(@(Y),@)), Y = titi_e(1).
+X = foo_e(foo_e(@,Y),p_e(@(Y))), Y = titi_e.
 --1> 
 *** No
 > 
 *** Yes
-X = @(@(@,Y),p_e(Y,@)), Y = titi_e(1).
+X = foo_e(foo_e(@,Y),p_e(Y)), Y = titi_e.
 --1> 
 *** No
 > 
 *** Yes
-X = @(@(@,_A: titi_e(1)),p_e(@(_A),@)).
+X = foo_e(foo_e(@,titi_e),p_e(@(titi_e))).
 --1> 
 *** No
 > 
 *** Yes
-X = @(@(@,_A: titi_e(1)),p_e(_A,@)).
+X = foo_e(foo_e(@,titi_e),p_e(titi_e)).
 --1> 
 *** No
 > 

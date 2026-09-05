@@ -1,6 +1,6 @@
-[a,b,c,d,e,f]
-abcdef
-7
+[a,b,c] + [d,e,f]
+abc + def
+3 + 4
 
 *** Yes
 > > > 

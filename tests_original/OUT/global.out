@@ -5,44 +5,32 @@
 > qa
 *** Yes
 > 
+*** No
+> qa
 *** Yes
-> @46
+> > 
+*** No
+> > b
 *** Yes
---1> 
+> > 
 *** No
 > 
-*** Yes
---1> 
-*** No
-> 92
-*** Yes
---1> 
 *** No
 > 
-*** Yes
+*** No
 > 
-*** Yes
---1> 
-*** Yes
-----2> 
-*** Yes
-------3> 
 *** No
-----2> 42
+> > cd
 *** Yes
-------3> 
+> > 
 *** No
-----2> 
+> cd
 *** Yes
-------3> 22
-*** Yes
---------4> 
+> > 
 *** No
-------3> 
+> ef
 *** Yes
-------3> @@
-*** Yes
---------4> > 
+> > 
 *** No
 > +*
 *** Yes
@@ -57,17 +45,5 @@
 > 
 *** No
 > 
-% 'a' is a user-defined global variable worth *null psi_term*.
-
-% 'b' is a user-defined global variable worth *null psi_term*.
-
-% 'c' is a user-defined global variable worth *null psi_term*.
-
-% 'd' is a user-defined global variable worth *null psi_term*.
-
-% 'e' is a user-defined global variable worth *null psi_term*.
-
 *** Yes
---1> 
-*** No
-> 
+> > 

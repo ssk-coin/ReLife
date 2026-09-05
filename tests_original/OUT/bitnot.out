@@ -2,52 +2,47 @@
 *** Yes
 > > 
 *** Yes
-A = -35.
+A = \ 34.
 --1> 
 *** No
 > 
-*** Yes
-W = -35.
---1> 
+*** No
+> > 
+*** No
+> 
 *** No
 > 
 *** Yes
-> 
-*** No
-> 
-*** Yes
-A = real~, B = real~.
+A = \ B, B = @.
 --1> 
 *** Yes
-A = 100, B = -101.
+A = 100.
 ----2> 
 *** No
-A = real~, B = real~.
+A = \ B, B = @.
 --1> 
 *** Yes
-A = -101, B = 100.
+B = 100.
 ----2> 
 *** No
-A = real~, B = real~.
+A = \ B, B = @.
+--1> 
+*** Yes
+A = @, B = @.
+----2> 
+*** Yes
+A = \ A.
+------3> 
+*** No
+A = @, B = @.
+----2> 
+*** No
+A = \ B, B = @.
 --1> 
 *** No
-A = real~, B = real~.
+> 
+*** Yes
+Z = \ a.
 --1> 
 *** No
-A = real~, B = real~.
---1> 
-*** No
-A = real~, B = real~.
---1> 
-*** No
-A = real~, B = real~.
---1> 
-*** No
-A = real~, B = real~.
---1> 
-*** No
-A = real~, B = real~.
---1> 
-*** No
-A = real~, B = real~.
---1> 
+> 

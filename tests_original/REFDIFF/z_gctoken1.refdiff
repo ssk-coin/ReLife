@@ -1,0 +1,13 @@
+--- OUT/z_gctoken1.out
++++ REFOUT/z_gctoken1.refout
+@@ -1,8 +1,8 @@
+ 
+ *** Yes
+ > > 
+-*** No
+-> 1 + 2 + 3 + 4 + 5
++*** Yes
++> 15
+ 
+ *** Yes
+ > 

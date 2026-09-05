@@ -1,0 +1,18 @@
+--- OUT/global3.out
++++ REFOUT/global3.refout
+@@ -1,9 +1,10 @@
+ 
+ *** Yes
+ > > 
+-*** No
+-> 
+-*** No
+-> b
+ *** Yes
+-> 
++> 23
++
++*** Yes
++--1> 23
++*** Yes
++----2> 

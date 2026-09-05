@@ -1,0 +1,4 @@
+--- ERR/peano.err
++++ REFERR/peano.referr
+@@ -1 +0,0 @@
+-*** Error: cannot open file 'LF/peano.lf'.

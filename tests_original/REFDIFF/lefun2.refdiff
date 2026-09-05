@@ -1,0 +1,11 @@
+--- OUT/lefun2.out
++++ REFOUT/lefun2.refout
+@@ -1,5 +1,6 @@
+ 
+ *** Yes
+ > > 
+-*** No
+-> 
++*** Yes
++X = 1.
++--1> 

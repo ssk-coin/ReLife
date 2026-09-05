@@ -1,5 +1,5 @@
-poly.life
-poly.life
+strcon(psi2str(poly),.life)
+strcon(psi2str(poly),.life)
 
 *** Yes
 > > > > 

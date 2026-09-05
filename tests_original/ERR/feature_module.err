@@ -1,1 +1,70 @@
-*** Warning: feature 'def#d' is now private, but was also declared public
+*** Syntax error: 'b => 2,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'c => 3)).'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'abc_test(X,[Label|Rest]) :-'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'write(Label," => ",X.Label),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'e => 5,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'f => 6)).'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'test1 :-'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'p(X:@(g=>7,h=>8,i=>9)),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'q(Y),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'write("X=",X),nl,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'write("Y=",Y),nl,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'MOD={"abc";"def";"user"},'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'write("MOD=",MOD),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'F=features(X,MOD),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'G=features(Y,MOD),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'write("F=",F,",   G=",G),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Error: built-in 'fail' may not be redefined.
+*** Syntax error: 'test2 :-'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'p(X),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'q(Y:strip(X)),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'write("Y=",Y),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'abc_test(Y,label_list),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'pretty_write("Y"=Y),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Error: built-in 'nl' may not be redefined.

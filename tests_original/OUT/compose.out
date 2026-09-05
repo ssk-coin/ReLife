@@ -2,25 +2,11 @@
 *** Yes
 > > 
 *** Yes
-X = comp(func1 => comp(func1 => succ,func2 => succ),func2 => succ).
+X = add3.
 --1> 
 *** Yes
-X = comp(func1 => comp(func1 => succ,func2 => succ),func2 => succ), Y = 26.
-----2> > 
+X = @, Y = apply(23,functor => X).
+----2> > > 
 *** Yes
-X = comp(func1 => comp(func1 => comp(func1 => comp(func1 => succ,func2 => succ),
-                                     func2 => succ),
-                       func2 => comp(func1 => comp(func1 => succ,func2 => succ),
-                                     func2 => succ)),
-         func2 => succ).
-
---1> 
-*** Yes
-X = comp(func1 => comp(func1 => comp(func1 => comp(func1 => succ,func2 => succ),
-                                     func2 => succ),
-                       func2 => comp(func1 => comp(func1 => succ,func2 => succ),
-                                     func2 => succ)),
-         func2 => succ), 
-Y = 7.
-
-----2> > 
+X = @, Y = apply(0,functor => X).
+--1> > 

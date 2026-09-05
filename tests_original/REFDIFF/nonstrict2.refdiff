@@ -1,0 +1,17 @@
+--- OUT/nonstrict2.out
++++ REFOUT/nonstrict2.refout
+@@ -21,9 +21,12 @@
+ --1> 
+ *** No
+ > 
+-*** No
++*** Yes
+ > 
+ *** Yes
+ > 
++*** Yes
++X = 1 + 2.
++--1> 
+ *** No
+-> > 
++> 

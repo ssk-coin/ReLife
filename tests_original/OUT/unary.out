@@ -2,10 +2,10 @@
 *** Yes
 > > 
 *** Yes
-A = +(B), B = real.
+A = + B, B = @.
 --1> > 
 *** Yes
-A = real~, B = real~.
+A = - B, B = @.
 --1> > 
 *** Yes
 A = +(2 => B), B = @.

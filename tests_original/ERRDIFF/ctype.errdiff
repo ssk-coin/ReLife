@@ -1,0 +1,4 @@
+--- ERR/ctype.err
++++ REFERR/ctype.referr
+@@ -1 +0,0 @@
+-*** Error: cannot open file 'LF/ctype.lf'.

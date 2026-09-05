@@ -1,0 +1,80 @@
+--- OUT/boolpred.out
++++ REFOUT/boolpred.refout
+@@ -3,40 +3,49 @@
+ > > 
+ *** Yes
+ > 
+-*** No
+-> > 
+ *** Yes
+ A = a, X = p(A).
+ --1> > 
+ *** Yes
++A = a, X = p(A).
++--1> > 
++*** Yes
++> boo44
++*** Yes
+ > 
+-*** No
+-> booint
+ *** Yes
+-X = int.
+---1> 
+-*** Yes
+-X = 44.
+-----2> > booint
+-*** Yes
+-X = int, Y = f(X).
+---1> 
++X = @~.
++--1> boo44
+ *** Yes
+ X = 44.
+ ----2> > 
+-*** No
+-> > 
+-*** No
+-> > 
+-*** No
+-> > 
+-*** No
+-> > booint
+-*** No
+-> > 
+-*** No
+-> > booint
+-*** No
+-> > 
+-*** No
+-> > 
++*** Yes
++X = @~, Y = @~.
++--1> boo44
++*** Yes
++X = 44, Y = write(boo,X).
++----2> > boo44
++*** Yes
++X = 44, Y = write(boo,X).
++--1> > boo44
++*** Yes
++X = 44, Y = write(boo,X).
++--1> > boo44
++*** Yes
++X = 44, Y = write(boo,X).
++--1> > boo44
++*** Yes
++X = 44, Y = write(boo,X).
++--1> > boo44
++*** Yes
++X = 44, Y = write(boo,X).
++--1> > boo44
++*** Yes
++X = 44, Y = write(boo,X).
++--1> > boo44
++*** Yes
++X = 44.
++--1> > boo44
++*** Yes
++X = 44.
++--1> > 

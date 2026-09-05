@@ -2,42 +2,42 @@
 *** Yes
 > > 
 *** Yes
-A = [int].
+A = parents(23).
 --1> 
 *** No
 > 
 *** Yes
-A = [real].
+A = parents(23.3).
 --1> 
 *** No
 > 
 *** Yes
-A = [string].
+A = parents("sdfef").
 --1> 
 *** No
 > 
 *** Yes
-A = [real].
+A = parents(int).
 --1> 
 *** No
 > 
 *** Yes
-A = [built_in].
+A = parents(real).
 --1> 
 *** No
 > 
 *** Yes
-A = [built_in].
+A = parents(string).
 --1> 
 *** No
 > 
 *** Yes
-A = [list].
+A = parents([]).
 --1> 
 *** No
 > 
 *** Yes
-A = [list].
+A = parents(cons).
 --1> 
 *** No
 > 

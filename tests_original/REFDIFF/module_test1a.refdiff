@@ -1,0 +1,21 @@
+--- OUT/module_test1a.out
++++ REFOUT/module_test1a.refout
+@@ -1,14 +1,14 @@
+ 
+ *** Yes
+ > > 
+-*** No
+-> > app([],hello)
++*** Yes
++> > hello
+ 
+ *** Yes
+-> app([a,b,c],[d,e,f])
++> [d,e,f,a,b,c]
+ 
+ *** Yes
+-> app(good,bye)
++> good, bye
+ 
+ *** Yes
+ > > 

@@ -1,0 +1,10 @@
+--- ERR/two_bugs.err
++++ REFERR/two_bugs.referr
+@@ -1,7 +0,0 @@
+-*** Syntax error: 'p(X) :- X={1;2;3},'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'Y=jolly(3+X),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'write(Y),nl,'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Error: built-in 'assert' may not be redefined.

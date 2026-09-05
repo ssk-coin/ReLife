@@ -1,0 +1,15 @@
+--- OUT/eoftest3.out
++++ REFOUT/eoftest3.refout
+@@ -5,10 +5,7 @@
+ A = 3.
+ --1> 
+ *** Yes
+-B = 5.
++A = 3, B = 5.
+ ----2> 
+-*** Yes
+-----2> Need a tank of gas!
++*** No
+ 
+-*** Yes
+-----2> 

@@ -1,0 +1,4 @@
+--- ERR/eoftest2.err
++++ REFERR/eoftest2.referr
+@@ -0,0 +1 @@
++*** Syntax error: bad expression (near line 6)

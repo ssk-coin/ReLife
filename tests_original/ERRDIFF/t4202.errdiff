@@ -1,0 +1,4 @@
+--- ERR/t4202.err
++++ REFERR/t4202.referr
+@@ -1 +0,0 @@
+-*** Error: cannot redefine reverse as DefType.FUNCTION.

@@ -20,128 +20,128 @@ A = false.
 A = true.
 --1> > 
 *** Yes
-A = bool~, B = bool~, C = bool~.
+A = B xor C, B = @, C = @.
 --1> 
 *** Yes
-A = true, B = bool~, C = bool~.
+A = true.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B xor C, B = @, C = @.
 --1> 
 *** Yes
-A = false, B = bool, C = B.
+A = false.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B xor C, B = @, C = @.
 --1> 
 *** Yes
-A = bool~, B = true, C = bool~.
+B = true.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B xor C, B = @, C = @.
 --1> 
 *** Yes
-A = bool, B = false, C = A.
+B = false.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B xor C, B = @, C = @.
 --1> 
 *** Yes
-A = bool~, B = bool~, C = true.
+C = true.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B xor C, B = @, C = @.
 --1> 
 *** Yes
-A = bool, B = A, C = false.
+C = false.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B xor C, B = @, C = @.
 --1> > 
 *** Yes
-A = bool~, B = bool~, C = bool~.
+A = B xor C, B = @, C = @.
 --1> 
 *** Yes
-A = false, B = bool, C = B.
+B = @, C = @.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B xor C, B = @, C = @.
 --1> 
 *** Yes
-A = bool, B = false, C = A.
+A = @, C = @.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B xor C, B = @, C = @.
 --1> 
 *** Yes
-A = bool, B = A, C = false.
+A = @, B = @.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B xor C, B = @, C = @.
 --1> 
 *** Yes
-A = false, B = bool, C = B.
+A = false.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B xor C, B = @, C = @.
 --1> 
 *** Yes
-A = bool, B = false, C = A.
+B = false.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B xor C, B = @, C = @.
 --1> 
 *** Yes
-A = bool, B = A, C = false.
+C = false.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B xor C, B = @, C = @.
 --1> 
 *** Yes
-A = false, B = true, C = true.
+B = true, C = true.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~.
+A = B xor C, B = @, C = @.
 --1> > 
 *** Yes
-A = bool~, B = bool~, C = bool~, D = bool~, E = bool~.
+A = B xor C xor D xor E, B = @, C = @, D = @, E = @.
 --1> 
 *** Yes
-A = bool~, B = bool~, C = true, D = bool~, E = bool~.
+C = true.
 ----2> 
 *** Yes
-A = bool~, B = bool~, C = true, D = true, E = bool~.
+D = true.
 ------3> 
 *** No
-A = bool~, B = bool~, C = true, D = bool~, E = bool~.
+C = true.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~, D = bool~, E = bool~.
+A = B xor C xor D xor E, B = @, C = @, D = @, E = @.
 --1> 
 *** Yes
-A = true, B = bool~, C = bool~, D = bool~, E = bool~.
+A = true.
 ----2> 
 *** No
-A = bool~, B = bool~, C = bool~, D = bool~, E = bool~.
+A = B xor C xor D xor E, B = @, C = @, D = @, E = @.
 --1> 
 *** Yes
-A = false, B = bool~, C = bool~, D = bool~, E = bool~.
+A = false.
 ----2> 
 *** Yes
-A = false, B = false, C = bool~, D = bool~, E = bool~.
+B = false.
 ------3> 
 *** Yes
-A = false, B = false, C = false, D = bool, E = D.
+C = false.
 --------4> 
 *** Yes
-A = false, B = false, C = false, D = true, E = D.
+D = true.
 ----------5> 
 *** No
-A = false, B = false, C = false, D = bool, E = D.
+C = false.
 --------4> 
 *** Yes
-A = false, B = false, C = false, D = false, E = D.
+D = false.
 ----------5> 
 *** No
-A = false, B = false, C = false, D = bool, E = D.
+C = false.
 --------4> > 

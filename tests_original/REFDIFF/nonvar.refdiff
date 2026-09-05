@@ -1,0 +1,74 @@
+--- OUT/nonvar.out
++++ REFOUT/nonvar.refout
+@@ -1,47 +1,57 @@
+ 
+ *** Yes
+ > > 
++% 'var' is a built-in function.
++
++% 'nonvar' is a built-in function.
++
++% 'is_function' is a built-in function.
++
++% 'is_predicate' is a built-in function.
++
++% 'is_sort' is a built-in function.
++
+ *** Yes
+ > 
+ *** Yes
+-A = var(@).
++A = true.
+ --1> > 
+ *** Yes
+-A = var(4).
++A = false.
+ --1> > 
+ *** Yes
+-A = nonvar(@).
++A = false.
+ --1> > 
+ *** Yes
+-A = nonvar(4).
++A = true.
+ --1> > 
+ *** Yes
+-A = is_function(<).
++A = true.
+ --1> > 
+ *** Yes
+-A = is_function(=).
++A = false.
+ --1> > 
+ *** Yes
+-A = is_predicate(<).
++A = false.
+ --1> > 
+ *** Yes
+-A = is_predicate(=).
++A = true.
+ --1> > 
+ *** Yes
+-A = is_sort(<).
++A = false.
+ --1> > 
+ *** Yes
+-A = is_sort(=).
++A = false.
+ --1> > 
+ *** Yes
+-A = is_sort(bool).
++A = true.
+ --1> > 
+ *** Yes
+-A = is_sort(@).
++A = true.
+ --1> > 
+ *** Yes
+-A = is_function(@).
++A = false.
+ --1> > 
+ *** Yes
+-A = is_predicate(@).
++A = false.
+ --1> > 

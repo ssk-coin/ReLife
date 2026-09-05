@@ -1,58 +1,33 @@
 
 *** Yes
 > > 
-% 'point' is undefined.
-
 *** Yes
 > 
 *** Yes
-A = true.
+A = titi(4).
 --1> 
-dynamic(point)?
-point -> 0.
-
 *** Yes
-A = true.
 --1> 
 *** No
 > 
-dynamic(point)?
-point -> 0.
-
 *** Yes
 > 
 *** Yes
 > 
-dynamic(point)?
-point -> 0.
-
 *** Yes
 > > 
-dynamic(point)?
-point -> 0.
-
 *** Yes
 > 
 *** Yes
-A = true.
+A = tata(4).
 --1> 
-dynamic(point)?
-point -> 16.
-
 *** Yes
-A = true.
 --1> 
 *** No
 > 
-dynamic(point)?
-point -> 16.
-
 *** Yes
 > 
 *** Yes
 > 
-dynamic(point)?
-point -> 2064.
-
 *** Yes
 > > 

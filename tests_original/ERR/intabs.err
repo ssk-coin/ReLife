@@ -1,0 +1,270 @@
+*** Syntax error: ')' missing
+*** Syntax error: expected '?' or '.' but got '..'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: ')' missing
+*** Syntax error: expected '?' or '.' but got '::--'
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: expected '?' or '.' but got 'U'
+*** Error: cannot redefine , as DefType.PREDICATE.
+*** Syntax error: ')' missing
+*** Syntax error: ')' missing
+*** Syntax error: ')' missing
+*** Syntax error: expected '?' or '.' but got 'U'
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: expected '?' or '.' but got 'adjust_fathers'
+*** Error: cannot redefine , as DefType.PREDICATE.
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: ',' expected in argument list
+*** Syntax error: ',' expected in argument list
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: expected '?' or '.' but got 'compare_nodes'
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'cond'
+*** Syntax error: ')' missing
+*** Syntax error: expected '?' or '.' but got 'more_general_than'
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: expected '?' or '.' but got 'U'
+*** Error: cannot redefine @ as DefType.PREDICATE.
+*** Syntax error: expected '?' or '.' but got 'more_general_than'
+*** Error: cannot redefine @ as DefType.FUNCTION.
+*** Syntax error: expected '?' or '.' but got 'less_general_than'
+*** Error: cannot redefine @ as DefType.FUNCTION.
+*** Syntax error: expected '?' or '.' but got 'equ'
+*** Error: cannot redefine @ as DefType.FUNCTION.
+*** Syntax error: expected '?' or '.' but got 'more_general_than'
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: expected '?' or '.' but got 'less_general_than'
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: expected '?' or '.' but got 'equ'
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: expected '?' or '.' but got 'more_general_list_than'
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'cond'
+*** Syntax error: ')' missing
+*** Syntax error: expected '?' or '.' but got 'more_general_list_than'
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: expected '?' or '.' but got 'more_general_list_than'
+*** Error: cannot redefine nil as DefType.FUNCTION.
+*** Syntax error: expected '?' or '.' but got 'more_general_or_equ'
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'false'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: expected '?' or '.' but got 'more_general_or_equ'
+*** Error: cannot redefine nil as DefType.FUNCTION.
+*** Syntax error: expected '?' or '.' but got 'less_general_list_than'
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'cond'
+*** Syntax error: ')' missing
+*** Syntax error: expected '?' or '.' but got 'less_general_list_than'
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: expected '?' or '.' but got 'less_general_list_than'
+*** Error: cannot redefine nil as DefType.FUNCTION.
+*** Syntax error: expected '?' or '.' but got 'less_general_or_equ'
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'false'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: expected '?' or '.' but got 'less_general_or_equ'
+*** Error: cannot redefine nil as DefType.FUNCTION.
+*** Syntax error: expected '?' or '.' but got 'equ_list'
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'false'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: expected '?' or '.' but got 'equ_list'
+*** Error: cannot redefine nil as DefType.FUNCTION.
+*** Syntax error: expected '?' or '.' but got 'U'
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: expected '?' or '.' but got 'Ulist'
+*** Error: cannot redefine nil as DefType.FUNCTION.
+*** Syntax error: expected '?' or '.' but got 'Ulist'
+*** Syntax error: bad end of list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ']'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: bad symbol in list
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: expected '?' or '.' but got 'bottom2'
+*** Syntax error: expected '?' or '.' but got 'bottomize'
+*** Error: cannot redefine @ as DefType.PREDICATE.
+*** Syntax error: 'concat(X,Y,Z) ::--'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'X = nil, Y = Z ;'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'X = cons(A,L1), Z = cons(A,L2), concat(L1,Y,L2)'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'toto(X,Y) ::--'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'X = a, tata(Y) ;'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'X = b, tata(Y) ;'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'tutu(X,Y), ! ;'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'fail'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: "succeed '..' ?"
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'extend( ground, p, sat) = @(SAT,NewNode,New),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'extend( free, q, sat) = @(SAT,NewNode,New),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'extend( non_var, q, sat) = @(SAT,Node1,New1),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'extend( ground, q, SAT) = @(SAT,Node2,New2),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'extend( ground, q, SAT) = @(SAT,Node3,New3),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,nl ,write(Node2 === Node3,"  ",New2,"  ",not(New3)),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'find_node( ground, q, SAT) = Node6,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,nl ,write(Node6 === Node3),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'extend( bot, q, SAT) = @(SAT,Node4,New4),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'extend( any, q, SAT) = @(SAT,Node5,New5),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'adjust( ground, q, ground, sat) = @(SAT,Modified,AT),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,nl,write(Modified),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'adjust( free, q, free, sat) = @(SAT,Modified,AT),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,nl,write(Modified),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'find_node( ground, q, SAT:sat) = Node,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'suspend(Node),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl, nl, write( "Bug in not_suspended" )),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl, nl, write( "Bug in suspend" )'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'un_suspend(Node)),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl, nl, write("OK")'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl, nl, write("Bug in un_suspend")'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'suspend(Node),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'find_node( non_var, q, SAT:sat) = Node,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'ext_dp(Node),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'add_dp(ground, p, Node, SAT),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'add_dp(free, q, Node, SAT),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'find_node( ground, q, SAT) = Node2,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'add_dp(free, q, Node2, SAT),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'remove_dp([find_node( ground, p, SAT)],SAT),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'tooo(X,Y) ::-- X = a, X = Y ?'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'solve([free,free],tooo),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'tata(X,Y) ::--'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'X = a, X = Y ;'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'succeed'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: "succeed '..' ?"
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'solve([free,free],tata),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'solve([ground,ground,free],concat),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'tutu(X) ::-- X = cons(Y,Z), titi(Y,Z) ?'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'titi(X,Y) ::-- X = a, Y = b ?'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'solve([free],tutu),'
+    (Hint: facts end with '.' and queries end with '?')

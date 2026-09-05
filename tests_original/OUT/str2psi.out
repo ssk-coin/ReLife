@@ -2,7 +2,7 @@
 *** Yes
 > > 
 *** Yes
-A = abc.
+A = str2psi("abc").
 --1> 
 *** No
 > 

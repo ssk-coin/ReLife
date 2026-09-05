@@ -1,0 +1,15 @@
+--- OUT/genint.out
++++ REFOUT/genint.refout
+@@ -1,7 +1,9 @@
+ 
+ *** Yes
+ > > 
++*** Yes
++--1> 100021000310004
++*** Yes
++--1> 
+ *** No
+-> genintgenintgenint
+-*** Yes
+-> > 
++> 

@@ -1,16 +1,7 @@
 
 *** Yes
 > > > > > > > 
-pred(a) :-
-        succeed.
-pred(_A) :-
-        qred(_B),
-        rred(_A,_B).
-
 *** Yes
 > 
-*** Yes
-X = a.
---1> 
 *** No
-> 
+> > 

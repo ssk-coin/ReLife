@@ -1,0 +1,6 @@
+--- ERR/pers2.err
++++ REFERR/pers2.referr
+@@ -0,0 +1,3 @@
++*** Error: cannot use '<-' on persistent value in  $@ <- hello
++
++*** Abort

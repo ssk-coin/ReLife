@@ -1,0 +1,29 @@
+--- OUT/factorize.out
++++ REFOUT/factorize.refout
+@@ -1,20 +1,20 @@
+ 
+ *** Yes
+-> > factors(6450)
+-factors(127)
++> > [2,3,_A: 5,_A,43]
++[127]
+ *** Yes
+ > 
+ *** No
+ > 
+-*** No
++*** Yes
+ > 
+ *** Yes
+-P = prime.
++P = prime~.
+ --1> 
+ *** Yes
+-P = 29.
++P = 29: prime.
+ ----2> > 
+-*** No
++*** Yes
+ > 
+ *** No
+ > 

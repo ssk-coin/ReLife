@@ -69,6 +69,98 @@ def _make_atom(eng, name: str) -> PsiTerm:
     return eng.wl.make_atom(name, eng.wl.user_module)
 
 
+def _get_sym(t: PsiTerm) -> str:
+    """Get the functor symbol of a term."""
+    if t is None:
+        return ''
+    t = t.deref()
+    return t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+
+
+def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
+    """Try to evaluate a boolean function application.
+
+    Returns a reduced PsiTerm (true or false atom) or None if cannot reduce.
+    Handles: and, or, not, xor applied to concrete bool constants.
+    """
+    if t is None:
+        return None
+    t = t.deref()
+    sym = _get_sym(t)
+
+    if sym == 'and':
+        a1, a2 = _get_two_args(t)
+        if a1 is None or a2 is None:
+            return None
+        # Recursively evaluate args
+        a1 = _try_eval_bool(a1, eng) or a1.deref()
+        a2 = _try_eval_bool(a2, eng) or a2.deref()
+        s1, s2 = _get_sym(a1), _get_sym(a2)
+        if s1 == 'false' or s2 == 'false':
+            return _make_atom(eng, 'false')
+        if s1 == 'true' and s2 == 'true':
+            return _make_atom(eng, 'true')
+        return None
+
+    elif sym == 'or':
+        a1, a2 = _get_two_args(t)
+        if a1 is None or a2 is None:
+            return None
+        a1 = _try_eval_bool(a1, eng) or a1.deref()
+        a2 = _try_eval_bool(a2, eng) or a2.deref()
+        s1, s2 = _get_sym(a1), _get_sym(a2)
+        if s1 == 'true' or s2 == 'true':
+            return _make_atom(eng, 'true')
+        if s1 == 'false' and s2 == 'false':
+            return _make_atom(eng, 'false')
+        return None
+
+    elif sym == 'not':
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return None
+        a1 = _try_eval_bool(a1.deref(), eng) or a1.deref()
+        s1 = _get_sym(a1)
+        if s1 == 'true':
+            return _make_atom(eng, 'false')
+        if s1 == 'false':
+            return _make_atom(eng, 'true')
+        return None
+
+    elif sym == 'xor':
+        a1, a2 = _get_two_args(t)
+        if a1 is None or a2 is None:
+            return None
+        a1 = _try_eval_bool(a1, eng) or a1.deref()
+        a2 = _try_eval_bool(a2, eng) or a2.deref()
+        s1, s2 = _get_sym(a1), _get_sym(a2)
+        if s1 in ('true', 'false') and s2 in ('true', 'false'):
+            result = (s1 == 'true') ^ (s2 == 'true')
+            return _make_atom(eng, 'true' if result else 'false')
+        return None
+
+    return None
+
+
+def _try_eval_arith_to_term(t: PsiTerm, eng) -> Optional[PsiTerm]:
+    """Try arithmetic evaluation, returning a PsiTerm or None."""
+    ok, v = _eval_arith(t, eng)
+    if not ok:
+        return None
+    # Only return if the original term was NOT already a number
+    # (to avoid infinite recursion)
+    if t is None:
+        return None
+    t = t.deref()
+    if t.value is not None and not (t.type and t.type.keyword and
+                                    t.type.keyword.symbol in ('+','-','*','/','//',
+                                                               'mod','**','^','max','min',
+                                                               'abs','sqrt','sin','cos','tan',
+                                                               'exp','log','floor','ceiling')):
+        return None  # already a number, no evaluation needed
+    return _make_number(eng, v)
+
+
 def _unify(eng, a: PsiTerm, b: PsiTerm) -> bool:
     from wild_life.unification import Trail
     mark = eng.trail.mark()
@@ -371,10 +463,22 @@ def bi_arith_ge(goal: PsiTerm, eng) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def bi_unify(goal: PsiTerm, eng) -> bool:
-    """X = Y — standard unification."""
+    """X = Y — LIFE sort unification (with functional evaluation)."""
     a, b = _get_two_args(goal)
     if a is None or b is None:
         return a is b
+    # Try to evaluate functional terms before unifying
+    b_evaled = _try_eval_bool(b, eng)
+    if b_evaled is not None:
+        b = b_evaled
+    else:
+        a_evaled = _try_eval_bool(a, eng)
+        if a_evaled is not None:
+            a = a_evaled
+    # Try arithmetic evaluation on the RHS (for A = 1+2 style)
+    b_arith = _try_eval_arith_to_term(b, eng)
+    if b_arith is not None:
+        b = b_arith
     return _unify(eng, a, b)
 
 

@@ -1,29 +1,39 @@
-2: posint
-0: posint
+2.3 & posint
+2 & posint
+0 & posint
+-2 & posint
+-2.3 & posint
 *******
-2
-0
--2
+2.3 & int
+2 & int
+0 & int
+-2 & int
+-2.3 & int
 *******
-2.3
-2
-0
--2
--2.3
+2.3 & real
+2 & real
+0 & real
+-2 & real
+-2.3 & real
 *******
 *******
-2: posint
-0: posint
+posint & 2.3
+posint & 2
+posint & 0
+posint & -2
+posint & -2.3
 *******
-2
-0
--2
+int & 2.3
+int & 2
+int & 0
+int & -2
+int & -2.3
 *******
-2.3
-2
-0
--2
--2.3
+real & 2.3
+real & 2
+real & 0
+real & -2
+real & -2.3
 
 *** Yes
 > > > > 

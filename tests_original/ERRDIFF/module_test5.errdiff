@@ -1,0 +1,5 @@
+--- ERR/module_test5.err
++++ REFERR/module_test5.referr
+@@ -0,0 +1,2 @@
++*** Warning: feature 'b#c' is now private, but was also declared public
++*** Warning: feature 'b#e' is now private, but was also declared public

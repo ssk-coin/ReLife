@@ -1,0 +1,67 @@
+--- ERR/chapla.err
++++ REFERR/chapla.referr
+@@ -1,64 +0,0 @@
+-*** Syntax error: 'Pgm ='
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'R2_1:position(attrib=>R2,pos=>0,share=>[A3_1]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'R3_1:position(attrib=>R3,pos=>0,share=>[A3_2]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'A1_1:position(attrib=>A1,pos=>1,share=>[A1_2]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'A2_1:position(attrib=>A2,pos=>1,share=>[R1_1,A2_2]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'A3_1:position(attrib=>A3,pos=>1,share=>[R3_1]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'A1_2:position(attrib=>A1,pos=>2,share=>[A1_1]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'A2_2:position(attrib=>A2,pos=>2,share=>[A2_1]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'A3_2:position(attrib=>A3,pos=>2,share=>[R3_1]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'A2_3:position(attrib=>A2,pos=>0,share=>[A3_3]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'A3_3:position(attrib=>A3,pos=>0,share=>[A2_3]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'A1_4:position(attrib=>A1,pos=>0,share=>[A1_5,A3_4]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'A2_4:position(attrib=>A2,pos=>0,share=>[A2_5]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'A3_4:position(attrib=>A3,pos=>0,share=>[A1_4,A3_5]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'A1_5:position(attrib=>A1,pos=>1,share=>[A1_4]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'A2_5:position(attrib=>A2,pos=>1,share=>[A2_4]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'A3_5:position(attrib=>A3,pos=>1,share=>[A3_4]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'share=>[R2_2,A1_6,A2_6,A2_7,A3_7]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'share=>[R1_2,A1_6,A2_6,A2_7,A3_7]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'R3_2:position(attrib=>R3,pos=>1,share=>[]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'share=>[R1_2,R1_2,A2_6,A2_7,A3_7]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'share=>[R1_2,R1_2,A1_6,A2_7,A3_7]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'A1_7:position(attrib=>A2,pos=>3,share=>[]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'share=>[R1_2,R1_2,A1_6,A2_6,A3_7]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'share=>[R1_2,R1_2,A1_6,A2_6,A2_7])'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'occurrences=>[A1_1,A1_2,A1_4,A1_5,A1_6,A1_7]'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'occurrences=>[A2_1,A2_2,A2_3,A2_4,A2_5,A2_6,A2_7]'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'occurrences=>[A3_1,A3_2,A3_3,A3_4,A3_5,A3_7]'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'R1:attribute(occurrences=>[R1_1,R1_2]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'R2:attribute(occurrences=>[R2_1,R2_2]),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'R3:attribute(occurrences=>[R3_1,R3_2])'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'chapla(Pgm),'
+-    (Hint: facts end with '.' and queries end with '?')

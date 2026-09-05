@@ -1,0 +1,4 @@
+--- ERR/ancestor.err
++++ REFERR/ancestor.referr
+@@ -1 +0,0 @@
+-*** Error: cannot open file 'LF/ancestor.lf'.

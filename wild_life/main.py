@@ -283,7 +283,7 @@ def run_repl(
             # ---- Query: ?- Goal -------------------------------------------
             if sort == QUERY:
                 engine._last_var_tree = var_tree
-                cs_before = engine.choice_stack
+                cs_before = engine.choice_stack   # ChoicePoint or None
                 pre_mark = engine.trail.mark()
 
                 saved_noisy = engine.noisy
@@ -318,14 +318,19 @@ def run_repl(
 
                 if success:
                     bindings_str = _format_bindings(var_tree, engine)
-                    if bindings_str:
-                        # Query has variable bindings → enter a new depth level
+                    # Detect new choice points: cs_before was None and now it's not,
+                    # or cs_before was a node and now there are more nodes above it.
+                    has_new_choices = (engine.choice_stack is not None and
+                                       engine.choice_stack is not cs_before)
+                    if bindings_str or has_new_choices:
+                        # Query has bindings or remaining choice points → enter a new depth level
                         frame_stack.append(Frame(pre_mark, bindings_str, cs_before))
                         depth += 1
                         sys.stdout.write("\n*** Yes\n")
-                        sys.stdout.write(bindings_str + "\n")
+                        if bindings_str:
+                            sys.stdout.write(bindings_str + "\n")
                     else:
-                        # No variables → stay at current depth, undo trail
+                        # No variables, no choice points → stay at current depth, undo trail
                         engine.trail.undo_to(pre_mark)
                         engine.choice_stack = cs_before
                         engine.goal_stack = None

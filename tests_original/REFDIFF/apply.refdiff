@@ -1,0 +1,15 @@
+--- OUT/apply.out
++++ REFOUT/apply.refout
+@@ -1,6 +1,11 @@
+ 
+ *** Yes
+-> > function {quadruple;fact} applied to argument {5;3;7} is apply({5;3;7},functor => {quadruple;fact})
++> > function *(2 => 4) applied to argument 5 is 20
++function fact applied to argument 5 is 120
++function *(2 => 4) applied to argument 3 is 12
++function fact applied to argument 3 is 6
++function *(2 => 4) applied to argument 7 is 28
++function fact applied to argument 7 is 5040
+ 
+ *** No
+ > 

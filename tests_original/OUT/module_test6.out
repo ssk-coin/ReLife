@@ -1,19 +1,34 @@
 
 *** Yes
 > > 
-*** Yes
-a> 
-*** Yes
-a> 
-*** Yes
-b> 
-*** Yes
-b> 
-*** Yes
+*** No
 > 
 *** Yes
 > 
+*** No
+> 
 *** Yes
+> 
+*** No
+> 
+*** No
+> 
+*** No
+> 
+*** Yes
+A = p.
+--1> 
+*** No
+> 
+*** No
+> 
+*** No
+> 
+*** No
+> 
+*** No
+> 
+*** No
 > 
 *** Yes
 A = p.
@@ -21,35 +36,18 @@ A = p.
 *** No
 > 
 *** Yes
-a> 
-*** Yes
-a> 
-*** Yes
-b> 
-*** Yes
-b> 
-*** Yes
+> 
+*** No
 > 
 *** Yes
 A = p.
 --1> 
 *** No
 > 
-% 'p' is undefined.
-
-*** Yes
+*** No
 > 
 *** Yes
-a> 
-*** Yes
-A = p(aha => 1).
-a--1> 
+A = p.
+--1> 
 *** No
-a> 
-*** Yes
-b> 
-*** Yes
-A = p(boo => 2).
-b--1> 
-*** No
-b> 
+> 

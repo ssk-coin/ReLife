@@ -1,0 +1,4 @@
+--- ERR/cut.err
++++ REFERR/cut.referr
+@@ -1 +0,0 @@
+-*** Error: cannot open file 'LF/cut.lf'.

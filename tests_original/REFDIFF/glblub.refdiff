@@ -1,0 +1,27 @@
+--- OUT/glblub.out
++++ REFOUT/glblub.refout
+@@ -2,12 +2,18 @@
+ *** Yes
+ > > 
+ *** Yes
+-A = lub(a,b).
++A = k.
++--1> 
++*** Yes
++A = l.
++--1> 
++*** No
++> 
++*** Yes
++A = a.
++--1> 
++*** Yes
++A = b.
+ --1> 
+ *** No
+ > > 
+-*** Yes
+-A = glb(k,l).
+---1> 
+-*** No
+-> > > 

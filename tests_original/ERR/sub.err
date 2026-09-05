@@ -1,0 +1,14 @@
+Assert error: maximum recursion depth exceeded
+*** Syntax error: 'test(A,B) :-'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,nl,nl,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'write("*** Substituting: ",A," with ",B," ***"),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'term(X),write(X),nl,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'write(X),nl,nl),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Error: built-in 'fail' may not be redefined.

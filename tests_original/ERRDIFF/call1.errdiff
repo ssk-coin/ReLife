@@ -1,0 +1,4 @@
+--- ERR/call1.err
++++ REFERR/call1.referr
+@@ -1 +0,0 @@
+-*** Error: cannot redefine call as DefType.FUNCTION.

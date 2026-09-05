@@ -1,0 +1,4 @@
+--- ERR/concat.err
++++ REFERR/concat.referr
+@@ -1 +0,0 @@
+-*** Error: cannot open file 'LF/concat.lf'.

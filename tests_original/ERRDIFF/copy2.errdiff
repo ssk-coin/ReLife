@@ -1,0 +1,7 @@
+--- ERR/copy2.err
++++ REFERR/copy2.referr
+@@ -1,4 +0,0 @@
+-*** Syntax error: 'last=>X:string),'
+-    (Hint: facts end with '.' and queries end with '?')
+-*** Syntax error: 'father=>person(id=>name(last=>X&string)))?'
+-    (Hint: facts end with '.' and queries end with '?')

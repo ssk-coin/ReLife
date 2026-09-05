@@ -1,0 +1,139 @@
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: ',' expected in argument list
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: ',' expected in argument list
+*** Syntax error: ')' missing
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: expected '?' or '.' but got 'trad'
+*** Syntax error: ')' missing
+*** Syntax error: expected '?' or '.' but got '\\'
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: expected '?' or '.' but got 'trad'
+*** Syntax error: ')' missing
+*** Syntax error: expected '?' or '.' but got '\\'
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: expected '?' or '.' but got 'nonvar'
+*** Error: cannot redefine @ as DefType.PREDICATE.
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'list'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: expected '?' or '.' but got 'succeed'
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'sequence'
+*** Error: cannot redefine , as DefType.PREDICATE.
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: expected '?' or '.' but got 'words'
+*** Syntax error: ',' expected in argument list
+*** Syntax error: expected '?' or '.' but got 'variable'
+*** Syntax error: bad expression
+*** Syntax error: expected '?' or '.' but got ')'
+*** Syntax error: bad expression
+*** Error: cannot redefine nothing as DefType.PREDICATE.
+*** Syntax error: 'noun_phrase(pers=>P) -->'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'determiner(nb=>N),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'noun_phrase2(pers=>P, nb=>N)'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: '# P=person(N) ?'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'noun_phrase(pers=>P) -->'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'noun_phrase2(pers=>X:{3;6}) -->'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'noun_phrase2(nb=>N, pers=>P) -->'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'verb_phrase(pers=>W)  -->'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'verb_phrase(pers=>W)  -->'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'verb_phrase(pers=>W)  -->'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'compl_phrase(pers=>P) -->'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'prep,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'verb(pers=>{1;2;4;5;6}) -->'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'verb(pers=>{1;2;4;5;6}) -->'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'writesentence([],true) :- !,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Error: cannot redefine , as DefType.PREDICATE.
+*** Syntax error: 'writesentence([],false) :- !,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl,'
+    (Hint: facts end with '.' and queries end with '?')
+*** Error: cannot redefine , as DefType.PREDICATE.
+*** Syntax error: 'nl, writesentence(List,false) ).'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'z( tree=>z(T2,".",T3), v=> V )'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: '--> \tl( tree=>T2, v=>V1),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: '["."],'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'l( tree=>T3, v=>V2, l=>L)'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: '# V=(V1+V2*exp(-L*log(2))) ?'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'l( tree=>l(T4,T5), v=>V , l=>L )'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: '--> \tb( tree=>T4, v=>V3, s=>S),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'l( tree=>T5, v=>V4, l=>L1)'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: '# S=L1, V=V3+V4 , L=L1+1 ?'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'l( tree=>l(T6), v=>V5, l=>1)'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: '-->  \tb( tree=>T6, v=>V5, s=>S1:0) ?'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'b( tree=>b(1),  s=> Sv, v=>2^Sv)'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: '-->  \t[1] ?'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 'nl, writenumb(List,false) ).'
+    (Hint: facts end with '.' and queries end with '?')

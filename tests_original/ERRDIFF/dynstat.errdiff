@@ -1,0 +1,7 @@
+--- ERR/dynstat.err
++++ REFERR/dynstat.referr
+@@ -0,0 +1,4 @@
++*** Error: the predicate 'user#p' may not be changed.
++*** Error: the predicate 'user#p' may not be changed.
++*** Error: the predicate 'user#p' may not be changed.
++*** Error: the predicate 'user#p' may not be changed.

@@ -1,0 +1,4 @@
+--- ERR/lazy.err
++++ REFERR/lazy.referr
+@@ -1 +0,0 @@
+-*** Error: cannot open file 'LF/lazy.lf'.

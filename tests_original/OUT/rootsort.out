@@ -2,5 +2,5 @@
 *** Yes
 > > 
 *** Yes
-R = foo, X = foo.
+R = root_sort(X), X = ` foo.
 --1> 

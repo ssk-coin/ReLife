@@ -1,14 +1,14 @@
 
 *** Yes
 > > 
-*** Yes
-> > hello
+*** No
+> > app([],hello)
 
 *** Yes
-> [d,e,f,a,b,c]
+> app([a,b,c],[d,e,f])
 
 *** Yes
-> good, bye
+> app(good,bye)
 
 *** Yes
 > > 

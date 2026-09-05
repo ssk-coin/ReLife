@@ -1,0 +1,4 @@
+--- ERR/chart_parser2.err
++++ REFERR/chart_parser2.referr
+@@ -1 +0,0 @@
+-*** Error: cannot open file 'LF/chart_parser2.lf'.

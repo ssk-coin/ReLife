@@ -1,0 +1,8 @@
+*** Syntax error: '[[1,2,3],[1,2,3],[1,2,3]],'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: '[[1,2,3],[1,2,3],[1,2,3]]]?'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 's([1,2,3],[1,2,3],[1,2,3]),'
+    (Hint: facts end with '.' and queries end with '?')
+*** Syntax error: 's([1,2,3],[1,2,3],[1,2,3])]?'
+    (Hint: facts end with '.' and queries end with '?')

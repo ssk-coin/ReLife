@@ -1,0 +1,6 @@
+--- ERR/overload.err
++++ REFERR/overload.referr
+@@ -1,2 +1 @@
+-*** Syntax error: expected '?' or '.' but got 'syntax#+'
+-*** Error: cannot redefine @ as DefType.PREDICATE.
++*** Warning: local definition of '+' overrides 'syntax#+'

@@ -1,0 +1,29 @@
+--- OUT/module_test4.out
++++ REFOUT/module_test4.refout
+@@ -1,17 +1,21 @@
+ 
+ *** Yes
+ > > 
+-*** No
+-> aa(c => d).
++*** Yes
++> 
++aa(c => d) :-
++        succeed.
++
++bb(c => d,e => f) :-
++        succeed.
+ 
+ *** Yes
+ > 
+ *** Yes
+ X = aa(c => d), Y = bb(c => d,e => f).
+ --1> 
+-*** Yes
+-X = @, Y = @.
+-----2> 
+ *** No
+ X = aa(c => d), Y = bb(c => d,e => f).
+ --1> 
++*** No
++> 

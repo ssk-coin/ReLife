@@ -1,0 +1,17 @@
+--- OUT/manual10.out
++++ REFOUT/manual10.refout
+@@ -6,8 +6,11 @@
+ *** Yes
+ > 
+ *** Yes
+-> 
++> int implies int
++int implies real
++
++*** No
++> 3.45 implies real
++
+ *** No
+ > 
+-*** No
+-> 

@@ -2,36 +2,37 @@
 *** Yes
 > > 
 *** Yes
-A = bool~, B = bool~.
+A = not B, B = @.
 --1> 
 *** Yes
-A = true, B = false.
+A = true.
 ----2> 
 *** No
-A = bool~, B = bool~.
+A = not B, B = @.
 --1> 
 *** Yes
-A = false, B = true.
+A = false.
 ----2> 
 *** No
-A = bool~, B = bool~.
+A = not B, B = @.
 --1> 
 *** Yes
-A = false, B = true.
+B = true.
 ----2> 
 *** No
-A = bool~, B = bool~.
+A = not B, B = @.
 --1> 
 *** Yes
-A = true, B = false.
+B = false.
 ----2> 
 *** No
-A = bool~, B = bool~.
+A = not B, B = @.
 --1> > 
 *** No
 > 
-*** No
-> 
+*** Yes
+A = not b.
+--1> 
 *** No
 > > 
 *** No
@@ -42,17 +43,18 @@ A = bool~, B = bool~.
 > 
 *** No
 > > 
-*** No
-> 
 *** Yes
-A = bool~, B = bool~.
+A = not A.
 --1> 
-*** No
-A = bool~, B = bool~.
---1> > 
 *** Yes
-A = bool~, B = bool~.
+A = not B, B = @.
+----2> 
+*** Yes
+A = @, B = @.
+------3> > 
+*** Yes
+A = not B, B = @.
 --1> 
-*** No
-A = bool~, B = bool~.
---1> > 
+*** Yes
+B = string.
+----2> > 

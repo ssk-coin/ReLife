@@ -5,7 +5,7 @@
 X = f(b => 0).
 --1> 
 *** Yes
-X = f(b => 0), Y = 2.
+X = @, Y = apply(a => string,functor => X).
 ----2> 
 *** No
 X = f(b => 0).

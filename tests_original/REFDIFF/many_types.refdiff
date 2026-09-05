@@ -1,0 +1,35 @@
+--- OUT/many_types.out
++++ REFOUT/many_types.refout
+@@ -1,5 +1,30 @@
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
++OK!
+ 
+ *** Yes
+ > > 
+-*** No
+-> 
++*** Yes
++--1> 

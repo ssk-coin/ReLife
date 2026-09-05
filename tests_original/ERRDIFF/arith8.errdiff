@@ -1,0 +1,5 @@
+--- ERR/arith8.err
++++ REFERR/arith8.referr
+@@ -0,0 +1,2 @@
++*** Error: division by zero in real / 0.
++*** Error: division by zero in real / 0.

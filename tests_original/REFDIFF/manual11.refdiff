@@ -1,0 +1,9 @@
+--- OUT/manual11.out
++++ REFOUT/manual11.refout
+@@ -8,5 +8,5 @@
+ *** Yes
+ > 
+ *** Yes
+-A = sum(1,2,3,4,5).
++A = 15.
+ --1> 
