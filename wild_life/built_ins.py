@@ -350,6 +350,53 @@ def bi_writeq(goal: PsiTerm, eng) -> bool:
     return _write_all_args(goal, eng, quoted=True)
 
 
+def bi_write_canonical(goal: PsiTerm, eng) -> bool:
+    """write_canonical(T) — write term T in canonical (non-operator) form.
+
+    write_canonical writes all positional args concatenated in canonical form.
+    The canonical form uses functor(arg1,arg2,...) notation instead of
+    operator-sugar forms.
+    """
+    from wild_life.print_term import write_term
+    attrs = goal.attr_list
+    var_tree = getattr(eng, '_last_var_tree', None)
+    i = 1
+    written_any = False
+    while True:
+        key = str(i)
+        if key not in attrs:
+            break
+        arg = attrs[key].deref()
+        # Evaluate arithmetic first
+        try:
+            t_eval = _try_eval_arith_to_term(arg, eng)
+            if t_eval is not None:
+                arg = t_eval
+        except (RecursionError, Exception):
+            pass
+        # Unwrap backtick-quoted terms: `(X) → write X canonically
+        if (arg.type is not None and arg.type.keyword is not None
+                and arg.type.keyword.symbol == '`'):
+            inner = arg.attr_list.get('1')
+            if inner is not None:
+                arg = inner.deref()
+        write_term(arg, outfile=sys.stdout, quoted=True, wl=eng.wl,
+                   var_tree=var_tree, canonical=True)
+        written_any = True
+        i += 1
+    if not written_any:
+        # No positional args: write the goal itself canonically
+        try:
+            t_eval = _try_eval_arith_to_term(goal, eng)
+            if t_eval is not None:
+                goal = t_eval
+        except (RecursionError, Exception):
+            pass
+        write_term(goal, outfile=sys.stdout, quoted=True, wl=eng.wl,
+                   var_tree=var_tree, canonical=True)
+    return True
+
+
 def bi_print(goal: PsiTerm, eng) -> bool:
     """print(T) — same as write."""
     return bi_write(goal, eng)
@@ -2017,6 +2064,51 @@ def bi_statistics(goal: PsiTerm, eng) -> bool:
     return True
 
 
+def _bi_listing_one(defn, wl) -> None:
+    """Helper: list clauses for a single Definition."""
+    from wild_life.data_structures import DefType
+    from wild_life.print_term import term_to_string
+
+    if defn is None or defn.keyword is None:
+        return
+    active_rules = [(h, b) for h, b in (defn.rule or []) if h is not None]
+    if not active_rules:
+        return
+    func_name = defn.keyword.symbol
+    print(f"\ndynamic({func_name})?")
+    is_function = (defn.type == DefType.FUNCTION)
+    succeed_sym = wl.succeed.keyword.symbol if wl.succeed and wl.succeed.keyword else 'succeed'
+    for h, b in active_rules:
+        hs = term_to_string(h, wl=wl)
+        if is_function:
+            vs = term_to_string(b, wl=wl) if b is not None else 'true'
+            print(f"{hs} -> {vs}.")
+        else:
+            has_body = (b is not None and b.type is not None
+                        and b.type.keyword is not None
+                        and b.type.keyword.symbol != succeed_sym)
+            if has_body:
+                bs = term_to_string(b, wl=wl)
+                print(f"{hs} :-\n        {bs}.")
+            else:
+                print(f"{hs}.")
+
+
+def _bi_listing_all(eng, wl) -> None:
+    """List all user-defined predicates/functions."""
+    from wild_life.data_structures import DefType
+    if not hasattr(wl, 'user_module') or not wl.user_module:
+        return
+    # Gather all definitions that have rules
+    seen = set()
+    for sym, defn in list(wl.user_module.symbol_table.items()):
+        if defn is None or id(defn) in seen:
+            continue
+        seen.add(id(defn))
+        if defn.rule and defn.type in (DefType.PREDICATE, DefType.FUNCTION):
+            _bi_listing_one(defn, wl)
+
+
 def bi_listing(goal: PsiTerm, eng) -> bool:
     """listing(F) — list clauses for functor F.
 
@@ -2030,17 +2122,19 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
           \\ndynamic(NAME)?
           HEAD -> VALUE.
     """
-    arg = _get_one_arg(goal)
-    if arg is None:
-        return False
-    defn = arg.type if arg.type else None
-    if defn is None:
-        return False
-
     from wild_life.data_structures import DefType
     from wild_life.print_term import term_to_string
 
     wl = eng.wl
+    arg = _get_one_arg(goal)
+    if arg is None:
+        # listing with no args: list all user-defined predicates/functions
+        _bi_listing_all(eng, wl)
+        return True
+    defn = arg.type if arg.type else None
+    if defn is None:
+        return False
+
     func_name = defn.keyword.symbol if defn.keyword else '?'
 
     # Collect non-deleted rules
@@ -2316,6 +2410,7 @@ def register_all(wl) -> None:
     # I/O
     _reg('write', bi_write)
     _reg('writeq', bi_writeq)
+    _reg('write_canonical', bi_write_canonical)
     _reg('print', bi_print)
     _reg('nl', bi_nl)
     _reg('write_err', bi_write_err)

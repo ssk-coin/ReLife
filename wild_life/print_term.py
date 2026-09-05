@@ -38,7 +38,7 @@ _SINGLE_CHARS = set("!;,|[]{}()")
 def _is_single(c: str) -> bool:
     return c in _SINGLE_CHARS
 
-_SYMBOL_CHARS = set("#&*+-./:<=>?@\\^`~")
+_SYMBOL_CHARS = set("#&*+-./:<=>?@\\^`~|")
 
 def _is_symbol(c: str) -> bool:
     return c in _SYMBOL_CHARS
@@ -496,6 +496,15 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
         _maybe_resid(ps, t)
         return
 
+    # Sort-constrained variable: X:sort where sort ≠ @ and term is unbound.
+    # In Wild Life, such a variable prints as "sortname~" (e.g. "real~", "bool~").
+    from wild_life.data_structures import SORT_VAR
+    if (t.flags & SORT_VAR) and t.value is None and not t.attr_list:
+        _print_symbol_q(ps, t.type.keyword if t.type else None)
+        ps.write("~")
+        _maybe_resid(ps, t)
+        return
+
     args_written = False
     if t.value is not None:
         _print_value(ps, t, wl)
@@ -639,7 +648,7 @@ def term_to_string(t: Optional['PsiTerm'], quoted: bool = True,
 
 def write_term(t: Optional['PsiTerm'], outfile: IO = None,
                quoted: bool = True, print_depth: int = PRINT_DEPTH,
-               var_tree: dict = None, wl=None) -> None:
+               var_tree: dict = None, wl=None, canonical: bool = False) -> None:
     """Write a term to outfile (default stdout)."""
     if wl is None:
         from wild_life.runtime import WL as wl
@@ -648,6 +657,7 @@ def write_term(t: Optional['PsiTerm'], outfile: IO = None,
     ps = PrintState(outfile=outfile)
     ps.print_depth = print_depth
     ps.const_quote = quoted
+    ps.write_canon = canonical
     ps.indent = False
 
     vt = var_tree or {}
