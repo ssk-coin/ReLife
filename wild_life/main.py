@@ -201,6 +201,9 @@ def run_repl(
             try:
                 line = input()
             except EOFError:
+                # Print a final newline so the last prompt ends cleanly.
+                sys.stdout.write("\n")
+                sys.stdout.flush()
                 break
 
             line_stripped = line.strip()
