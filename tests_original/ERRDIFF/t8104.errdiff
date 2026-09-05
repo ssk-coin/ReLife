@@ -1,5 +1,0 @@
---- ERR/t8104.err
-+++ REFERR/t8104.referr
-@@ -1,2 +0,0 @@
--*** Syntax error in 'LF/t8104.lf': (34, 'Numerical result out of range')
--Parse error: (34, 'Numerical result out of range')

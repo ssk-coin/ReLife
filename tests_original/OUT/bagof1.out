@@ -1,9 +1,0 @@
-
-*** Yes
-> > bagof(_A,p(_A))
-
-*** Yes
-> bagof(apply(5,functor => _A),q(_A))
-
-*** Yes
-> 

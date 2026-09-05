@@ -1,4 +1,0 @@
---- ERR/charcode.err
-+++ REFERR/charcode.referr
-@@ -0,0 +1 @@
-+*** Error: String argument expected in 'asc(real~)'

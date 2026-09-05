@@ -1,5 +1,0 @@
---- ERR/not.err
-+++ REFERR/not.referr
-@@ -0,0 +1,2 @@
-+*** Error: Non-boolean argument or result in 'not b'.
-+*** Error: Non-boolean argument or result in 'not b'.

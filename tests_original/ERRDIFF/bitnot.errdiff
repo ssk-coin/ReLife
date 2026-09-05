@@ -1,4 +1,0 @@
---- ERR/bitnot.err
-+++ REFERR/bitnot.referr
-@@ -0,0 +1 @@
-+*** Warning: non-numeric argument(s) in '\ a'.

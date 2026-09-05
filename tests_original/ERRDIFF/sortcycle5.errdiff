@@ -1,5 +1,0 @@
---- ERR/sortcycle5.err
-+++ REFERR/sortcycle5.referr
-@@ -0,0 +1,2 @@
-+*** Error: there is a cycle in the sort hierarchy
-+*** Cycle: [o <| b <| d <| e <| j <| o]

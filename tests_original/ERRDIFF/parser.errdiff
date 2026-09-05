@@ -1,4 +1,0 @@
---- ERR/parser.err
-+++ REFERR/parser.referr
-@@ -0,0 +1 @@
-+*** Warning: overriding previous declaration of accumulator dcg

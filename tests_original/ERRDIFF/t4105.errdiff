@@ -1,4 +1,0 @@
---- ERR/t4105.err
-+++ REFERR/t4105.referr
-@@ -0,0 +1 @@
-+*** Error: division by zero in 3 / 0.

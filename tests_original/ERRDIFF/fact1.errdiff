@@ -1,4 +1,0 @@
---- ERR/fact1.err
-+++ REFERR/fact1.referr
-@@ -1 +0,0 @@
--*** Error: cannot open file 'LF/fact1.lf'.

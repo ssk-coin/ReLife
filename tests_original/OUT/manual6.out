@@ -1,9 +1,0 @@
-
-*** Yes
-> > 
-*** Yes
-R = rectangle(area => 16,width => 4).
---1> 
-*** Yes
-R = square.
-----2> > 

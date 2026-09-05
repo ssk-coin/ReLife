@@ -1,6 +1,0 @@
-
-*** Yes
-> > 
-*** Yes
-A = bagof(q(B,C,D),op(B,C,D)), B = @, C = @, D = @.
---1> 

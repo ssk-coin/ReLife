@@ -1,6 +1,0 @@
---- ERR/print_depth1.err
-+++ REFERR/print_depth1.referr
-@@ -1 +1,2 @@
--Error: maximum recursion depth exceeded
-+*** Error: argument in print_depth(...) must be positive or zero.
-+*** Error: argument in print_depth(-1) must be positive or zero.

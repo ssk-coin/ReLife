@@ -1,4 +1,0 @@
---- ERR/persistent2.err
-+++ REFERR/persistent2.referr
-@@ -0,0 +1 @@
-+*** Error: function d cannot be redeclared persistent (near line 4).

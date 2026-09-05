@@ -1,4 +1,0 @@
---- ERR/module_test1.err
-+++ REFERR/module_test1.referr
-@@ -0,0 +1 @@
-+*** Error: module "import" not found

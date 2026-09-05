@@ -1,4 +1,0 @@
-*** Syntax error: 'last=>X:string),'
-    (Hint: facts end with '.' and queries end with '?')
-*** Syntax error: 'father=>person(id=>name(last=>X&string)))?'
-    (Hint: facts end with '.' and queries end with '?')

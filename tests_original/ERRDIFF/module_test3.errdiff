@@ -1,5 +1,0 @@
---- ERR/module_test3.err
-+++ REFERR/module_test3.referr
-@@ -0,0 +1,2 @@
-+*** Error: serious module name clash: "b#b" and "a#b"
-+*** Syntax error: Module violation (near line 4).

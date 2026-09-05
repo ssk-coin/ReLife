@@ -1,4 +1,0 @@
---- ERR/writeq.err
-+++ REFERR/writeq.referr
-@@ -0,0 +1 @@
-+*** Warning: non-numeric argument(s) in '' ' + ' ''.

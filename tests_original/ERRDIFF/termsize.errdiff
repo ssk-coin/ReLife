@@ -1,6 +1,0 @@
---- ERR/termsize.err
-+++ REFERR/termsize.referr
-@@ -1,2 +1 @@
--Error: maximum recursion depth exceeded
--Error: maximum recursion depth exceeded while calling a Python object
-+*** Error: the built-in function 'feature_values' may not be extended.

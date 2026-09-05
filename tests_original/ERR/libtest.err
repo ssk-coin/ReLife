@@ -1,2 +1,0 @@
-*** Syntax error: 'map_man(X) :-& man(X)?'
-    (Hint: facts end with '.' and queries end with '?')

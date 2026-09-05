@@ -1,7 +1,0 @@
---- ERR/share.err
-+++ REFERR/share.referr
-@@ -1,4 +0,0 @@
--*** Error: cannot redefine share2 as DefType.PREDICATE.
--*** Error: cannot redefine share3 as DefType.PREDICATE.
--*** Error: cannot redefine ns_share2 as DefType.PREDICATE.
--*** Error: cannot redefine ns_share3 as DefType.PREDICATE.

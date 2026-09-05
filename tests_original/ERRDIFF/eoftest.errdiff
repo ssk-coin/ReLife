@@ -1,6 +1,0 @@
---- ERR/eoftest.err
-+++ REFERR/eoftest.referr
-@@ -1,2 +1 @@
--*** Syntax error: 'f ]ef9u 9j ffj9 0f9j ]fj ]fj'
--    (Hint: facts end with '.' and queries end with '?')
-+*** Syntax error: bad expression (near line 4)

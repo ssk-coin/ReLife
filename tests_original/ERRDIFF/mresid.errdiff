@@ -1,5 +1,0 @@
---- ERR/mresid.err
-+++ REFERR/mresid.referr
-@@ -0,0 +1,2 @@
-+*** Error: [@~|@] should be a nil-terminated list in mresiduate.
-+*** Error: {@;@;@} should be a nil-terminated list in mresiduate.

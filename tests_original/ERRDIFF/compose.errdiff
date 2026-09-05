@@ -1,9 +1,0 @@
---- ERR/compose.err
-+++ REFERR/compose.referr
-@@ -1,6 +0,0 @@
--*** Syntax error: expected '?' or '.' but got 'o'
--*** Error: cannot redefine @ as DefType.FUNCTION.
--*** Error: cannot redefine succ as DefType.FUNCTION.
--*** Syntax error: expected '?' or '.' but got 'o'
--*** Syntax error: expected '?' or '.' but got 'o'
--*** Error: built-in 'succ' may not be redefined.

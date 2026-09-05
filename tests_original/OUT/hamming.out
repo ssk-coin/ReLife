@@ -1,7 +1,0 @@
-> > 
-*** Yes
-A = hamming(6).
---1> > 
-*** Yes
-A = hamming(60).
---1> > 

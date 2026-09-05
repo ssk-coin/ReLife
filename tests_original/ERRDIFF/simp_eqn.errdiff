@@ -1,7 +1,0 @@
---- ERR/simp_eqn.err
-+++ REFERR/simp_eqn.referr
-@@ -1,4 +0,0 @@
--*** Error: built-in 'between' may not be redefined.
--*** Error: built-in 'between' may not be redefined.
--*** Syntax error: '2*I:int + 7 = 3*J:int + 1,between(1,I,100),J>=1,J=<100,'
--    (Hint: facts end with '.' and queries end with '?')

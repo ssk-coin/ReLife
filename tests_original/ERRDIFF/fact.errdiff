@@ -1,4 +1,0 @@
---- ERR/fact.err
-+++ REFERR/fact.referr
-@@ -1 +0,0 @@
--*** Error: built-in 'reverse' may not be redefined.

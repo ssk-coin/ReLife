@@ -1,4 +1,0 @@
---- ERR/curry8.err
-+++ REFERR/curry8.referr
-@@ -0,0 +1 @@
-+*** Error: attempt to add a feature to curried function f(1)

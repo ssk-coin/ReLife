@@ -1,4 +1,0 @@
---- ERR/t3203.err
-+++ REFERR/t3203.referr
-@@ -1 +0,0 @@
--*** Error: cannot open file 'FILES/t3203.1.lf'.

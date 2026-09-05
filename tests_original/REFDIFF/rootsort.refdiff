@@ -1,9 +1,0 @@
---- OUT/rootsort.out
-+++ REFOUT/rootsort.refout
-@@ -2,5 +2,5 @@
- *** Yes
- > > 
- *** Yes
--R = root_sort(X), X = ` foo.
-+R = foo, X = foo.
- --1> 

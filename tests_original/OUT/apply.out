@@ -1,6 +1,0 @@
-
-*** Yes
-> > function {quadruple;fact} applied to argument {5;3;7} is apply({5;3;7},functor => {quadruple;fact})
-
-*** No
-> 

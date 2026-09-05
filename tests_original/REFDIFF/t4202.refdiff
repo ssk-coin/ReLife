@@ -1,9 +1,0 @@
---- OUT/t4202.out
-+++ REFOUT/t4202.refout
-@@ -2,5 +2,5 @@
- *** Yes
- > > 
- *** Yes
--X = reverse(reverse([1,2,3,4])).
-+X = [1,2,3,4].
- --1> 

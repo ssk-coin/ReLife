@@ -1,6 +1,0 @@
---- ERR/module_test2.err
-+++ REFERR/module_test2.referr
-@@ -0,0 +1,3 @@
-+*** Error: 'b(@)' is not a predicate or a function.
-+
-+*** Abort
