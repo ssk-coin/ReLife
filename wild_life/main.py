@@ -29,8 +29,6 @@ from typing import Optional
 _VERSION = "1.02"
 _BANNER = (
     f"Wild_Life Interpreter Version {_VERSION} (Python port)\n"
-    "Copyright (C) 1991-93 DEC Paris Research Laboratory\n"
-    "Copyright (C) 1994-1995 Intelligent Software Group, SFU\n"
 )
 
 
