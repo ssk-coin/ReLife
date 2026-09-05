@@ -22,6 +22,110 @@ from wild_life.unification import (
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Disjunction expansion helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _collect_disj_elems(t: PsiTerm, wl) -> list:
+    """Collect all leaf elements from a disjunction linked-list {a;b;c}.
+    {a;b;c} is stored as disj(a, disj(b, disj(c, disj_nil))).
+    Returns [a, b, c].
+    """
+    elems = []
+    node = t
+    while node is not None:
+        node = node.deref()
+        if node.type is None or node.type is wl.disj_nil:
+            break
+        if node.type is wl.disjunction:
+            head = node.attr_list.get('1')
+            tail = node.attr_list.get('2')
+            if head is not None:
+                elems.append(head.deref())
+            node = tail.deref() if tail else None
+        else:
+            elems.append(node)
+            break
+    return elems
+
+
+def _expand_head_disj(head: PsiTerm, wl, depth: int = 0) -> list:
+    """Expand disjunctions in a head term into a list of alternative terms.
+
+    E.g., f({a;b}, {c;d}) → [f(a,c), f(a,d), f(b,c), f(b,d)]
+         pick_arg({5;3;7}) → [pick_arg(5), pick_arg(3), pick_arg(7)]
+
+    Returns [head] if no disjunctions are found.
+    """
+    if depth > 8:
+        return [head]
+    head_d = head.deref()
+    if head_d.type is None:
+        return [head_d]
+    if head_d.type is wl.disjunction:
+        return _collect_disj_elems(head_d, wl)
+
+    attr_keys = list(head_d.attr_list.keys())
+    if not attr_keys:
+        return [head_d]
+
+    # Build Cartesian product of attribute alternatives
+    combos = [{}]
+    has_disj = False
+    for key in attr_keys:
+        val_d = head_d.attr_list[key].deref()
+        alts = _expand_head_disj(val_d, wl, depth + 1)
+        if len(alts) > 1:
+            has_disj = True
+        new_combos = []
+        for combo in combos:
+            for alt in alts:
+                new_combo = dict(combo)
+                new_combo[key] = alt
+                new_combos.append(new_combo)
+        combos = new_combos
+
+    if not has_disj:
+        return [head_d]
+
+    result = []
+    for attrs in combos:
+        new_term = PsiTerm(type_def=head_d.type, value=head_d.value)
+        new_term.attr_list = attrs
+        result.append(new_term)
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cut barrier helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _patch_cut_barriers(term: PsiTerm, wl, cut_point, seen=None) -> None:
+    """Recursively set cut atoms' .value to cut_point in a copied body.
+
+    In WAM semantics, '!' inside a predicate's body cuts to the choice point
+    that was current when the predicate was CALLED (B0 register).  After
+    copy_term the cut atoms in the copy still have value=None, so we patch
+    them here before pushing the body onto the goal stack.
+    """
+    if term is None:
+        return
+    if seen is None:
+        seen = set()
+    oid = id(term)
+    if oid in seen:
+        return
+    seen.add(oid)
+    # Dereference (may be a bound variable — PsiTerm uses .coref)
+    while term.coref is not None:
+        term = term.coref
+    if term.type is wl.cut:
+        term.value = cut_point
+        return   # cut atom has no meaningful subterms
+    for v in term.attr_list.values():
+        _patch_cut_barriers(v, wl, cut_point, seen)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Engine
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -108,27 +212,32 @@ class Engine:
                   file=sys.stderr)
             return False
 
-        # Copy head & body to heap-permanent storage.
-        # Shared var_map ensures the same original variable maps to the
-        # same fresh copy in both head and body.
-        shared_map: dict = {}
-        head_copy = copy_term(head, shared_map)
-        if body is not None:
-            body_copy = copy_term(body, shared_map)
-        else:
-            # Facts: body = succeed
-            body_copy = wl.make_atom('succeed', wl.bi_module)
-            if body_copy is None:
-                body_copy = PsiTerm(type=wl.succeed)
+        # Expand disjunctions in the head before copying.
+        # e.g. pick_arg({5;3;7}). → three facts: pick_arg(5). pick_arg(3). pick_arg(7).
+        alt_heads = _expand_head_disj(head, wl)
 
-        rule = (head_copy, body_copy)
+        rules_to_add = []
+        for alt_head in alt_heads:
+            # Copy head & body to heap-permanent storage.
+            # Shared var_map ensures the same original variable maps to the
+            # same fresh copy in both head and body.
+            shared_map: dict = {}
+            head_copy = copy_term(alt_head, shared_map)
+            if body is not None:
+                body_copy = copy_term(body, shared_map)
+            else:
+                # Facts: body = succeed
+                body_copy = wl.make_atom('succeed', wl.bi_module)
+                if body_copy is None:
+                    body_copy = PsiTerm(type=wl.succeed)
+            rules_to_add.append((head_copy, body_copy))
 
         if self.assert_first:
-            defn.rule = [rule] + (defn.rule or [])
+            defn.rule = list(reversed(rules_to_add)) + (defn.rule or [])
         else:
             if defn.rule is None:
                 defn.rule = []
-            defn.rule.append(rule)
+            defn.rule.extend(rules_to_add)
         return True
 
     def assert_clause(self, t: PsiTerm) -> None:
@@ -292,7 +401,12 @@ class Engine:
             sym = defn.keyword.symbol if defn and defn.keyword else '?'
             print(f"[trace] prove {sym}", file=sys.stderr)
 
-        # Multiple clauses → set up choice point for first, then proceed
+        # Multiple clauses → set up choice point for first, then proceed.
+        # Record cut_barrier BEFORE pushing the multi-clause choice point so
+        # that '!' inside the clause body only cuts choices that belong to
+        # THIS predicate call, not choices from the calling context.
+        cut_barrier = self.choice_stack   # WAM B0 register
+
         head_orig, body_orig = active[0]
         if len(active) > 1:
             self.push_choice_point(GoalType.PROVE, thegoal, active[1:], None)
@@ -303,6 +417,8 @@ class Engine:
 
         # Unify head with goal
         if body.type != wl.succeed:
+            # Patch cut atoms in the body copy so they respect the cut barrier.
+            _patch_cut_barriers(body, wl, cut_barrier)
             self.push_goal(GoalType.PROVE, body, _DEFRULES, None)
 
         # Bind head's coref to thegoal (= head ← thegoal)
@@ -430,28 +546,42 @@ class Engine:
         aim = self.aim
         head = aim.a
         body = aim.b
-        rule_list_ref = aim.c  # list (mutable)
+        rule_list_ref = aim.c  # list (mutable) — always the MASTER rule list
 
         if not rule_list_ref or not isinstance(rule_list_ref, list):
             return False
 
-        rules = rule_list_ref
-        while rules and (rules[0][0] is None or rules[0][1] is None):
-            rules = rules[1:]
+        # Find the index of the first non-deleted rule in the master list.
+        # We scan by index (not by slicing) so that RETRACT can modify the
+        # master list at the correct position.
+        idx = 0
+        while idx < len(rule_list_ref) and (
+                rule_list_ref[idx][0] is None or rule_list_ref[idx][1] is None):
+            idx += 1
 
-        if not rules:
+        if idx >= len(rule_list_ref):
             return False
 
-        if len(rules) > 1:
-            next_rules = rules[1:]
+        # If there are more rules after idx, push a choice point.
+        # For retract, always store the MASTER list so the next retry also
+        # scans from the front, skipping newly-deleted entries.
+        has_more = any(
+            rule_list_ref[i][0] is not None
+            for i in range(idx + 1, len(rule_list_ref))
+        )
+        if has_more:
             if retract:
-                self.push_choice_point(GoalType.DEL_CLAUSE, head, body, next_rules)
+                # Re-use the master list; after RETRACT marks rule_list_ref[idx]
+                # as (None, None), the next scan will find the right successor.
+                self.push_choice_point(GoalType.DEL_CLAUSE, head, body, rule_list_ref)
             else:
+                next_rules = rule_list_ref[idx + 1:]
                 self.push_choice_point(GoalType.CLAUSE, head, body, next_rules)
 
-        h0, b0 = rules[0]
+        h0, b0 = rule_list_ref[idx]
         if retract:
-            self.push_goal(GoalType.RETRACT, rules, None, None)
+            # Store (master_list, index) so RETRACT modifies the correct slot.
+            self.push_goal(GoalType.RETRACT, (rule_list_ref, idx), None, None)
 
         _vm: dict = {}
         rule_head = copy_term(h0, _vm)
@@ -550,9 +680,14 @@ class Engine:
                 elif gtype == GoalType.RETRACT:
                     self.goal_stack = self.aim.next
                     self.goal_count += 1
-                    rules = self.aim.a
-                    if rules and isinstance(rules, list) and rules:
-                        rules[0] = (None, None)
+                    retract_info = self.aim.a
+                    if isinstance(retract_info, tuple):
+                        # New-style: (master_list, index)
+                        master_list, del_idx = retract_info
+                        master_list[del_idx] = (None, None)
+                    elif retract_info and isinstance(retract_info, list) and retract_info:
+                        # Old-style fallback: list, mark first slot
+                        retract_info[0] = (None, None)
 
                 elif gtype == GoalType.WHAT_NEXT:
                     self.goal_stack = self.aim.next

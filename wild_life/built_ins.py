@@ -500,6 +500,68 @@ def _collect_disjunction(t: PsiTerm, eng) -> list:
     return elems
 
 
+def _term_contains_disjunction(t: PsiTerm, eng, depth: int = 0) -> bool:
+    """Return True if t (or any subterm up to depth 10) is a disjunction."""
+    if depth > 10:
+        return False
+    t = t.deref()
+    if t.type is None:
+        return False
+    if t.type is eng.wl.disjunction:
+        return True
+    for v in t.attr_list.values():
+        if _term_contains_disjunction(v, eng, depth + 1):
+            return True
+    return False
+
+
+def _expand_term_disjunctions(t: PsiTerm, eng) -> list:
+    """Return a list of all alternative terms obtained by expanding embedded disjunctions.
+
+    E.g., [{1;2;3}|T] → [[1|T], [2|T], [3|T]]
+         f({a;b}, {c;d}) → [f(a,c), f(a,d), f(b,c), f(b,d)]
+    """
+    t = t.deref()
+    if t.type is None:
+        return [t]  # unbound variable
+
+    if t.type is eng.wl.disjunction:
+        return _collect_disjunction(t, eng)
+
+    # Collect alternatives for each attribute
+    attr_keys = list(t.attr_list.keys())
+    if not attr_keys:
+        return [t]
+
+    # Build cartesian product of attribute alternatives
+    # Start with a single combo (empty)
+    combos = [{}]
+    has_disj = False
+    for key in attr_keys:
+        val_d = t.attr_list[key].deref()
+        alts = _expand_term_disjunctions(val_d, eng)
+        if len(alts) > 1:
+            has_disj = True
+        new_combos = []
+        for combo in combos:
+            for alt in alts:
+                new_combo = dict(combo)
+                new_combo[key] = alt
+                new_combos.append(new_combo)
+        combos = new_combos
+
+    if not has_disj:
+        return [t]
+
+    # Build new terms for each attribute combination
+    result = []
+    for attrs in combos:
+        new_term = PsiTerm(type_def=t.type, value=t.value)
+        new_term.attr_list = attrs
+        result.append(new_term)
+    return result
+
+
 def _is_user_function(t: PsiTerm) -> bool:
     """Return True if t is a user-defined function call (has -> rules)."""
     if t is None:
@@ -557,6 +619,16 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
             for alt in reversed(elems[1:]):
                 eng.push_choice_point(GoalType.UNIFY, alt, b_d, None)
             return _unify(eng, elems[0], b_d)
+
+    # Handle embedded disjunctions in RHS (e.g. [{1;2;3}|T] → [1|T], [2|T], [3|T])
+    # Only do this when LHS is an unbound variable (binding case)
+    a_is_var = (a_d.type is None or (a_d.type is eng.wl.top and not a_d.attr_list))
+    if a_is_var and b_d.type is not None and _term_contains_disjunction(b_d, eng):
+        alts = _expand_term_disjunctions(b_d, eng)
+        if len(alts) > 1:
+            for alt in reversed(alts[1:]):
+                eng.push_choice_point(GoalType.UNIFY, a_d, alt, None)
+            return _unify(eng, a_d, alts[0])
 
     # Try to evaluate functional terms before unifying (boolean ops)
     b_evaled = _try_eval_bool(b_d, eng)
@@ -896,7 +968,8 @@ def bi_asserta(goal: PsiTerm, eng) -> bool:
 
 
 def bi_retract(goal: PsiTerm, eng) -> bool:
-    """retract(Clause) — remove first matching clause."""
+    """retract(Clause) — remove first matching clause (non-deterministic)."""
+    from wild_life.data_structures import GoalType as _GT
     arg = _get_one_arg(goal)
     if arg is None:
         return False
@@ -915,18 +988,15 @@ def bi_retract(goal: PsiTerm, eng) -> bool:
     defn = head.type
     if defn is None or defn.rule is None or callable(defn.rule):
         return False
-    for i, (h, b) in enumerate(defn.rule):
-        if h is None:
-            continue
-        mark = eng.trail.mark()
-        ok = eng.unifier.unify(head, copy_term(h))
-        if ok and body is not None:
-            ok = eng.unifier.unify(body, copy_term(b) if b else wl.make_atom('true', wl.bi_module))
-        if ok:
-            defn.rule[i] = (None, None)  # mark as retracted
-            return True
-        eng.trail.undo_to(mark)
-    return False
+    # Build a body term if none given (unifies with 'true')
+    if body is None:
+        body = PsiTerm(type_def=wl.top)  # fresh var — will match any body
+    # Use the engine's non-deterministic clause_aim machinery:
+    # Push a DEL_CLAUSE goal with the full rule list.
+    # clause_aim will handle choosing the first match and pushing choice points.
+    rule_list = defn.rule  # live mutable list
+    eng.push_goal(_GT.DEL_CLAUSE, head, body, rule_list)
+    return True
 
 
 def bi_abolish(goal: PsiTerm, eng) -> bool:
@@ -1936,6 +2006,13 @@ def register_all(wl) -> None:
     # System
     _reg('halt', bi_halt)
     _reg('abort', bi_abort)
+    # gc — in Wild Life, gc commits all choice points (like a global cut)
+    # so backtracking past a gc call is impossible.
+    def _bi_gc(goal, eng):
+        eng.choice_stack = None
+        return True
+    _reg('gc', _bi_gc)
+    _reg('garbage_collect', _bi_gc)
     _reg('load', bi_load)
     _reg('op', bi_op)
     _reg('statistics', bi_statistics)
