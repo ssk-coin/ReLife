@@ -191,6 +191,13 @@ class Parser:
             result.value = -arg1.value
             return result
 
+        # '`' (sort quotation) の特別処理: `expr preserves structure without evaluation
+        if (t.type is not None and t.type.keyword and
+                t.type.keyword.symbol == '`' and arg1 and not arg2):
+            # Keep type=` and attr_list={'1': arg1}, mark QUOTED_TRUE to prevent evaluation
+            t.flags = t.flags | QUOTED_TRUE
+            # Fall through to general case which will set t.attr_list['1'] = arg1
+
         # 一般的な演算子適用
         if arg1:
             t.attr_list["1"] = arg1

@@ -222,7 +222,7 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         return _make_string(eng, s1 + s2)
 
     elif sym == 'root_sort' or sym == 'sort':
-        # root_sort(T) -> atom naming the sort of T
+        # root_sort(T) -> the sort name of T as an atom
         a1 = t.attr_list.get('1')
         if a1 is None:
             return None
@@ -667,6 +667,10 @@ def _is_user_function(t: PsiTerm) -> bool:
     if t is None:
         return False
     t = t.deref()
+    # Backtick-quoted terms (QUOTED_TRUE) are sort references, not function calls
+    from wild_life.data_structures import QUOTED_TRUE
+    if t.flags & QUOTED_TRUE:
+        return False
     defn = t.type
     if defn is None:
         return False
@@ -2233,7 +2237,7 @@ def register_all(wl) -> None:
 
     # ── LIFE type/sort built-ins ───────────────────────────────────────────────
     def _bi_root_sort(goal, eng):
-        """root_sort(T): return the sort (functor name) of T."""
+        """root_sort(T, R): R = the sort name of T as an atom."""
         a1 = goal.attr_list.get('1')
         a2 = goal.attr_list.get('2')
         if a1 is None:
@@ -2244,7 +2248,6 @@ def register_all(wl) -> None:
             return False
         result = eng.wl.make_atom(defn.keyword.symbol, eng.wl.user_module)
         if a2 is None:
-            # Functional form: return the sort as value (display it)
             return True
         return _unify(eng, a2.deref(), result)
     _reg('root_sort', _bi_root_sort)
