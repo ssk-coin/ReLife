@@ -114,22 +114,38 @@ def _is_var(t: PsiTerm, eng) -> bool:
 # I/O predicates
 # ─────────────────────────────────────────────────────────────────────────────
 
-def bi_write(goal: PsiTerm, eng) -> bool:
-    """write(T) — write term T without quoting."""
-    arg = _get_one_arg(goal)
-    if arg is None:
-        return False
-    _write_term(arg, eng, quoted=False)
+def _write_all_args(goal: PsiTerm, eng, quoted: bool, stream=None) -> bool:
+    """Write all positional arguments of goal, concatenated (no separator).
+
+    In LIFE, write(a,b,c) writes each argument in order without separator.
+    If the goal has no positional args, write the goal's sort name.
+    """
+    attrs = goal.attr_list
+    # Collect positional arguments '1', '2', '3', ...
+    i = 1
+    written_any = False
+    while True:
+        key = str(i)
+        if key not in attrs:
+            break
+        arg = attrs[key].deref()
+        _write_term(arg, eng, stream=stream, quoted=quoted)
+        written_any = True
+        i += 1
+    if not written_any:
+        # No positional args: treat as write of goal itself
+        _write_term(goal, eng, stream=stream, quoted=quoted)
     return True
+
+
+def bi_write(goal: PsiTerm, eng) -> bool:
+    """write(T) — write term T (or all positional args) without quoting."""
+    return _write_all_args(goal, eng, quoted=False)
 
 
 def bi_writeq(goal: PsiTerm, eng) -> bool:
-    """writeq(T) — write term T with quoting."""
-    arg = _get_one_arg(goal)
-    if arg is None:
-        return False
-    _write_term(arg, eng, quoted=True)
-    return True
+    """writeq(T) — write term T (or all positional args) with quoting."""
+    return _write_all_args(goal, eng, quoted=True)
 
 
 def bi_print(goal: PsiTerm, eng) -> bool:
@@ -1181,6 +1197,7 @@ def bi_nth(goal: PsiTerm, eng) -> bool:
 
 def bi_halt(goal: PsiTerm, eng) -> bool:
     """halt / halt(N)."""
+    import sys as _sys
     arg = _get_one_arg(goal)
     code = 0
     if arg and arg.value is not None:
@@ -1188,6 +1205,9 @@ def bi_halt(goal: PsiTerm, eng) -> bool:
             code = int(float(arg.value))
         except Exception:
             pass
+    # Print final newline before halting (matches original C interpreter behaviour)
+    _sys.stdout.write("\n")
+    _sys.stdout.flush()
     raise HaltException(code)
 
 
@@ -1548,6 +1568,56 @@ def bi_type_of(goal: PsiTerm, eng) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# alias/2 — sort alias
+# ─────────────────────────────────────────────────────────────────────────────
+
+def bi_alias(goal: PsiTerm, eng) -> bool:
+    """alias(X, Y) — Make sort X an alias for sort Y.
+
+    After alias(X,Y), references to X resolve to Y.
+    Prints a warning to stderr.
+    """
+    wl = eng.wl
+    a1 = goal.attr_list.get('1')
+    a2 = goal.attr_list.get('2')
+    if a1 is None or a2 is None:
+        return False
+    t1 = a1.deref()
+    t2 = a2.deref()
+
+    # Get the Definition objects for X and Y
+    defn1 = t1.type
+    defn2 = t2.type
+    if defn1 is None or defn2 is None:
+        return False
+
+    # Get keyword info for the warning message
+    kw1 = defn1.keyword
+    kw2 = defn2.keyword
+    sym1 = kw1.symbol if kw1 else str(defn1)
+    sym2 = kw2.symbol if kw2 else str(defn2)
+    mod1 = kw1.module if kw1 else None
+    mod2 = kw2.module if kw2 else None
+    mod1_name = mod1.module_name if mod1 else 'user'
+    mod2_name = mod2.module_name if mod2 else 'user'
+
+    # Print warning to stderr (matches original C Wild Life behaviour)
+    sys.stderr.write(
+        f"*** Warning: alias: '{mod1_name}#{sym1}' has now been overwritten by '{mod2_name}#{sym2}'\n"
+    )
+
+    # Perform the alias: update the symbol table entry for sym1 to refer to defn2.
+    # Also update any other entries that already pointed to defn1 (transitive chain).
+    # Search all modules for entries pointing to defn1 and redirect them to defn2.
+    for mod in list(wl._all_modules()):
+        for k, d in list(mod.symbol_table.items()):
+            if d is defn1:
+                mod.symbol_table[k] = defn2
+
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Sentinel used inside inference.py
 # ─────────────────────────────────────────────────────────────────────────────
 from wild_life.inference import _DEFRULES
@@ -1683,3 +1753,6 @@ def register_all(wl) -> None:
     _reg('set_attribute', bi_set_attribute)
     _reg('type_of', bi_type_of)
     _reg('functor_of', bi_functor_of)
+
+    # Alias / sort manipulation
+    _reg('alias', bi_alias)

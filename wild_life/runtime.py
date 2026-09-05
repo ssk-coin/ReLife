@@ -210,6 +210,10 @@ class WildLifeRuntime:
         """モジュールを名前で検索"""
         return self.module_table.get(name)
 
+    def _all_modules(self):
+        """Return all registered modules (for alias transitivity)."""
+        return self.module_table.values()
+
     def set_current_module(self, m: Module):
         """現在のモジュールを設定"""
         self.current_module = m
@@ -523,6 +527,7 @@ class WildLifeRuntime:
         op(900,  OT.XFX, "=:=")
 
         # LIFE特有演算子
+        op(1150, OT.XFX, "<|")   # サブタイプ宣言 (sort declaration)
         op(900,  OT.XFX, "<-")   # 述語定義
         op(900,  OT.XFX, "=>")   # 特性割り当て
 

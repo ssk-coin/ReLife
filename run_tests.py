@@ -103,17 +103,25 @@ def run_one(
     #   halt?
     load_cmd = f'load("LF/{name}.lf")?\n'
     in_text  = in_path.read_text(errors="replace") if in_path.exists() else ""
-    stdin_data = (load_cmd + in_text + "\nhalt?\n").encode()
+    # The original check script adds an echo "" (blank line) after load.
+    # No extra blank line before halt? (mirrors: echo ""; cat in; echo "halt?").
+    stdin_data = (load_cmd + "\n" + in_text + "halt?\n").encode()
 
-    # Run the Python interpreter as a subprocess
-    cmd = [sys.executable, "-m", "wild_life", "-q"]
+    # Run the Python interpreter as a subprocess (no -q: prompts appear in refout)
+    # PYTHONPATH must include the repo root so 'wild_life' package is importable.
+    # cwd is test_dir so relative paths like LF/name.lf work from there.
+    import os as _os
+    env = dict(_os.environ)
+    env['PYTHONPATH'] = str(test_dir.parent) + _os.pathsep + env.get('PYTHONPATH', '')
+    cmd = [sys.executable, "-m", "wild_life"]
     try:
         proc = subprocess.run(
             cmd,
             input=stdin_data,
             capture_output=True,
             timeout=timeout,
-            cwd=test_dir.parent,   # repo root (so 'wild_life' package is importable)
+            cwd=test_dir,          # tests_original dir so 'LF/name.lf' resolves
+            env=env,
         )
     except subprocess.TimeoutExpired:
         out_diff = f"TIMEOUT after {timeout}s\n"

@@ -690,7 +690,7 @@ def print_variables(var_tree: dict, outfile: IO = None,
             continue
         t = pterm.deref()
         if not first:
-            outfile.write(",\n")
+            outfile.write(", ")
         first = False
         outfile.write(name)
         outfile.write(" = ")
@@ -703,7 +703,7 @@ def print_variables(var_tree: dict, outfile: IO = None,
             ps.flush()
 
     if not first:
-        outfile.write(".\n")
+        outfile.write(".")
     return not first
 
 

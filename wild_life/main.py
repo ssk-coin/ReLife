@@ -3,6 +3,13 @@ wild_life/main.py — Main REPL loop for the Wild Life interpreter.
 
 Corresponds to Life.c (and Info.c) from the original C source.
 Implements the Read-Evaluate-Print loop for the LIFE language.
+
+This implements the "nested constraint session" model:
+  - Each successful query at depth D opens depth D+1
+  - Blank line at depth D>0 pops one level (prints *** No + parent bindings)
+  - Period '.' exits all levels silently back to depth 0
+  - Semicolon ';' backtracks for another solution at current depth
+  - Variables persist across depth levels (WAM trail)
 """
 
 from __future__ import annotations
@@ -11,6 +18,8 @@ import sys
 import os
 import argparse
 import traceback
+import io
+from collections import namedtuple
 from typing import Optional
 
 # ---------------------------------------------------------------------------
@@ -21,17 +30,57 @@ _VERSION = "1.02"
 _BANNER = (
     f"Wild_Life Interpreter Version {_VERSION} (Python port)\n"
     "Copyright (C) 1991-93 DEC Paris Research Laboratory\n"
-    "Extensions, Copyright (C) 1994-1995 Intelligent Software Group, SFU\n"
-    "Python port — 2024\n"
+    "Copyright (C) 1994-1995 Intelligent Software Group, SFU\n"
 )
-
-_PROMPT = "?- "
 
 
 def title(quiet: bool = False) -> None:
     """Print the startup banner (mirrors C's title() in Info.c)."""
     if not quiet:
-        print(_BANNER)
+        sys.stdout.write(_BANNER)
+        sys.stdout.flush()
+
+
+# ---------------------------------------------------------------------------
+# Nested constraint session model helpers
+# ---------------------------------------------------------------------------
+
+# A frame on the depth stack records:
+#   pre_mark     - trail mark BEFORE proving this query (for undo on pop)
+#   bindings_str - formatted variable bindings string (e.g. "A = 1, B = 2.")
+#   cs_before    - choice_stack BEFORE proving (for restoring on pop)
+Frame = namedtuple('Frame', ['pre_mark', 'bindings_str', 'cs_before'])
+
+
+def _prompt(depth: int) -> str:
+    """Return the prompt string for the given depth level.
+
+    depth=0  -> '> '
+    depth=1  -> '--1> '
+    depth=2  -> '----2> '
+    """
+    if depth == 0:
+        return "> "
+    return "--" * depth + str(depth) + "> "
+
+
+def _format_bindings(var_tree: dict, engine) -> str:
+    """Format all named variables as a single-line string like 'A = 1, B = 2.'
+
+    Returns empty string if there are no named variables (or all anonymous).
+    """
+    from wild_life.print_term import print_variables
+
+    if not var_tree:
+        return ""
+
+    buf = io.StringIO()
+    had_vars = print_variables(var_tree, outfile=buf, wl=engine.wl)
+    result = buf.getvalue()
+    # print_variables now writes "." at end without newline
+    if not had_vars:
+        return ""
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +98,7 @@ def run_repl(
 
     Parameters
     ----------
-    quiet       : suppress banner and prompts
+    quiet       : suppress banner (prompts are always printed)
     load_files  : extra .lf files to load from command line
     interactive : True when stdin is a terminal
     """
@@ -57,10 +106,9 @@ def run_repl(
     from wild_life.runtime import WL
     from wild_life.built_ins import register_all
     from wild_life.inference import Engine
-    from wild_life.parser_ import parse_term_string, Parser
-    from wild_life.tokenizer import tokenizer_from_string, tokenizer_from_file
-    from wild_life.data_structures import GoalType
+    from wild_life.parser_ import parse_string
     from wild_life.unification import HaltException, AbortException
+    from wild_life.data_structures import QUERY, FACT, ERROR
 
     # ---- Initialise runtime (modules, types, operators) --------------------
     if not WL._initialized:
@@ -71,272 +119,267 @@ def run_repl(
 
     # ---- Create the inference engine ---------------------------------------
     engine = Engine(WL)
-    engine.noisy = not quiet
+    engine.noisy = False   # REPL handles all output itself
 
     # ---- Print banner -------------------------------------------------------
     title(quiet)
 
-    # ---- Load system initialisation file (.set_up / built_ins.lf) ----------
-    setup_loaded = False
+    # ---- Load system initialisation file (.set_up) --------------------------
+    # Note: built_ins.lf uses complex module syntax not yet supported by the
+    # parser. All Python built-ins are registered via built_ins.py, so we only
+    # load a .set_up file if one exists.
     setup_candidates = [
         os.path.join(os.path.dirname(__file__), ".set_up"),
-        os.path.join(os.path.dirname(__file__), "built_ins.lf"),
         "/usr/local/lib/life/Source/.set_up",
     ]
     for candidate in setup_candidates:
         if os.path.isfile(candidate):
-            if not quiet:
-                print(f"Loading {candidate} ...")
             try:
                 engine.load_file(candidate)
-                setup_loaded = True
             except Exception as exc:
-                print(f"Warning: could not load {candidate}: {exc}", file=sys.stderr)
+                sys.stderr.write(f"Warning: could not load {candidate}: {exc}\n")
             break
 
     # ---- Load files given on command line -----------------------------------
     for path in (load_files or []):
-        if not quiet:
-            print(f"Loading {path} ...")
         try:
             engine.load_file(path)
         except HaltException:
             return 0
         except Exception as exc:
-            print(f"Error loading {path}: {exc}", file=sys.stderr)
+            sys.stderr.write(f"Error loading {path}: {exc}\n")
+
+    # ---- Nested constraint session state -----------------------------------
+    frame_stack: list[Frame] = []
+    depth = 0
+
+    def _pop_frame() -> str:
+        """Pop one depth level: undo trail, restore choice_stack, return parent bindings."""
+        nonlocal depth
+        if not frame_stack:
+            return ""
+        frame = frame_stack.pop()
+        engine.trail.undo_to(frame.pre_mark)
+        engine.choice_stack = frame.cs_before
+        engine.goal_stack = None
+        depth -= 1
+        # Return parent frame's bindings (if any)
+        return frame_stack[-1].bindings_str if frame_stack else ""
+
+    def _pop_all():
+        """Pop all frames back to depth 0."""
+        nonlocal depth
+        if frame_stack:
+            root_frame = frame_stack[0]
+            engine.trail.undo_to(root_frame.pre_mark)
+            engine.choice_stack = root_frame.cs_before
+            engine.goal_stack = None
+            frame_stack.clear()
+        depth = 0
+
+    def _write_prompt(d: int):
+        sys.stdout.write(_prompt(d))
+        sys.stdout.flush()
 
     # ---- Main REPL ---------------------------------------------------------
+    # No initial prompt — the first output comes from the load or the first query.
     exit_code = 0
+
     while True:
         try:
-            # Show prompt on interactive terminals
-            if interactive and not quiet:
-                print(_PROMPT, end="", flush=True)
-
-            # Read a line (or EOF)
             try:
                 line = input()
             except EOFError:
-                # Ctrl-D / end of pipe — exit cleanly
-                if not quiet:
-                    print()
                 break
 
-            line = line.strip()
-            if not line or line.startswith("%"):
-                # blank line or comment — skip
+            line_stripped = line.strip()
+
+            # ---- Blank line or comment ------------------------------------
+            if not line_stripped or line_stripped.startswith('%'):
+                if depth == 0:
+                    # At top level, blank just re-shows the prompt
+                    _write_prompt(0)
+                else:
+                    # Pop one depth level
+                    parent_bindings = _pop_frame()
+                    sys.stdout.write("\n*** No\n")
+                    if parent_bindings:
+                        sys.stdout.write(parent_bindings + "\n")
+                    _write_prompt(depth)
                 continue
 
-            # NOTE: '.'' はパーサが FACT の終端として必要なので削除しない。
-            # '?' はクエリの終端。どちらも parse_string に渡す。
+            # ---- Period: exit ALL depth levels ----------------------------
+            if line_stripped == '.':
+                _pop_all()
+                _write_prompt(0)
+                continue
 
-            # ---- Parse the input -------------------------------------------
+            # ---- Semicolon: backtrack for another solution ----------------
+            if line_stripped == ';':
+                if depth == 0 or not frame_stack:
+                    _write_prompt(depth)
+                    continue
+                if not engine.choice_stack:
+                    # No more alternatives — pop one level
+                    parent_bindings = _pop_frame()
+                    sys.stdout.write("\n*** No\n")
+                    if parent_bindings:
+                        sys.stdout.write(parent_bindings + "\n")
+                    _write_prompt(depth)
+                    continue
+                # Backtrack and find next solution (do NOT undo to pre_mark —
+                # engine.backtrack() handles its own trail undo)
+                saved_noisy = engine.noisy
+                engine.noisy = False
+                try:
+                    engine.backtrack()
+                    success = engine.run()
+                finally:
+                    engine.noisy = saved_noisy
+
+                if success:
+                    var_tree = getattr(engine, '_last_var_tree', {})
+                    bindings_str = _format_bindings(var_tree, engine)
+                    # Update current frame's stored bindings
+                    if frame_stack:
+                        frame_stack[-1] = frame_stack[-1]._replace(
+                            bindings_str=bindings_str)
+                    sys.stdout.write("\n*** Yes\n")
+                    if bindings_str:
+                        sys.stdout.write(bindings_str + "\n")
+                    _write_prompt(depth)
+                else:
+                    # Exhausted alternatives — pop one level
+                    parent_bindings = _pop_frame()
+                    sys.stdout.write("\n*** No\n")
+                    if parent_bindings:
+                        sys.stdout.write(parent_bindings + "\n")
+                    _write_prompt(depth)
+                continue
+
+            # ---- Parse the input ------------------------------------------
             try:
-                from wild_life.parser_ import parse_string
-                term, sort, var_tree = parse_string(line)
+                term, sort, var_tree = parse_string(line_stripped)
             except Exception as exc:
-                print(f"Parse error: {exc}", file=sys.stderr)
+                sys.stderr.write(f"Parse error: {exc}\n")
+                _write_prompt(depth)
                 continue
 
             if term is None:
+                _write_prompt(depth)
                 continue
 
-            # eof sentinel from parser
-            if term is not None and term.type is not None and term.type is WL.eof:
+            # EOF sentinel from parser
+            if hasattr(term, 'type') and term.type is not None and term.type is WL.eof:
                 break
 
-            # ---- Dispatch on QUERY vs FACT ---------------------------------
-            from wild_life.data_structures import QUERY, FACT, ERROR
-
             if sort == ERROR:
-                # Report the parse error so the user knows the input was rejected.
-                # (Previously this was silently skipped, e.g. 'father(ken,tom),'
-                # with a trailing comma would appear to succeed but ken would
-                # never be asserted, leading to mysterious "No" on backtracking.)
-                print(f"*** Syntax error: {line!r}", file=sys.stderr)
-                print("    (Hint: facts end with '.' and queries end with '?')",
-                      file=sys.stderr)
+                sys.stderr.write(f"*** Syntax error: {line_stripped!r}\n")
+                sys.stderr.write(
+                    "    (Hint: facts end with '.' and queries end with '?')\n")
+                _write_prompt(depth)
                 continue
 
+            # ---- Query: ?- Goal -------------------------------------------
             if sort == QUERY:
-                # It's a query: ?- Goal
-                # Store named variable map so _print_bindings can use it
                 engine._last_var_tree = var_tree
-                engine.var_occurred = _has_variables(term)
+                cs_before = engine.choice_stack
+                pre_mark = engine.trail.mark()
+
+                saved_noisy = engine.noisy
+                engine.noisy = False
                 try:
                     success = engine.prove(term)
-                    # ---- Multiple-solution loop --------------------------------
-                    # After the first solution, the user may type ';' to ask for
-                    # the next solution (backtracking).  We keep looping until:
-                    #   - the user accepts (blank / non-';' line, or EOF), or
-                    #   - there are no more choice points, or
-                    #   - the proof fails.
-                    depth = 0
-                    while True:
-                        if not success:
-                            if not quiet:
-                                print("No")
-                            # Clean up any leftover state
-                            engine.trail.undo_to(0)
-                            engine.goal_stack = None
-                            engine.choice_stack = None
-                            break
-
-                        # Print current solution
-                        if engine.var_occurred:
-                            _print_bindings(engine, term, quiet)
-                        else:
-                            if not quiet:
-                                print("Yes")
-
-                        # No more alternatives → done
-                        if not engine.choice_stack:
-                            break
-
-                        # Ask the user whether to backtrack
-                        depth += 1
-                        prompt = "-" * (depth * 2) + "?- "
-                        if not quiet:
-                            print(prompt, end="", flush=True)
-                        try:
-                            resp = input()
-                        except EOFError:
-                            # End of input → accept current solution
-                            engine.trail.undo_to(0)
-                            engine.goal_stack = None
-                            engine.choice_stack = None
-                            break
-
-                        resp = resp.strip()
-                        if resp == ";":
-                            # Backtrack and find next solution
-                            engine.backtrack()
-                            success = engine.run()
-                        else:
-                            # Blank line, '.', or anything else → accept
-                            engine.trail.undo_to(0)
-                            engine.goal_stack = None
-                            engine.choice_stack = None
-                            break
-
                 except HaltException:
                     return 0
                 except AbortException:
-                    if not quiet:
-                        print("Aborted.")
-                except KeyboardInterrupt:
-                    if not quiet:
-                        print("\nInterrupted.")
-                    engine.trail.undo_to(0)
                     engine.goal_stack = None
-                    engine.choice_stack = None
+                    engine.trail.undo_to(pre_mark)
+                    engine.choice_stack = cs_before
+                    sys.stdout.write("\n")
+                    _write_prompt(depth)
+                    continue
+                except KeyboardInterrupt:
+                    engine.trail.undo_to(pre_mark)
+                    engine.choice_stack = cs_before
+                    engine.goal_stack = None
+                    sys.stdout.write("\n")
+                    _write_prompt(depth)
+                    continue
                 except Exception as exc:
-                    print(f"Error: {exc}", file=sys.stderr)
-                    if engine.verbose:
-                        traceback.print_exc()
+                    engine.trail.undo_to(pre_mark)
+                    engine.choice_stack = cs_before
+                    engine.goal_stack = None
+                    sys.stderr.write(f"Error: {exc}\n")
+                    _write_prompt(depth)
+                    continue
+                finally:
+                    engine.noisy = saved_noisy
 
+                if success:
+                    bindings_str = _format_bindings(var_tree, engine)
+                    if bindings_str:
+                        # Query has variable bindings → enter a new depth level
+                        frame_stack.append(Frame(pre_mark, bindings_str, cs_before))
+                        depth += 1
+                        sys.stdout.write("\n*** Yes\n")
+                        sys.stdout.write(bindings_str + "\n")
+                    else:
+                        # No variables → stay at current depth, undo trail
+                        engine.trail.undo_to(pre_mark)
+                        engine.choice_stack = cs_before
+                        engine.goal_stack = None
+                        sys.stdout.write("\n*** Yes\n")
+                    _write_prompt(depth)
+                else:
+                    # Failure: undo failed attempt
+                    engine.trail.undo_to(pre_mark)
+                    engine.choice_stack = cs_before
+                    engine.goal_stack = None
+                    sys.stdout.write("\n*** No\n")
+                    if depth > 0:
+                        # In a nested session: pop one frame on failure
+                        parent_bindings = _pop_frame()
+                        if parent_bindings:
+                            sys.stdout.write(parent_bindings + "\n")
+                    _write_prompt(depth)
+
+            # ---- Fact / rule: assert into database ------------------------
             elif sort == FACT:
-                # It's a fact/rule: head :- body  or  head.
                 try:
                     engine.assert_first = False
                     engine.assert_clause(term)
-                    if not quiet:
-                        print("Yes")
+                    sys.stdout.write("\n*** Yes\n")
                 except HaltException:
                     return 0
                 except Exception as exc:
-                    print(f"Assert error: {exc}", file=sys.stderr)
+                    sys.stderr.write(f"Assert error: {exc}\n")
+                    sys.stdout.write("\n*** No\n")
+                _write_prompt(depth)
+
             else:
                 # Unknown sort — treat as fact
                 try:
                     engine.assert_clause(term)
-                    if not quiet:
-                        print("Yes")
+                    sys.stdout.write("\n*** Yes\n")
                 except Exception as exc:
-                    print(f"Error: {exc}", file=sys.stderr)
+                    sys.stderr.write(f"Error: {exc}\n")
+                    sys.stdout.write("\n*** No\n")
+                _write_prompt(depth)
 
         except HaltException:
             break
         except KeyboardInterrupt:
-            if not quiet:
-                print("\nType Ctrl-D to exit.")
+            sys.stdout.write("\nType Ctrl-D to exit.\n")
+            _write_prompt(depth)
             continue
         except Exception as exc:
-            print(f"Unexpected error: {exc}", file=sys.stderr)
-            if engine.verbose:
+            sys.stderr.write(f"Unexpected error: {exc}\n")
+            if getattr(engine, 'verbose', False):
                 traceback.print_exc()
             continue
 
     return exit_code
-
-
-# ---------------------------------------------------------------------------
-# Variable binding display helpers
-# ---------------------------------------------------------------------------
-
-def _has_variables(term) -> bool:
-    """Return True if the psi-term contains any unbound variables.
-
-    Variables in Wild Life are PsiTerms with type=WL.top, no value,
-    no attrs, and no coref (unbound).
-    """
-    from wild_life.runtime import WL
-    seen = set()
-
-    def _walk(t):
-        if t is None:
-            return False
-        tid = id(t)
-        if tid in seen:
-            return False
-        seen.add(tid)
-        # Dereference coref chain
-        while t.coref is not None:
-            t = t.coref
-            tid2 = id(t)
-            if tid2 in seen:
-                return False
-            seen.add(tid2)
-        # Variables have type=WL.top, no value, no attrs, no resid
-        if t.type is WL.top and t.value is None and not t.attr_list and not t.resid:
-            return True  # unbound variable
-        for v in t.attr_list.values():
-            if _walk(v):
-                return True
-        return False
-
-    return _walk(term)
-
-
-def _print_bindings(engine, term, quiet: bool) -> None:
-    """Print the variable bindings after a successful proof."""
-    from wild_life.print_term import term_to_string
-
-    wl = engine.wl
-    # Collect top-level variables from the original term
-    # (The engine's var_tree holds the variable name -> term mapping)
-    var_tree = getattr(engine, "_last_var_tree", {})
-
-    if not var_tree:
-        # No named variables — just print Yes
-        if not quiet:
-            print("Yes")
-        return
-
-    printed_any = False
-    for name, t in sorted(var_tree.items()):
-        if name.startswith("_"):
-            continue  # anonymous variable
-        # Dereference
-        curr = t
-        while curr is not None and curr.coref is not None:
-            curr = curr.coref
-        s = term_to_string(curr, quoted=True, print_depth=10, var_tree={}, wl=wl)
-        print(f"{name} = {s}")
-        printed_any = True
-
-    if not quiet:
-        print("Yes" if printed_any or True else "No")
 
 
 # ---------------------------------------------------------------------------
