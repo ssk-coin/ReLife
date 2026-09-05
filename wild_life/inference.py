@@ -267,6 +267,7 @@ class Engine:
 
     def _assert_type(self, t: PsiTerm) -> None:
         """Handle type declarations (<| or :=)."""
+        from wild_life.data_structures import DefType
         # Simplified: mark the LHS type as a subtype of the RHS
         arg1 = t.attr_list.get('1')
         arg2 = t.attr_list.get('2')
@@ -277,6 +278,11 @@ class Engine:
                 # Add arg2.type as parent of arg1.type
                 child = arg1.type
                 parent = arg2.type
+                # Mark both as TYPE sorts (they may have been UNDEF if newly created)
+                if child.type == DefType.UNDEF:
+                    child.type = DefType.TYPE
+                if parent.type == DefType.UNDEF:
+                    parent.type = DefType.TYPE
                 if parent not in child.parents:
                     child.parents.append(parent)
                 if child not in parent.children:
@@ -506,11 +512,21 @@ class Engine:
                 # Push: unify result with val_part AFTER cond_part is proven
                 self.push_goal(GoalType.UNIFY, val_part, result, None)
                 self.push_goal(GoalType.PROVE, cond_part, _DEFRULES, None)
-                mark = self.trail.mark()
-                ok = self.unifier.unify(funct, head)
-                if not ok:
-                    self.trail.undo_to(mark)
-                    return False
+                # For functions with input arguments (non-nullary), unify funct
+                # with head to bind the argument variables before the body runs.
+                # For nullary function sorts (head is a bare variable with no
+                # attributes — e.g. `ran -> A | cond`), skip this step: linking
+                # the head variable back to funct (which has a function sort)
+                # would cause bi_unify to misidentify it as a function call when
+                # the body assigns `A = computed_value`, triggering spurious
+                # recursive evaluation.
+                head_d = head.deref()
+                if head_d.attr_list:
+                    mark = self.trail.mark()
+                    ok = self.unifier.unify(funct, head)
+                    if not ok:
+                        self.trail.undo_to(mark)
+                        return False
                 return True
 
         # Unify head with funct first (to bind head arguments)

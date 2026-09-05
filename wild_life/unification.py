@@ -230,32 +230,35 @@ class Unifier:
         u_is_var = (u.type is WL.top and not u.attr_list and not u.resid)
         v_is_var = (v.type is WL.top and not v.attr_list and not v.resid)
 
-        # Sort-constrained function variables (X:sort where sort is a user-defined
-        # function) are treated as bindable variables — in LIFE, a sort-annotated
-        # variable can be bound once the sort's function produces a concrete value.
-        # We recognise them as variables when they have no concrete value and no attrs.
+        # Sort-constrained variables (X:sort — marked SORT_VAR by the parser, or
+        # X:ran where ran is a FUNCTION sort) are treated as bindable variables.
         if not u_is_var and not v_is_var:
-            from wild_life.data_structures import DefType, QUOTED_TRUE
-            if (u.value is None and not u.attr_list and not u.resid and
+            from wild_life.data_structures import DefType, QUOTED_TRUE, SORT_VAR
+            # SORT_VAR flag: set by parser for any X:sort syntax
+            if u.flags & SORT_VAR:
+                u_is_var = True
+            elif (u.value is None and not u.attr_list and not u.resid and
                     not (u.flags & QUOTED_TRUE) and
                     u.type is not None and u.type.type == DefType.FUNCTION and
                     u.type._builtin_func is None):
                 u_is_var = True
-            if (v.value is None and not v.attr_list and not v.resid and
+            if v.flags & SORT_VAR:
+                v_is_var = True
+            elif (v.value is None and not v.attr_list and not v.resid and
                     not (v.flags & QUOTED_TRUE) and
                     v.type is not None and v.type.type == DefType.FUNCTION and
                     v.type._builtin_func is None):
                 v_is_var = True
 
         if u_is_var:
-            # If u is a function-sort variable (type != WL.top) and v is a plain
+            # If u is a sort-constrained variable (type != WL.top) and v is a plain
             # top variable, bind v→u so that dereferencing v returns u (which
-            # retains its sort constraint).  This preserves sort information for
-            # later _is_user_function checks (e.g. pick_op(X':ran) unifying with
-            # the head parameter A1 of the rule body).
+            # retains its sort constraint).  For FUNCTION sorts this preserves sort
+            # information for _is_user_function checks; for regular SORT sorts it
+            # ensures the sort constraint is visible after binding.
             u_is_fn_sort = (u.type is not WL.top)
             if u_is_fn_sort and v_is_var:
-                self.bind(v, u)   # v.coref = u; v.deref() = u (ran_def sort kept)
+                self.bind(v, u)   # v.coref = u; v.deref() = u (sort kept)
                 self._wakeup_resid(u, v)
             else:
                 self.bind(u, v)
@@ -484,7 +487,34 @@ def copy_term(t: PsiTerm, var_map: Optional[Dict[int, PsiTerm]] = None) -> PsiTe
     if var_map is None:
         var_map = {}
 
+    # Sort-constrained variable (X:sort — marked with SORT_VAR flag by the parser).
+    # The tokenizer creates a fresh proxy token for each occurrence of X (tok.coref = stored_X),
+    # so the SORT_VAR flag ends up on stored_X (the deref target), not on the proxy token.
+    # We check SORT_VAR both BEFORE and AFTER deref so all occurrences of X share the
+    # same copy regardless of whether they come via a proxy token or a direct reference.
+    # In both cases, key the var_map by id(stored_X) so all occurrences converge.
+    from wild_life.data_structures import SORT_VAR
+    if t.flags & SORT_VAR:
+        tid = id(t)
+        if tid not in var_map:
+            new_var = PsiTerm()
+            new_var.type = t.type  # same sort constraint
+            new_var.flags = t.flags
+            var_map[tid] = new_var
+        return var_map[tid]
+
     t = t.deref()
+
+    # Post-deref SORT_VAR check: handles proxy tokens (tok.coref = stored_X)
+    # where the SORT_VAR flag is on stored_X, not on tok.
+    if t.flags & SORT_VAR:
+        tid = id(t)
+        if tid not in var_map:
+            new_var = PsiTerm()
+            new_var.type = t.type
+            new_var.flags = t.flags
+            var_map[tid] = new_var
+        return var_map[tid]
 
     # 変数 (未束縛 top)
     if t.type is WL.top and not t.attr_list and not t.resid:
@@ -492,20 +522,6 @@ def copy_term(t: PsiTerm, var_map: Optional[Dict[int, PsiTerm]] = None) -> PsiTe
         if tid not in var_map:
             new_var = PsiTerm()
             new_var.type = WL.top
-            var_map[tid] = new_var
-        return var_map[tid]
-
-    # Sort-constrained function variable (X:ran where ran is DefType.FUNCTION)
-    # These must be copied as fresh constrained variables, not as constants.
-    if (t.value is None and not t.attr_list and not t.resid and
-            t.type is not None and t.type is not WL.top and
-            t.type.type == DefType.FUNCTION and t.type._builtin_func is None and
-            not (t.flags & 1)):  # not QUOTED_TRUE
-        tid = id(t)
-        if tid not in var_map:
-            new_var = PsiTerm()
-            new_var.type = t.type  # same sort constraint
-            new_var.flags = t.flags
             var_map[tid] = new_var
         return var_map[tid]
 
