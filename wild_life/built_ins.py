@@ -230,6 +230,14 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         defn = a1.type
         if defn is None or defn.keyword is None:
             return None
+        # Unwrap backtick-quoted atoms: `foo → root sort is foo
+        if defn.keyword.symbol == '`':
+            inner = a1.attr_list.get('1')
+            if inner is not None:
+                a1 = inner.deref()
+                defn = a1.type
+                if defn is None or defn.keyword is None:
+                    return None
         return _make_atom(eng, defn.keyword.symbol)
 
     elif sym == 'features':
@@ -826,6 +834,66 @@ def _is_user_function(t: PsiTerm) -> bool:
     if not defn.rule:
         return False
     return True
+
+
+def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
+    """Synchronously evaluate a user-defined function call.
+
+    This is used to eagerly evaluate function-call arguments before pattern
+    matching (e.g., reverse([1,2,3,4]) in rev(reverse([1,2,3,4]),[])).
+    Only evaluates simple (unconditional, deterministic first-rule) cases.
+
+    Returns the result PsiTerm, or None if evaluation can't proceed.
+    The engine trail is NOT rolled back — bindings persist on the trail.
+    """
+    if _depth > 40:
+        return None
+    if t is None:
+        return None
+    t = t.deref()
+    if not _is_user_function(t):
+        return None
+
+    from wild_life.unification import copy_term
+    from wild_life.data_structures import QUOTED_TRUE
+
+    # Try each rule in order (no backtracking support here)
+    rules = t.type.rule or []
+    active = [(h, b) for (h, b) in rules if h is not None and b is not None]
+    for h0, b0 in active:
+        _vm: dict = {}
+        head = copy_term(h0, _vm)
+        body = copy_term(b0, _vm)
+        body_d = body.deref()
+
+        # Skip conditional rules (value | guard)
+        if body_d.type is not None and body_d.type is eng.wl.such_that:
+            continue
+
+        mark = eng.trail.mark()
+        ok = eng.unifier.unify(t, head)
+        if not ok:
+            eng.trail.undo_to(mark)
+            continue
+
+        body_d2 = body_d.deref()
+        # Try arithmetic evaluation
+        ok_a, val = _eval_arith(body_d2, eng)
+        if ok_a:
+            return _make_number(eng, val)
+
+        # Try recursive user-function evaluation
+        if _is_user_function(body_d2):
+            inner = _eval_user_func_sync(body_d2, eng, _depth + 1)
+            if inner is not None:
+                return inner
+            # Body is a user function but can't eval synchronously — return body as-is
+            return body_d2
+
+        # Body is a non-arithmetic, non-function term — return as-is
+        return body_d2
+
+    return None
 
 
 def bi_unify(goal: PsiTerm, eng) -> bool:
@@ -2651,6 +2719,14 @@ def register_all(wl) -> None:
         defn = t.type
         if defn is None or defn.keyword is None:
             return False
+        # Unwrap backtick-quoted atoms: `foo → root sort is foo
+        if defn.keyword.symbol == '`':
+            inner = t.attr_list.get('1')
+            if inner is not None:
+                t = inner.deref()
+                defn = t.type
+                if defn is None or defn.keyword is None:
+                    return False
         result = eng.wl.make_atom(defn.keyword.symbol, eng.wl.user_module)
         if a2 is None:
             return True

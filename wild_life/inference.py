@@ -203,9 +203,17 @@ class Engine:
         if defn.type == DefType.UNDEF:
             defn.type = typ
         elif defn.type != typ:
-            print(f"*** Error: cannot redefine {defn.keyword.symbol} as {typ}.",
-                  file=sys.stderr)
-            return False
+            if defn._builtin_func is not None:
+                # Built-in with different type — user definition takes over.
+                # Allow type change (e.g. built-in PREDICATE → user FUNCTION).
+                defn.type = typ
+            elif defn.type == DefType.TYPE:
+                # TYPE sorts can't be redefined as PREDICATE/FUNCTION
+                return False
+            else:
+                print(f"*** Error: cannot redefine {defn.keyword.symbol} as {typ}.",
+                      file=sys.stderr)
+                return False
 
         if defn._builtin_func is not None:
             # Allow user rules to shadow builtins — clear the builtin function
@@ -605,6 +613,18 @@ class Engine:
                         return False
                 return True
 
+        # Pre-evaluate any user-defined function call arguments in funct.
+        # This enables patterns like f(g(x)) where g(x) needs to be evaluated
+        # before pattern matching against f's head (e.g. rev(reverse(L),[]) ).
+        from wild_life.built_ins import _eval_user_func_sync, _is_user_function
+        for _key in list(funct.attr_list.keys()):
+            _attr = funct.attr_list[_key].deref()
+            if _is_user_function(_attr):
+                _evaled = _eval_user_func_sync(_attr, self)
+                if _evaled is not None and _evaled is not _attr:
+                    # Update funct's attribute to the evaluated result
+                    funct.attr_list[_key] = _evaled
+
         # Unify head with funct first (to bind head arguments)
         mark = self.trail.mark()
         ok = self.unifier.unify(funct, head)
@@ -623,6 +643,12 @@ class Engine:
             if not ok2:
                 self.trail.undo_to(mark)
                 return False
+            return True
+
+        # Body is a user-defined function call — push EVAL so it gets evaluated
+        # (rather than UNIFY which would just structurally bind result to the term)
+        if _is_user_function(body_d2):
+            self.push_goal(GoalType.EVAL, body_d2, result, body_d2.type.rule)
             return True
 
         # Body is not pure arithmetic — push as a UNIFY goal for later resolution

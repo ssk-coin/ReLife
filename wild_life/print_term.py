@@ -496,6 +496,16 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
         _maybe_resid(ps, t)
         return
 
+    # Backtick-quoted term: `(expr) → print as expr (one level of backtick stripped).
+    # In Wild Life, `expr means "prevent evaluation"; when printing, the backtick
+    # is invisible — the inner term is displayed directly.
+    if (t.type is not None and t.type.keyword is not None
+            and t.type.keyword.symbol == '`'):
+        inner = t.attr_list.get('1')
+        if inner is not None:
+            _pretty_psi_term(ps, inner.deref(), sprec, depth, wl)
+            return
+
     # Sort-constrained variable: X:sort where sort ≠ @ and term is unbound.
     # In Wild Life, such a variable prints as "sortname~" (e.g. "real~", "bool~").
     from wild_life.data_structures import SORT_VAR
