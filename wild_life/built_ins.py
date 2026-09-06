@@ -361,6 +361,110 @@ def _unify(eng, a: PsiTerm, b: PsiTerm) -> bool:
     return ok
 
 
+class _WriteFailure(Exception):
+    """Internal signal: write/writeq should return False (*** No)."""
+    pass
+
+
+def _eval_and_conjunction(t: PsiTerm, eng) -> Optional[PsiTerm]:
+    """Evaluate an and_sym (&) psi-term conjunction.
+
+    Returns the merged psi-term if the conjunction succeeds, or None if it fails.
+    Used by _write_term to handle writeq(`X & Y) before printing.
+    """
+    wl = eng.wl
+
+    def _strip_bq(x: PsiTerm) -> PsiTerm:
+        """Strip one level of backtick quotation."""
+        x = x.deref()
+        if (x.type is not None and x.type.keyword is not None
+                and x.type.keyword.symbol == '`'):
+            inner = x.attr_list.get('1')
+            if inner is not None:
+                return inner.deref()
+        return x
+
+    t1_ref = t.attr_list.get('1')
+    t2_ref = t.attr_list.get('2')
+    if t1_ref is None or t2_ref is None:
+        return None
+
+    t1 = t1_ref.deref()
+    t2 = t2_ref.deref()
+
+    # Recursively evaluate nested conjunctions
+    if t1.type is not None and t1.type is wl.and_sym:
+        t1 = _eval_and_conjunction(t1, eng)
+        if t1 is None:
+            return None
+    else:
+        t1 = _strip_bq(t1)
+
+    if t2.type is not None and t2.type is wl.and_sym:
+        t2 = _eval_and_conjunction(t2, eng)
+        if t2 is None:
+            return None
+    else:
+        t2 = _strip_bq(t2)
+
+    # Unify t1 and t2 through a fresh variable to find their meet
+    fresh = PsiTerm()
+    fresh.type = wl.top
+    mark = eng.trail.mark()
+    ok1 = eng.unifier.unify(fresh, t1)
+    if not ok1:
+        eng.trail.undo_to(mark)
+        return None
+    fresh_d = fresh.deref()
+    ok2 = eng.unifier.unify(fresh_d, t2)
+    if not ok2:
+        eng.trail.undo_to(mark)
+        return None
+    return fresh.deref()
+
+
+def _has_concrete_non_numeric_arg(t: PsiTerm, eng) -> bool:
+    """Return True if any immediate argument of arithmetic term t is a
+    concrete non-numeric atom (i.e. not an unbound variable, not a number).
+
+    Used to decide whether an arithmetic-evaluation failure should be a hard
+    failure (with warning) vs. a soft failure (term printed as-is).
+    """
+    from wild_life.data_structures import SORT_VAR
+    wl = eng.wl
+
+    def _is_concrete_non_numeric(a: PsiTerm) -> bool:
+        a = a.deref()
+        # Strip one backtick level
+        if (a.type is not None and a.type.keyword is not None
+                and a.type.keyword.symbol == '`'):
+            inner = a.attr_list.get('1')
+            if inner is not None:
+                a = inner.deref()
+        # Unbound top-type variable
+        if a.type is wl.top:
+            return False
+        # Sort-constrained variable (X:sort syntax)
+        if a.flags & SORT_VAR:
+            return False
+        # Symbol '@' is the top-type marker for unbound vars
+        sym_a = a.type.keyword.symbol if (a.type and a.type.keyword) else ''
+        if sym_a == '@':
+            return False
+        # Numeric value (integer or real)
+        if (a.value is not None and a.type and wl.real is not None
+                and a.type.is_subtype_of(wl.real)):
+            return False
+        # Everything else: a concrete atom / compound that is not numeric
+        return True
+
+    for key in ('1', '2'):
+        ref = t.attr_list.get(key) if t.attr_list else None
+        if ref is not None and _is_concrete_non_numeric(ref):
+            return True
+    return False
+
+
 def _psi_to_python(t: Optional[PsiTerm], eng):
     """Convert a WL psi-term to a Python value (for printing etc.)."""
     if t is None:
@@ -381,8 +485,31 @@ def _psi_to_python(t: Optional[PsiTerm], eng):
 def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
     from wild_life.print_term import write_term
     var_tree = getattr(eng, '_last_var_tree', None)
-    # Evaluate arithmetic expressions before printing (e.g. 23+23 → 46)
-    # Guard against cyclic terms (e.g. X = s(X)) causing infinite recursion
+    wl = eng.wl if eng else None
+
+    # ── psi-term conjunction (&): evaluate before printing ──────────────────
+    # writeq(`X & Y) should evaluate the conjunction and print the result.
+    # If the conjunction fails, the predicate fails.
+    if wl and t.type is not None and t.type is wl.and_sym:
+        evaluated = _eval_and_conjunction(t, eng)
+        if evaluated is None:
+            raise _WriteFailure("conjunction failed")
+        t = evaluated
+
+    # ── bottom type ({} / disj_nil): cannot be written ──────────────────────
+    sym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+    if sym == '{}':
+        raise _WriteFailure("bottom type '{}'")
+    if wl and wl.disj_nil is not None and t.type is wl.disj_nil:
+        raise _WriteFailure("bottom type disj_nil")
+
+    # ── arithmetic evaluation (e.g. 23+23 → 46) ─────────────────────────────
+    # Guard against cyclic terms (e.g. X = s(X)) causing infinite recursion.
+    _arith_binary_ops = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+                                   'max', 'min'))
+    _arith_unary_ops = frozenset(('abs', 'sqrt', 'sin', 'cos', 'tan', 'exp',
+                                  'log', 'floor', 'ceiling', 'round',
+                                  'truncate'))
     try:
         t_eval = _try_eval_arith_to_term(t, eng)
         if t_eval is not None:
@@ -391,8 +518,18 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
             t_str = _try_eval_string_func(t, eng)
             if t_str is not None:
                 t = t_str
+            elif wl and sym in (_arith_binary_ops | _arith_unary_ops):
+                # The top-level operator is arithmetic but evaluation failed.
+                # If any immediate arg is a concrete non-numeric atom, this is
+                # a hard failure (emit warning + fail); otherwise just print.
+                if _has_concrete_non_numeric_arg(t, eng):
+                    expr_str = _term_to_str(t, eng, quoted=True)
+                    print(f"*** Warning: non-numeric argument(s) in '{expr_str}'.",
+                          file=sys.stderr)
+                    raise _WriteFailure("non-numeric argument")
     except RecursionError:
         pass
+
     write_term(t, outfile=stream or sys.stdout, quoted=quoted, wl=eng.wl,
                var_tree=var_tree)
 
@@ -416,6 +553,7 @@ def _write_all_args(goal: PsiTerm, eng, quoted: bool, stream=None) -> bool:
 
     In LIFE, write(a,b,c) writes each argument in order without separator.
     If the goal has no positional args, write the goal's sort name.
+    Returns False if any argument fails to write (e.g., bottom type, bad arithmetic).
     """
     attrs = goal.attr_list
     # Collect positional arguments '1', '2', '3', ...
@@ -426,12 +564,18 @@ def _write_all_args(goal: PsiTerm, eng, quoted: bool, stream=None) -> bool:
         if key not in attrs:
             break
         arg = attrs[key].deref()
-        _write_term(arg, eng, stream=stream, quoted=quoted)
+        try:
+            _write_term(arg, eng, stream=stream, quoted=quoted)
+        except _WriteFailure:
+            return False
         written_any = True
         i += 1
     if not written_any:
         # No positional args: treat as write of goal itself
-        _write_term(goal, eng, stream=stream, quoted=quoted)
+        try:
+            _write_term(goal, eng, stream=stream, quoted=quoted)
+        except _WriteFailure:
+            return False
     return True
 
 
@@ -1119,6 +1263,24 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
             result_list = eng.wl.make_list(collected)
             return _unify(eng, b_d, result_list)
 
+    # Handle conjunction on RHS: A = t1 & t2  →  A = t1, A = t2 (psi-term merge)
+    # '&' is psi-term conjunction: the result must satisfy BOTH constraints.
+    if b_d.type is not None and b_d.type is eng.wl.and_sym:
+        t1 = b_d.attr_list.get('1')
+        t2 = b_d.attr_list.get('2')
+        if t1 is not None and t2 is not None:
+            # Push the second unification as the next goal; do the first inline.
+            eng.push_goal(GoalType.UNIFY, a_d, t2.deref(), None)
+            return _unify(eng, a_d, t1.deref())
+
+    # Handle conjunction on LHS: t1 & t2 = B  →  t1 = B, t2 = B (symmetric)
+    if a_d.type is not None and a_d.type is eng.wl.and_sym:
+        t1 = a_d.attr_list.get('1')
+        t2 = a_d.attr_list.get('2')
+        if t1 is not None and t2 is not None:
+            eng.push_goal(GoalType.UNIFY, t2.deref(), b_d, None)
+            return _unify(eng, t1.deref(), b_d)
+
     # Handle disjunction on RHS: A = {b1;b2;...} → try A=b1, choice for rest
     if b_d.type is not None and b_d.type is eng.wl.disjunction:
         elems = _collect_disjunction(b_d, eng)
@@ -1479,39 +1641,162 @@ def bi_once(goal: PsiTerm, eng) -> bool:
     return result
 
 
-def bi_cond(goal: PsiTerm, eng) -> bool:
-    """cond(Cond, Then) — if Cond succeeds then prove Then, else succeed.
+def _eval_as_bool_func(t: 'PsiTerm', eng, _depth: int = 0) -> 'Optional[bool]':
+    """Evaluate *t* as a boolean function expression.
 
-    This is the Wild Life conditional: always succeeds (like (Cond -> Then ; true)).
+    Returns True, False, or None (cannot reduce to a boolean).
+    This is the Wild Life functional-evaluation mode: only FUNCTION definitions
+    (defined with '->') and built-in comparisons are evaluated.  PREDICATE
+    definitions (defined with ':-') are *not* callable in this mode and yield
+    None (unresolvable).
+
+    Used by the 2-argument form of cond/2.
+    """
+    if t is None or _depth > 20:
+        return None
+    t = t.deref()
+    defn = t.type
+    if defn is None:
+        return None
+
+    sym = defn.keyword.symbol if defn.keyword else ''
+
+    # ── Literal boolean atoms ──
+    if sym == 'true':
+        return True
+    if sym in ('false', 'fail'):
+        return False
+
+    wl = eng.wl
+
+    # ── Conjunction (, or 'and') ──
+    if defn is wl.commasym or sym == 'and':
+        a1 = t.attr_list.get('1')
+        a2 = t.attr_list.get('2')
+        r1 = _eval_as_bool_func(a1.deref() if a1 else None, eng, _depth + 1)
+        if r1 is None:
+            return None   # can't determine → propagate failure
+        if r1 is False:
+            return False
+        # r1 is True
+        r2 = _eval_as_bool_func(a2.deref() if a2 else None, eng, _depth + 1)
+        return r2
+
+    # ── Disjunction (;) ──
+    if defn is wl.life_or or defn is wl.disjunction:
+        a1 = t.attr_list.get('1')
+        a2 = t.attr_list.get('2')
+        r1 = _eval_as_bool_func(a1.deref() if a1 else None, eng, _depth + 1)
+        if r1 is True:
+            return True
+        r2 = _eval_as_bool_func(a2.deref() if a2 else None, eng, _depth + 1)
+        if r2 is True:
+            return True
+        if r1 is False and r2 is False:
+            return False
+        return None
+
+    # ── Built-in FUNCTION: arithmetic comparisons ──
+    if defn._builtin_func is not None and defn.type == DefType.FUNCTION:
+        if sym in ('>', '<', '>=', '=<', '=:=', '=\\='):
+            a1 = t.attr_list.get('1')
+            a2 = t.attr_list.get('2')
+            if a1 and a2:
+                ok1, v1 = _eval_arith(a1, eng)
+                ok2, v2 = _eval_arith(a2, eng)
+                if ok1 and ok2:
+                    cmp_map: dict = {
+                        '>': v1 > v2, '<': v1 < v2,
+                        '>=': v1 >= v2, '=<': v1 <= v2,
+                        '=:=': v1 == v2, '=\\=': v1 != v2,
+                    }
+                    return cmp_map.get(sym)
+        # Other built-in functions cannot be evaluated without engine machinery
+        return None
+
+    # ── User-defined FUNCTION (defined with '->') ──
+    if defn.type == DefType.FUNCTION and defn.rule:
+        from wild_life.unification import copy_term as _copy_term
+        active = [(h, b) for (h, b) in defn.rule if h is not None and b is not None]
+        for (h0, b0) in active:
+            _vm: dict = {}
+            head = _copy_term(h0, _vm)
+            body = _copy_term(b0, _vm)
+            body_d = body.deref()
+            # Skip guarded rules (value | condition) — need engine machinery
+            if body_d.type is not None and body_d.type is wl.such_that:
+                continue
+            mark = eng.trail.mark()
+            ok = eng.unifier.unify(t, head)
+            if ok:
+                result = _eval_as_bool_func(body_d, eng, _depth + 1)
+                eng.trail.undo_to(mark)
+                if result is not None:
+                    return result
+            else:
+                eng.trail.undo_to(mark)
+        return None
+
+    # ── PREDICATE — cannot evaluate functionally ──
+    if defn.type == DefType.PREDICATE:
+        return None
+
+    return None
+
+
+def bi_cond(goal: PsiTerm, eng) -> bool:
+    """cond(Cond, Then[, Else]) — Wild Life conditional.
+
+    2-argument form  cond(Cond, Then):
+        Evaluate Cond and Then as *boolean functions* (Wild Life functional
+        semantics).  PREDICATE definitions cannot be called in this mode.
+        - If Cond evaluates to true and Then evaluates to true → succeed.
+        - If Cond evaluates to false or unknown → succeed silently.
+        - If Cond is true but Then evaluates to false/unknown → FAIL.
+
+    3-argument form  cond(Cond, Then, Else):
+        Prove Cond as a predicate goal (with inner run, cutting alternatives).
+        - If Cond succeeds → push Then as predicate goal.
+        - If Cond fails    → undo Cond's bindings and push Else as predicate goal.
     """
     args = list(goal.attr_list.values()) if goal.attr_list else []
     if len(args) < 2:
-        return True  # degenerate: succeed
+        return True   # degenerate: succeed
     cond_g = args[0].deref()
     then_g = args[1].deref()
+    else_g = args[2].deref() if len(args) >= 3 else None
 
+    if else_g is None:
+        # ── 2-arg form: fully functional evaluation ──
+        cond_result = _eval_as_bool_func(cond_g, eng)
+        if cond_result is not True:
+            # Cond is false or unresolvable → succeed silently (no Then)
+            return True
+        # Cond is true → evaluate Then as a boolean function
+        then_result = _eval_as_bool_func(then_g, eng)
+        return then_result is True
+
+    # ── 3-arg form: predicate if-then-else ──
     mark = eng.trail.mark()
     cp_save = eng.choice_stack
     gs_save = eng.goal_stack
     eng.push_goal(GoalType.PROVE, cond_g, _DEFRULES_SENTINEL, None)
     old_main_loop_ok = eng.main_loop_ok
-    # Use _INNER_RUN_BARRIER to prevent run() from undoing the trail to position 0
-    # on failure — that would destroy outer bindings (e.g. N=1 set before this call).
     _barrier = cp_save if cp_save is not None else _INNER_RUN_BARRIER
     cond_ok = eng.run(cs_barrier=_barrier)
     eng.main_loop_ok = old_main_loop_ok
 
+    eng.choice_stack = cp_save   # discard Cond's choice points either way
+    eng.goal_stack = gs_save
+
     if cond_ok:
-        # Cond succeeded — cut alternatives, prove Then
-        eng.choice_stack = cp_save  # discard choice points created by cond
-        eng.goal_stack = gs_save
+        # Cond succeeded → push Then
         eng.push_goal(GoalType.PROVE, then_g, _DEFRULES_SENTINEL, None)
         return True
     else:
-        # Cond failed — undo any bindings made during Cond and succeed silently
+        # Cond failed → undo its bindings, push Else
         eng.trail.undo_to(mark)
-        eng.choice_stack = cp_save
-        eng.goal_stack = gs_save
+        eng.push_goal(GoalType.PROVE, else_g, _DEFRULES_SENTINEL, None)
         return True
 
 
@@ -1640,19 +1925,27 @@ def bi_retract(goal: PsiTerm, eng) -> bool:
 
 
 def bi_store_arrow(goal: PsiTerm, eng) -> bool:
-    """X <- V / X <<- V — destructive (non-backtrackable) assignment.
+    """X <- V / X <<- V — assignment operators.
+
+    '<-'  is BACKTRACKABLE assignment (trailed, reversible on backtracking).
+    '<<-' is NON-BACKTRACKABLE (destructive, permanent) assignment.
 
     Two modes:
     1. Global/persistent variable (LHS has a function/predicate definition):
        Retract all existing rules and assert LHS -> RHS (like setq).
+       Always destructive (global state is not backtracked).
     2. Local variable / already-bound term:
-       Evaluate RHS as arithmetic or copy term, then destructively update
-       the psi-term (not added to trail → permanent, non-backtrackable).
+       For '<-': trail the coref pointer then rebind (backtrackable).
+       For '<<-': destructively update in-place (non-backtrackable).
     """
     a1 = goal.attr_list.get('1')
     a2 = goal.attr_list.get('2')
     if a1 is None or a2 is None:
         return False
+
+    # Determine whether this is backtrackable (<-) or destructive (<<-)
+    _op_sym = goal.type.keyword.symbol if (goal.type and goal.type.keyword) else '<<-'
+    _backtrackable = (_op_sym == '<-')
 
     # Deref LHS
     lhs = a1.deref()
@@ -1665,6 +1958,7 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
             lhs.value is None and
             not lhs.attr_list):
         # Use setq-like behavior: clear all rules, assert new value
+        # Always destructive for global variables (global state is intentional)
         from wild_life.unification import copy_term as _copy_term
         rhs_d = a2.deref()
         # Try arithmetic eval for numeric RHS
@@ -1682,9 +1976,43 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         defn.rule.append((head_copy, rhs_d))
         return True
 
-    # Mode 2: Local variable / bound term — destructive in-place update
-    ok, val = _eval_arith(a2, eng)
-    if ok:
+    # Mode 2: Local variable / bound term
+    # Evaluate RHS (arithmetic or term)
+    ok_arith, val = _eval_arith(a2, eng)
+    if ok_arith:
+        rhs_term = PsiTerm()
+        rhs_term.type = eng.wl.real
+        rhs_term.value = val
+    else:
+        rhs_term = a2.deref()
+
+    if _backtrackable:
+        # '<-': backtrackable in-place update of the dereferenced endpoint.
+        # We must mutate `lhs` (the end of the deref chain) so that ALL
+        # variables pointing into this chain see the new value, while trailing
+        # each changed field so backtracking restores the original state.
+        eng.trail.trail_psi(lhs, 'value')
+        eng.trail.trail_psi(lhs, 'coref')
+        eng.trail.trail_psi(lhs, 'type')
+        eng.trail.trail_psi(lhs, 'attr_list')
+        eng.trail.trail_psi(lhs, 'flags')
+        if ok_arith:
+            lhs.value = val
+            lhs.coref = None
+            lhs.attr_list = {}
+            if lhs.type is None or lhs.type is eng.wl.top:
+                lhs.type = eng.wl.real
+        else:
+            rhs = rhs_term
+            lhs.value = rhs.value
+            lhs.type = rhs.type
+            lhs.attr_list = dict(rhs.attr_list)
+            lhs.coref = rhs.coref
+            lhs.flags = rhs.flags
+        return True
+
+    # '<<-': non-backtrackable (destructive in-place update)
+    if ok_arith:
         lhs.value = val
         lhs.coref = None
         lhs.attr_list = {}
@@ -1693,7 +2021,7 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         return True
 
     # Non-arithmetic RHS: destructively copy rhs structure into lhs
-    rhs = a2.deref()
+    rhs = rhs_term
     lhs.value = rhs.value
     lhs.type = rhs.type
     lhs.attr_list = dict(rhs.attr_list)
@@ -3012,7 +3340,16 @@ def register_all(wl) -> None:
 
     # ── LIFE meta-predicates (no-ops or minimal stubs) ─────────────────────
     def _bi_non_strict(goal, eng):
-        """non_strict(P): mark P as non-strict (lazy). No-op in this impl."""
+        """non_strict(P): mark P as non-strict (lazy evaluation of arguments)."""
+        arg = goal.attr_list.get('1')
+        if arg is None:
+            return False
+        arg = arg.deref()
+        if arg.type is not None and arg.type is not eng.wl.top:
+            # Register this sort/function as non-strict
+            if not hasattr(eng, 'non_strict_set'):
+                eng.non_strict_set = set()
+            eng.non_strict_set.add(arg.type)
         return True
     _reg('non_strict', _bi_non_strict)
 
