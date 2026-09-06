@@ -210,6 +210,14 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None or a2 is None:
             return None
         a1, a2 = a1.deref(), a2.deref()
+        # Only evaluate when both arguments are concrete strings
+        if eng is not None:
+            wl = eng.wl
+            def _is_string(x):
+                return (x.value is not None and x.type is not None
+                        and x.type.is_subtype_of(wl.quoted_string))
+            if not (_is_string(a1) or _is_string(a2)):
+                return None
         # Recursively evaluate if needed
         a1e = _try_eval_string_func(a1, eng)
         if a1e is not None:
@@ -217,12 +225,41 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         a2e = _try_eval_string_func(a2, eng)
         if a2e is not None:
             a2 = a2e
-        s1 = _term_to_display_string(a1, eng)
-        s2 = _term_to_display_string(a2, eng)
+        s1 = str(a1.value) if (a1.value is not None) else ''
+        s2 = str(a2.value) if (a2.value is not None) else ''
         return _make_string(eng, s1 + s2)
 
+    elif sym == 'substr':
+        # substr(String, Start, Length) -> substring (1-indexed, returns "" if out of range)
+        a1 = t.attr_list.get('1')
+        a2 = t.attr_list.get('2')
+        a3 = t.attr_list.get('3')
+        if a1 is None or a2 is None or a3 is None:
+            return None
+        a1d = a1.deref()
+        # Only evaluate when String is a concrete string
+        if eng is None or a1d.value is None:
+            return None
+        wl = eng.wl
+        if a1d.type is None or not a1d.type.is_subtype_of(wl.quoted_string):
+            return None
+        s = str(a1d.value)
+        # Evaluate start/length via arithmetic
+        ok2, start_f = _eval_arith(a2.deref(), eng)
+        ok3, length_f = _eval_arith(a3.deref(), eng)
+        if not ok2 or not ok3:
+            return None
+        start = int(start_f) - 1  # convert 1-indexed to 0-indexed
+        length = int(length_f)
+        if start < 0:
+            start = 0
+        result = s[start:start + length] if start < len(s) else ''
+        return _make_string(eng, result)
+
     elif sym == 'root_sort' or sym == 'sort':
-        # root_sort(T) -> the sort name of T as an atom
+        # root_sort(T) -> the root sort of T.
+        # For numeric/string atoms, the root sort is the value itself.
+        # For compound terms, it is the functor name as an atom.
         a1 = t.attr_list.get('1')
         if a1 is None:
             return None
@@ -238,7 +275,33 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
                 defn = a1.type
                 if defn is None or defn.keyword is None:
                     return None
+        # For concrete numeric/string values the root sort is the value itself
+        if a1.value is not None and eng is not None:
+            wl = eng.wl
+            if defn.is_subtype_of(wl.integer):
+                return wl.make_integer(int(a1.value))
+            if defn.is_subtype_of(wl.real):
+                return wl.make_number(float(a1.value))
+            if defn.is_subtype_of(wl.quoted_string):
+                return _make_string(eng, str(a1.value))
         return _make_atom(eng, defn.keyword.symbol)
+
+    elif sym == 'children':
+        # children(Sort) -> list of immediate child sorts
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return None
+        a1 = a1.deref()
+        defn = a1.type
+        if defn is None or eng is None:
+            return None
+        wl = eng.wl
+        child_atoms = []
+        for mod in wl._all_modules():
+            for sym_name, child_defn in mod.symbol_table.items():
+                if defn in getattr(child_defn, 'parents', []):
+                    child_atoms.append(wl.make_atom(sym_name, mod))
+        return wl.make_list(child_atoms)
 
     elif sym == 'features':
         # features(T) -> list of attribute labels
@@ -663,11 +726,13 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         if a1 is None:
             return False, 0.0
         a1d = a1.deref()
-        if a1d.value is not None:
-            return True, float(len(str(a1d.value)))
-        if a1d.type and a1d.type.keyword:
-            return True, float(len(a1d.type.keyword.symbol))
-        return True, 0.0
+        # Only evaluate when the argument is a concrete string value
+        if a1d.value is not None and eng is not None:
+            wl = eng.wl
+            if a1d.type and a1d.type.is_subtype_of(wl.quoted_string):
+                return True, float(len(str(a1d.value)))
+        # Fall through: cannot evaluate (unbound variable etc.)
+        return False, 0.0
 
     return False, 0.0
 
@@ -1691,9 +1756,33 @@ def bi_clause(goal: PsiTerm, eng) -> bool:
     body = args_raw[1].deref() if len(args_raw) >= 2 else None
     wl = eng.wl
 
+    # Handle the LIFE clause form: clause(X:(Pred->Body))?
+    # When head.type is '->' (the clause arrow), the actual predicate is in attr '1'
+    # and the body variable is in attr '2'.
+    clause_container = None  # the head->body term to unify with full clause
+    if (head.type and head.type.keyword and head.type.keyword.symbol == '->'
+            and not head.value):
+        # head is a psi-term of sort '->': this is the X:(f1->Y) form
+        pred_term = head.attr_list.get('1')
+        body_from_head = head.attr_list.get('2')
+        if pred_term is not None:
+            pred_d = pred_term.deref()
+            defn = pred_d.type
+            if defn is not None and defn.rule is not None and not callable(defn.rule):
+                if body_from_head is not None and body is None:
+                    # Store the head container for unification
+                    clause_container = head
+                    # Use the body variable from inside the arrow form
+                    body = body_from_head.deref() if body_from_head else wl.make_var()
+                    head = pred_d  # The actual predicate head to match against rule heads
+    else:
+        defn = head.type
+        if defn is None or defn.rule is None or callable(defn.rule):
+            # Try treating it as a 0-arity predicate/fact
+            return False
+
     defn = head.type
     if defn is None or defn.rule is None or callable(defn.rule):
-        # Try treating it as a 0-arity predicate/fact
         return False
 
     rule_list = defn.rule
@@ -1704,7 +1793,18 @@ def bi_clause(goal: PsiTerm, eng) -> bool:
     if body is None:
         body = wl.make_var()
 
-    eng.push_goal(_GT.CLAUSE, head, body, rule_list)
+    if clause_container is not None:
+        # For the X:(Pred->Body) form, we need to unify the full clause term
+        # clause_container is the term X was bound to (Pred->Body structure).
+        # We push a special CLAUSE goal that handles this form.
+        # When a rule (h, b) matches:
+        #   - Unify head (pred term) with h
+        #   - Unify body with b
+        # The X variable is already bound to the container, and the head/body
+        # sub-terms inside it will unify through the trail.
+        eng.push_goal(_GT.CLAUSE, head, body, rule_list)
+    else:
+        eng.push_goal(_GT.CLAUSE, head, body, rule_list)
     return True
 
 
@@ -1723,7 +1823,7 @@ def bi_children(goal: PsiTerm, eng) -> bool:
     children = []
     for mod in wl._all_modules():
         for sym_name, child_defn in mod.symbol_table.items():
-            if child_defn.parent is defn:
+            if defn in getattr(child_defn, 'parents', []):
                 child_atom = wl.make_atom(sym_name, mod)
                 children.append(child_atom)
     result_list = wl.make_list(children)
@@ -2991,22 +3091,55 @@ def register_all(wl) -> None:
         if a1 is None or a2 is None:
             return False
         a1, a2 = a1.deref(), a2.deref()
+        # Only evaluate when at least one string is concrete
+        def _is_str(x):
+            return x.value is not None and x.type is not None and x.type.is_subtype_of(eng.wl.quoted_string)
+        if not (_is_str(a1) or _is_str(a2)):
+            return False
         # Evaluate nested string funcs
         a1e = _try_eval_string_func(a1, eng)
         if a1e is not None: a1 = a1e
         a2e = _try_eval_string_func(a2, eng)
         if a2e is not None: a2 = a2e
-        s1 = _term_to_display_string(a1, eng)
-        s2 = _term_to_display_string(a2, eng)
+        s1 = str(a1.value) if a1.value is not None else ''
+        s2 = str(a2.value) if a2.value is not None else ''
         result = _make_string(eng, s1 + s2)
         if a3 is None:
             return True
         return _unify(eng, a3.deref(), result)
     _reg('strcon', _bi_strcon)
 
+    def _bi_substr(goal, eng):
+        """substr(String, Start, Length, Result): Result = substring of String."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        a3 = goal.attr_list.get('3')
+        a4 = goal.attr_list.get('4')
+        if a1 is None or a2 is None or a3 is None:
+            return False
+        s_t = a1.deref()
+        if s_t.value is None or s_t.type is None or not s_t.type.is_subtype_of(eng.wl.quoted_string):
+            return False
+        s = str(s_t.value)
+        ok2, start_f = _eval_arith(a2.deref(), eng)
+        ok3, length_f = _eval_arith(a3.deref(), eng)
+        if not ok2 or not ok3:
+            return False
+        start = int(start_f) - 1  # 1-indexed to 0-indexed
+        length = int(length_f)
+        if start < 0:
+            start = 0
+        result_s = s[start:start + length] if start < len(s) else ''
+        result = _make_string(eng, result_s)
+        if a4 is None:
+            return True
+        return _unify(eng, a4.deref(), result)
+    _reg('substr', _bi_substr)
+
     # ── LIFE type/sort built-ins ───────────────────────────────────────────────
     def _bi_root_sort(goal, eng):
-        """root_sort(T, R): R = the sort name of T as an atom."""
+        """root_sort(T, R): R = the root sort of T.
+        For numeric/string atoms the root sort is the value itself."""
         a1 = goal.attr_list.get('1')
         a2 = goal.attr_list.get('2')
         if a1 is None:
@@ -3023,7 +3156,19 @@ def register_all(wl) -> None:
                 defn = t.type
                 if defn is None or defn.keyword is None:
                     return False
-        result = eng.wl.make_atom(defn.keyword.symbol, eng.wl.user_module)
+        # For concrete numeric/string values the root sort is the value itself
+        wl = eng.wl
+        if t.value is not None:
+            if defn.is_subtype_of(wl.integer):
+                result = wl.make_integer(int(t.value))
+            elif defn.is_subtype_of(wl.real):
+                result = wl.make_number(float(t.value))
+            elif defn.is_subtype_of(wl.quoted_string):
+                result = _make_string(eng, str(t.value))
+            else:
+                result = wl.make_atom(defn.keyword.symbol, wl.user_module)
+        else:
+            result = wl.make_atom(defn.keyword.symbol, wl.user_module)
         if a2 is None:
             return True
         return _unify(eng, a2.deref(), result)

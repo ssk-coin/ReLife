@@ -90,7 +90,87 @@ def _eval_pure_arith(t: 'PsiTerm', wl, _depth: int = 0):
         except Exception:
             return None
 
+    # strlen(String) → length as integer
+    if sym == 'strlen':
+        a = t.attr_list.get('1')
+        if a is None:
+            return None
+        ad = a.deref()
+        if ad.value is not None and ad.type is not None and wl:
+            if ad.type.is_subtype_of(wl.quoted_string):
+                return float(len(str(ad.value)))
+        return None
+
     return None
+
+def _eval_pure_string(t: 'PsiTerm', wl, _depth: int = 0):
+    """Evaluate a ground string function call during printing.
+
+    Returns a str value if all arguments are concrete, or None if evaluation
+    is not possible (unbound variables, etc.). Handles strcon, substr, strlen.
+    """
+    if t is None or _depth > 10:
+        return None
+    t = t.deref()
+    if t is None:
+        return None
+
+    # Concrete string value
+    if t.value is not None and t.type is not None and wl:
+        if t.type.is_subtype_of(wl.quoted_string):
+            return str(t.value)
+
+    sym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+    if not sym or not t.attr_list:
+        return None
+
+    def _str_arg(n):
+        """Recursively evaluate argument n as a string."""
+        a = t.attr_list.get(n)
+        if a is None:
+            return None
+        return _eval_pure_string(a.deref(), wl, _depth + 1)
+
+    def _num_arg(n):
+        """Evaluate argument n as a number (integer)."""
+        a = t.attr_list.get(n)
+        if a is None:
+            return None
+        a = a.deref()
+        if a.value is not None and a.type is not None and a.type.is_subtype_of(wl.real):
+            return a.value
+        # Try pure arith
+        v = _eval_pure_arith(a, wl)
+        return v
+
+    if sym == 'strcon':
+        s1 = _str_arg('1')
+        s2 = _str_arg('2')
+        if s1 is None or s2 is None:
+            return None
+        return s1 + s2
+
+    if sym == 'substr':
+        s = _str_arg('1')
+        start_v = _num_arg('2')
+        length_v = _num_arg('3')
+        if s is None or start_v is None or length_v is None:
+            return None
+        start = int(start_v) - 1  # 1-indexed to 0-indexed
+        length = int(length_v)
+        if start < 0:
+            start = 0
+        return s[start:start + length] if start < len(s) else ''
+
+    if sym == 'strlen':
+        s = _str_arg('1')
+        if s is None:
+            return None
+        # Note: strlen returns an integer, not a string - handled separately
+        return None  # Don't handle here; strlen returns int, not string
+
+    return None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Character classification helpers (mirror of print.c's helpers)
@@ -684,7 +764,8 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
     # Only trigger for compound arithmetic terms (no value yet, has attributes, arith op).
     _arith_ops_print = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
                                   'max', 'min', 'abs', 'sqrt', 'floor', 'ceiling',
-                                  'round', 'truncate', 'exp', 'log', 'sin', 'cos', 'tan'))
+                                  'round', 'truncate', 'exp', 'log', 'sin', 'cos', 'tan',
+                                  'strlen'))
     _psym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
     if _psym in _arith_ops_print and t.value is None and t.attr_list and wl:
         _pval = _eval_pure_arith(t, wl)
@@ -700,6 +781,18 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
             else:
                 _pt.type = t.type  # fallback
                 _pt.value = _pval
+            _print_value(ps, _pt, wl)
+            return
+
+    # Evaluate ground string function calls during printing
+    # (strcon, substr, strlen when all args are concrete strings/numbers)
+    _str_funcs_print = frozenset(('strcon', 'substr', 'strlen'))
+    if _psym in _str_funcs_print and t.value is None and t.attr_list and wl:
+        _sval = _eval_pure_string(t, wl)
+        if _sval is not None:
+            _pt = PsiTerm()
+            _pt.type = wl.quoted_string
+            _pt.value = _sval
             _print_value(ps, _pt, wl)
             return
 
