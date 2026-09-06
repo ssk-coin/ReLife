@@ -314,8 +314,23 @@ def run_repl(
                 _write_prompt(depth)
                 continue
 
-            # EOF sentinel from parser
+            # EOF sentinel from parser (actual end-of-stream)
             if hasattr(term, 'type') and term.type is not None and term.type is WL.eof:
+                break
+
+            # end_of_file atom as a fact/declaration also terminates the session.
+            # In Wild Life, writing 'end_of_file.' in the input stream terminates
+            # the interactive session just like an actual EOF.
+            if (sort == FACT and
+                    hasattr(term, 'type') and
+                    term.type is not None and
+                    getattr(term.type, 'keyword', None) is not None and
+                    getattr(term.type.keyword, 'symbol', None) == 'end_of_file' and
+                    not term.attr_list and term.value is None):
+                # If we're inside nested queries, print *** No before terminating
+                if depth > 0:
+                    sys.stdout.write("\n*** No\n")
+                    sys.stdout.write("\n")
                 break
 
             if sort == ERROR:

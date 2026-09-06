@@ -465,7 +465,15 @@ class Engine:
             elif defn.type == DefType.FUNCTION:
                 rules = defn.rule or []
             elif defn.type == DefType.UNDEF:
-                # Dynamic predicate with no clauses → fail silently
+                if defn.rule is None:
+                    # Never declared (not via dynamic/assert) → error + abort
+                    name = defn.keyword.symbol if defn.keyword else '?'
+                    sys.stderr.write(
+                        f"*** Error: '{name}' is not a predicate or a function.\n"
+                        f"\n*** Abort\n"
+                    )
+                    raise AbortException(hook_called=True)
+                # rule == [] → declared via dynamic but no clauses → fail silently
                 self.goal_stack = aim.next
                 self.goal_count += 1
                 return False
