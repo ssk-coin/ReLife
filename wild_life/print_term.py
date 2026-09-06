@@ -155,12 +155,21 @@ class PrintState:
                     self.pointer_names[tid] = name
 
     def forbid_variables(self, var_tree: dict) -> None:
-        """Pre-register top-level variables in printed_pointers."""
-        for name, pterm in var_tree.items():
+        """Pre-register top-level variables in printed_pointers.
+
+        For each shared psi-term, register the alphabetically FIRST variable
+        name so that later variables can display as aliases (e.g. 'C = B').
+        """
+        for name in sorted(var_tree.keys()):
+            pterm = var_tree.get(name)
             if pterm is None:
                 continue
             t = pterm.deref()
-            self.printed_pointers[id(t)] = name
+            tid = id(t)
+            # Only register if not yet registered (sorted order ensures first
+            # (alphabetically) variable wins for each shared psi-term)
+            if tid not in self.printed_pointers:
+                self.printed_pointers[tid] = name
 
 
 # ─────────────────────────────────────────────────────────────────────────────

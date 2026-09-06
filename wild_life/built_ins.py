@@ -642,6 +642,21 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         except Exception:
             return False, 0.0
 
+    # eval(Expr) — evaluate arithmetic expression (also unwraps backtick-quoted terms)
+    if sym == 'eval':
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return False, 0.0
+        a1d = a1.deref()
+        # If arg is a backtick-quoted term `(Expr), unwrap it before evaluating
+        a1_sym = a1d.type.keyword.symbol if a1d.type and a1d.type.keyword else ''
+        if a1_sym == '`':
+            inner = a1d.attr_list.get('1')
+            if inner is not None:
+                return _eval_arith(inner.deref(), eng, _depth + 1)
+            return False, 0.0
+        return _eval_arith(a1d, eng, _depth + 1)
+
     return False, 0.0
 
 
@@ -1282,6 +1297,67 @@ def bi_call(goal: PsiTerm, eng) -> bool:
         return False
     eng.push_goal(GoalType.PROVE, arg, _DEFRULES_SENTINEL, None)
     return True  # will be continued in main loop
+
+
+def bi_and(goal: PsiTerm, eng) -> bool:
+    """and(A, B) — Boolean conjunction as a goal: succeed iff both A and B hold.
+
+    Wild Life uses 'and' as both a boolean function sort and as a conjunction
+    predicate.  When proved as a goal, and(A,B) tries to prove both A and B
+    (like Prolog's ','(A,B)).  It first tries to evaluate the boolean value of
+    the expression; if the result is a definite true/false atom it acts on that;
+    otherwise it falls back to proving A as a goal and then B.
+    """
+    arg1, arg2 = _get_two_args(goal)
+    if arg1 is None or arg2 is None:
+        return True  # degenerate: succeed
+    arg1d = arg1.deref()
+    arg2d = arg2.deref()
+    # Try evaluating as booleans first
+    b_result = _try_eval_bool(goal, eng)
+    if b_result is not None:
+        sym = _get_sym(b_result)
+        return sym == 'true'
+    # Fall back: prove both as goals
+    from wild_life.unification import GoalType as _GoalType
+    _GoalType = GoalType  # use the imported GoalType
+    # Push in reverse order (goal_stack is a stack, so last pushed = first proved)
+    eng.push_goal(GoalType.PROVE, arg2d, _DEFRULES_SENTINEL, None)
+    eng.push_goal(GoalType.PROVE, arg1d, _DEFRULES_SENTINEL, None)
+    return True
+
+
+def bi_or(goal: PsiTerm, eng) -> bool:
+    """or(A, B) — Boolean disjunction as a goal: succeed iff A or B holds.
+
+    Tries to evaluate as a boolean first; if definite, acts on it.
+    Otherwise creates a choice point: try A, or on failure try B.
+    """
+    arg1, arg2 = _get_two_args(goal)
+    if arg1 is None or arg2 is None:
+        return True
+    arg1d = arg1.deref()
+    arg2d = arg2.deref()
+    # Try evaluating as booleans first
+    b_result = _try_eval_bool(goal, eng)
+    if b_result is not None:
+        sym = _get_sym(b_result)
+        return sym == 'true'
+    # Fall back: choice between arg1 and arg2 (simplified: try arg1; if fails, try arg2)
+    mark = eng.trail.mark()
+    cp_save = eng.choice_stack
+    gs_save = eng.goal_stack
+    eng.push_goal(GoalType.PROVE, arg1d, _DEFRULES_SENTINEL, None)
+    _barrier = cp_save if cp_save is not None else _INNER_RUN_BARRIER
+    result1 = eng.run(cs_barrier=_barrier)
+    if result1:
+        eng.choice_stack = cp_save
+        return True
+    eng.trail.undo_to(mark)
+    eng.choice_stack = cp_save
+    eng.goal_stack = gs_save
+    eng.push_goal(GoalType.PROVE, arg2d, _DEFRULES_SENTINEL, None)
+    return True
 
 
 def bi_once(goal: PsiTerm, eng) -> bool:
@@ -2559,7 +2635,9 @@ def register_all(wl) -> None:
 
     # I/O
     _reg('write', bi_write)
+    _reg('pretty_write', bi_write)     # alias: pretty_write = write
     _reg('writeq', bi_writeq)
+    _reg('pretty_writeq', bi_writeq)   # alias: pretty_writeq = writeq
     _reg('write_canonical', bi_write_canonical)
     _reg('print', bi_print)
     _reg('nl', bi_nl)
@@ -2610,7 +2688,10 @@ def register_all(wl) -> None:
     _reg('false', bi_fail)
     _reg('not', bi_not)
     _reg('\\+', bi_not)
+    _reg('and', bi_and)
+    _reg('or', bi_or)
     _reg('call', bi_call)
+    _reg('implies', bi_call)   # implies(Goal) is an alias for call(Goal)
     _reg('once', bi_once)
     _reg('cond', bi_cond)
     _reg('findall', bi_findall)
