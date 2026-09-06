@@ -1064,7 +1064,10 @@ def print_variables(var_tree: dict, outfile: IO = None,
             val_ps.printed_pointers = dict(ps.printed_pointers)
             val_ps.col = len(name) + 3   # column just after "NAME = "
             val_ps.max_col = ps.max_col
-            _pretty_psi_term(val_ps, t, MAX_PRECEDENCE + 1, 0, wl)
+            # Use sprec=700 (the precedence of '=') so that operator expressions
+            # with prec >= 700 (like '->' prec 1200, ',' prec 1000) are
+            # surrounded by parentheses in the "X = VALUE" binding context.
+            _pretty_psi_term(val_ps, t, 700, 0, wl)
             val_str = val_buf.getvalue()
             # Carry forward any newly named pointers
             ps.printed_pointers.update(val_ps.printed_pointers)

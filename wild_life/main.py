@@ -305,9 +305,18 @@ def run_repl(
                 continue
 
             # ---- Parse the input ------------------------------------------
+            # Build inherited variable scope from all active frames so that
+            # variables with matching names in a nested query reuse the
+            # same psi-term objects as their outer-query counterparts.
+            inherited = {}
+            if depth > 0:
+                for f in frame_stack:
+                    if f.var_tree:
+                        inherited.update(f.var_tree)
             try:
                 term, sort, var_tree = parse_string(line_stripped,
-                                                    line_num=repl_line_number)
+                                                    line_num=repl_line_number,
+                                                    inherited_vars=inherited if inherited else None)
             except Exception as exc:
                 sys.stderr.write(f"Parse error: {exc}\n")
                 _write_prompt(depth)

@@ -57,10 +57,14 @@ class Parser:
     C版の parser.c の関数群をクラスにまとめたもの
     """
 
-    def __init__(self, tokenizer: TokenizerState):
+    def __init__(self, tokenizer: TokenizerState,
+                 inherited_vars: dict = None):
         self.ts = tokenizer          # トークナイザ
         self.stack: List[StackEntry] = []  # パーサスタック
         self.parse_ok: bool = True   # パースエラーフラグ
+        # Variable bindings to inherit from outer query scopes.
+        # Set after init_var_tree() in parse() so they survive the reset.
+        self._inherited_vars: dict = inherited_vars or {}
 
         if not WL._initialized:
             init()
@@ -627,6 +631,10 @@ class Parser:
         self.stack = []
         self.parse_ok = True
         self.ts.init_var_tree()
+        # Inherit variable bindings from outer query scopes AFTER init_var_tree()
+        # so that same-named variables in nested queries reuse existing psi-terms.
+        if self._inherited_vars:
+            self.ts.var_tree.update(self._inherited_vars)
 
         # 式を読む
         s = self.read_life_form(None, None)
@@ -671,12 +679,16 @@ class Parser:
 
 # ==================== 文字列からパース ====================
 
-def parse_string(s: str, line_num: int = 0) -> Tuple[Optional[PsiTerm], int, dict]:
+def parse_string(s: str, line_num: int = 0,
+                 inherited_vars: dict = None) -> Tuple[Optional[PsiTerm], int, dict]:
     """文字列を LIFE 項としてパースする
 
     Args:
         s: パースする文字列 (例: "f(X,Y)?")
         line_num: REPL の行番号 (0 = unknown). エラーメッセージに "near line N" として使う.
+        inherited_vars: {変数名: PsiTerm} — 既存のスコープから継承する変数マップ.
+            これが与えられると, 同名の変数は既存の PsiTerm を再利用する (nested-query
+            変数共有). None の場合は従来通り全変数を新規作成する.
 
     Returns:
         (parsed_term, kind, var_tree)
@@ -690,7 +702,10 @@ def parse_string(s: str, line_num: int = 0) -> Tuple[Optional[PsiTerm], int, dic
     from wild_life.data_structures import ERROR
 
     ts = tokenizer_from_string(s, line_num=line_num)
-    p = Parser(ts)
+    # Pass inherited_vars to the Parser so that variables with matching
+    # names in a nested query reuse the existing psi-term objects.
+    # (The Parser sets them AFTER init_var_tree() in its parse() call.)
+    p = Parser(ts, inherited_vars=inherited_vars)
     term, kind = p.parse()
     var_tree = dict(ts.var_tree)   # パース後に変数マップを保存
     if not p.parse_ok:
