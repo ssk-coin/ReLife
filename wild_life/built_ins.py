@@ -943,10 +943,39 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
             # (don't return body_d2 as that would be a wrong replacement for t)
             return None
 
-        # Body is a non-arithmetic, non-function term — return as-is
+        # Body is a compound with possible embedded user-function sub-terms
+        # (e.g. [X|app2(L1,L2)] where the tail is a recursive function call).
+        # Evaluate those sub-terms so the result is a fully-reduced term.
+        _eval_embedded_user_funcs(body_d2, eng, _depth + 1, set())
         return body_d2
 
     return None
+
+
+def _eval_embedded_user_funcs(
+        t: PsiTerm, eng, _depth: int, visited: set) -> None:
+    """Walk t's attribute tree and evaluate any user-function sub-terms.
+
+    Modifies t's attr_list in-place (replacing function calls with their
+    evaluated results).  t must be a fresh copy (not a stored rule term).
+    """
+    if _depth > 40:
+        return
+    td = t.deref()
+    if id(td) in visited:
+        return
+    visited.add(id(td))
+    for key in list(td.attr_list.keys()):
+        child = td.attr_list[key].deref()
+        if _is_user_function(child):
+            evaled = _eval_user_func_sync(child, eng, _depth + 1)
+            if evaled is not None and evaled is not child:
+                td.attr_list[key] = evaled
+                _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited)
+            else:
+                _eval_embedded_user_funcs(child, eng, _depth + 1, visited)
+        elif child.attr_list:
+            _eval_embedded_user_funcs(child, eng, _depth + 1, visited)
 
 
 def bi_unify(goal: PsiTerm, eng) -> bool:

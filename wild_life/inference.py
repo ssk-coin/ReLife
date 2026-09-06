@@ -697,6 +697,12 @@ class Engine:
             self.push_goal(GoalType.EVAL, body_d2, result, body_d2.type.rule)
             return True
 
+        # Body is a compound with possible embedded user-function sub-terms
+        # (e.g. [X|app2(L1,L2)] where app2 is a recursive function).
+        # Evaluate those sub-terms so UNIFY sees the fully-reduced term.
+        from wild_life.built_ins import _eval_embedded_user_funcs
+        _eval_embedded_user_funcs(body_d2, self, 0, set())
+
         # Body is not pure arithmetic — push as a UNIFY goal for later resolution
         self.push_goal(GoalType.UNIFY, body_d2, result, None)
         return True
