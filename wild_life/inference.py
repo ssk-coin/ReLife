@@ -351,30 +351,57 @@ class Engine:
     def _assert_type(self, t: PsiTerm) -> None:
         """Handle type declarations (<| or :=).
 
+        <|  (sub-sort): ``A <| B`` means A is a sub-sort of B.
+            → child=A, parent=B
+
+        := (sort definition): ``A := {B;C;D}`` means B, C, D are sub-sorts
+            of A.  If RHS is a plain atom ``A := B``, treat it the same way
+            (B is the only direct sub-sort of A).
+            → child=element, parent=A (for each element in the RHS disjunction)
+
         Raises SortCycleException if the new edge would create a cycle in the
         sort hierarchy.
         """
         from wild_life.data_structures import DefType
         from wild_life.unification import SortCycleException
-        # Simplified: mark the LHS type as a subtype of the RHS
         arg1 = t.attr_list.get('1')
         arg2 = t.attr_list.get('2')
-        if arg1 and arg2:
-            arg1 = arg1.deref()
-            arg2 = arg2.deref()
+        if not arg1 or not arg2:
+            return
+        arg1 = arg1.deref()
+        arg2 = arg2.deref()
+        sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
+
+        # Determine the (child, parent) pairs to add.
+        pairs = []   # list of (child_def, parent_def)
+        if sym == '<|':
+            # A <| B → child=A, parent=B
             if arg1.type and arg2.type:
-                # Add arg2.type as parent of arg1.type
-                child = arg1.type
-                parent = arg2.type
-                # Mark both as TYPE sorts (they may have been UNDEF if newly created)
-                if child.type == DefType.UNDEF:
-                    child.type = DefType.TYPE
-                if parent.type == DefType.UNDEF:
-                    parent.type = DefType.TYPE
-                if parent not in child.parents:
-                    child.parents.append(parent)
-                if child not in parent.children:
-                    parent.children.append(child)
+                pairs.append((arg1.type, arg2.type))
+        else:
+            # := → for each element e in the RHS disjunction: child=e, parent=LHS
+            if not arg1.type:
+                return
+            super_def = arg1.type   # LHS is the super-sort
+            # Collect all leaf elements from the RHS (may be a disjunction or atom)
+            rhs_elems = _collect_disj_elems(arg2, self.wl) if (
+                arg2.type is not None and arg2.type is self.wl.disjunction
+            ) else [arg2]
+            for elem in rhs_elems:
+                elem_d = elem.deref()
+                if elem_d.type:
+                    pairs.append((elem_d.type, super_def))
+
+        for child, parent in pairs:
+            # Mark both as TYPE sorts (they may have been UNDEF if newly created)
+            if child.type == DefType.UNDEF:
+                child.type = DefType.TYPE
+            if parent.type == DefType.UNDEF:
+                parent.type = DefType.TYPE
+            if parent not in child.parents:
+                child.parents.append(parent)
+            if child not in parent.children:
+                parent.children.append(child)
 
                 # ---- Cycle detection ----------------------------------------
                 # The new edge (child <| parent) creates a cycle if there is
@@ -411,7 +438,7 @@ class Engine:
 
                 # Step 1: does a cycle exist?
                 if _dfs_up(parent, child, set()) is None:
-                    return  # no cycle — nothing to do
+                    continue  # no cycle — proceed to next pair
 
                 # Cycle confirmed.  Remove the just-added edge so the
                 # hierarchy remains consistent.

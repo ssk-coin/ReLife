@@ -325,9 +325,24 @@ class Unifier:
             # retains its sort constraint).  For FUNCTION sorts this preserves sort
             # information for _is_user_function checks; for regular SORT sorts it
             # ensures the sort constraint is visible after binding.
+            from wild_life.data_structures import SORT_VAR as _SORT_VAR_FLAG
             u_is_fn_sort = (u.type is not WL.top)
+            u_is_sort_var = bool(u.flags & _SORT_VAR_FLAG)  # user X:sort annotation
             if u_is_fn_sort and v_is_var:
+                # u has a sort/function-sort constraint; v is a variable.
+                # If v also has a sort constraint (SORT_VAR), we must verify
+                # type compatibility — both sorts must have a common sub-sort.
+                if u_is_sort_var and (v.flags & _SORT_VAR_FLAG) and v.type is not WL.top:
+                    if not self._unify_types(u, v):
+                        return False
                 self.bind(v, u)   # v.coref = u; v.deref() = u (sort kept)
+                self._wakeup_resid(u, v)
+            elif u_is_sort_var and u_is_fn_sort and not v_is_var:
+                # Sort-constrained variable (X:sort) vs ground/non-variable term.
+                # Enforce the sort constraint: v's type must be a sub-sort of u's sort.
+                if not self._unify_types(u, v):
+                    return False
+                self.bind(u, v)
                 self._wakeup_resid(u, v)
             else:
                 self.bind(u, v)
@@ -339,6 +354,8 @@ class Unifier:
             # expression chains in recursive predicates like loop(N-1).
             # Only apply when u is a compound arithmetic op (not a function sort or var).
             # Skip if engine is in non-strict call context (engine.no_arith_eval=True).
+            from wild_life.data_structures import SORT_VAR as _SORT_VAR_FLAG
+            v_is_sort_var = bool(v.flags & _SORT_VAR_FLAG) and v.type is not WL.top
             _skip_arith = getattr(self.engine, 'no_arith_eval', False) if self.engine else False
             if self.engine is not None and not u_is_var and not _skip_arith:
                 _arith_ops = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
@@ -364,6 +381,11 @@ class Unifier:
                     from wild_life.data_structures import NON_STRICT_TERM as _NST
                     self.trail.trail_psi(u, 'flags')
                     u.flags |= _NST
+            # Sort-constrained variable (v) vs ground/non-variable (u):
+            # enforce the sort constraint — u's type must be a sub-sort of v's sort.
+            if v_is_sort_var:
+                if not self._unify_types(v, u):
+                    return False
             self.bind(v, u)
             self._wakeup_resid(v, u)
             return True
