@@ -171,6 +171,60 @@ def compute_glb(d1: Definition, d2: Definition) -> Optional[Definition]:
     return most_specific
 
 
+def compute_all_glbs(d1: Definition, d2: Definition) -> List[Definition]:
+    """2つの型の全ての最大下限 (GLB) を計算する。
+
+    単一の GLB しかない場合は1要素リストを返す。
+    複数の非比較可能なミニマルサブタイプがある場合は全てを返す。
+    共通サブタイプがなければ空リストを返す。
+
+    例: four_wheels と vehicle の GLB は [truck, car] の両方になりうる。
+    """
+    if d1 is d2:
+        return [d1]
+    if d1 is WL.top:
+        return [d2]
+    if d2 is WL.top:
+        return [d1]
+    if d1.is_subtype_of(d2):
+        return [d1]
+    if d2.is_subtype_of(d1):
+        return [d2]
+
+    # d1 の全サブタイプを収集 (children 方向に BFS)
+    d1_subs: set = set()
+    queue = list(d1.children)
+    while queue:
+        d = queue.pop(0)
+        if d not in d1_subs:
+            d1_subs.add(d)
+            queue.extend(d.children)
+
+    # d2 の全サブタイプの中で d1_subs に入っているものを探す
+    common = []
+    queue = list(d2.children)
+    visited: set = set()
+    while queue:
+        d = queue.pop(0)
+        if d not in visited:
+            visited.add(d)
+            if d in d1_subs:
+                common.append(d)
+            queue.extend(d.children)
+
+    if not common:
+        return []
+
+    # 最大下限 (GLB) の元を選ぶ: common の中で他の要素のサブタイプでないもの
+    # (より特殊な共通サブタイプが存在しない、つまり d1・d2 の直接の共通サブタイプ)
+    # 例: four_wheels & vehicle → [truck, car] (rolls_royce は car のサブタイプなので除外)
+    maximal: List[Definition] = []
+    for d in common:
+        if not any(other is not d and d.is_subtype_of(other) for other in common):
+            maximal.append(d)
+    return maximal
+
+
 def types_compatible(d1: Definition, d2: Definition) -> bool:
     """2つの型が単一化可能かどうか判定。
 
@@ -284,7 +338,9 @@ class Unifier:
             # Eagerly evaluate pure arithmetic expressions to prevent deeply-nested
             # expression chains in recursive predicates like loop(N-1).
             # Only apply when u is a compound arithmetic op (not a function sort or var).
-            if self.engine is not None and not u_is_var:
+            # Skip if engine is in non-strict call context (engine.no_arith_eval=True).
+            _skip_arith = getattr(self.engine, 'no_arith_eval', False) if self.engine else False
+            if self.engine is not None and not u_is_var and not _skip_arith:
                 _arith_ops = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
                                         'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
                 _sym = u.type.keyword.symbol if u.type and u.type.keyword else ''
@@ -299,6 +355,15 @@ class Unifier:
                             return True
                     except Exception:
                         pass
+            # Non-strict context: mark the arithmetic term so display doesn't evaluate it
+            if _skip_arith and u.type and u.type.keyword:
+                _sym2 = u.type.keyword.symbol
+                _arith_ops2 = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+                                         'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
+                if _sym2 in _arith_ops2:
+                    from wild_life.data_structures import NON_STRICT_TERM as _NST
+                    self.trail.trail_psi(u, 'flags')
+                    u.flags |= _NST
             self.bind(v, u)
             self._wakeup_resid(v, u)
             return True
@@ -385,11 +450,24 @@ class Unifier:
 
         # 直交した型 (どちらもサブタイプでない) → 互換性チェック
         # ユーザー定義の共通サブタイプがあれば GLB が存在する
-        glb = compute_glb(du, dv)
-        if glb is None:
+        if self.engine is not None:
+            glbs = compute_all_glbs(du, dv)
+        else:
+            _g = compute_glb(du, dv)
+            glbs = [_g] if _g is not None else []
+
+        if not glbs:
             return False            # 共通サブタイプなし → 型が非互換
 
-        # 共通サブタイプが見つかった → 両方の型を GLB に制約
+        # 複数の GLB がある場合: バックトラック用チョイスポイントを積む
+        # (最初の GLB で進め、残りをチョイスポイントとして積む)
+        if len(glbs) > 1 and self.engine is not None:
+            for alt_glb in reversed(glbs[1:]):
+                alt_psi = PsiTerm(type_def=alt_glb)
+                self.engine.push_choice_point(GoalType.UNIFY, u, alt_psi, None)
+
+        # 最初の GLB で進める
+        glb = glbs[0]
         self.bind_type(u, glb)
         self.bind_type(v, glb)
         return True

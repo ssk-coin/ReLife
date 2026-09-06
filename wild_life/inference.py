@@ -126,6 +126,81 @@ def _patch_cut_barriers(term: PsiTerm, wl, cut_point, seen=None) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Goal-stack based embedded-function-call lifter
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _collect_embedded_func_goals(t: 'PsiTerm', eng, visited: set) -> list:
+    """Walk t (non-recursively via an explicit work-list) and replace any
+    user-function sub-terms with fresh unbound variables.
+
+    Returns a list of (func_term, result_var, rule) tuples for EVAL goals.
+    Modifies t's attr_list in-place (safe because t is already a copy_term
+    copy).  Does NOT push goals itself — the caller pushes them in the
+    correct order:
+
+        eval_goals = _collect_embedded_func_goals(body, eng, set())
+        eng.push_goal(UNIFY, body, result, None)   # pushed first → runs last
+        for ft, rv, rl in eval_goals:              # pushed after → run first
+            eng.push_goal(EVAL, ft, rv, rl)
+
+    Unlike _eval_embedded_user_funcs, this helper does NOT recurse in Python
+    for each level of a deeply-recursive function body — instead it hands off
+    to the engine's own iterative goal-dispatch loop.
+    """
+    from wild_life.built_ins import _is_user_function
+
+    t = t.deref()
+    if not t.attr_list:
+        return []
+
+    # Work-list: (parent_term, key) pairs to examine.
+    work_queue = []
+    for key in list(t.attr_list.keys()):
+        work_queue.append((t, key))
+
+    # Nodes we've already examined (avoid revisiting shared sub-terms)
+    examined = set(visited)
+    examined.add(id(t))
+
+    eval_goals = []   # collected (func_term, result_var, rule)
+
+    i = 0
+    while i < len(work_queue):
+        parent, key = work_queue[i]
+        i += 1
+        child = parent.attr_list[key].deref()
+        child_id = id(child)
+        if child_id in examined:
+            continue
+        examined.add(child_id)
+
+        if _is_user_function(child):
+            # Replace with fresh variable; record EVAL goal.
+            v = PsiTerm(type_def=eng.wl.top)
+            parent.attr_list[key] = v
+            eval_goals.append((child, v, child.type.rule))
+            # Do NOT enqueue children of child — they belong to the EVAL goal.
+        else:
+            # Not a function call; walk its children.
+            for sub_key in list(child.attr_list.keys()):
+                work_queue.append((child, sub_key))
+
+    return eval_goals
+
+
+# Keep old name as an alias so any other callers don't break.
+def _push_embedded_func_goals(t: 'PsiTerm', eng, visited: set) -> 'PsiTerm':
+    """Deprecated alias: collects AND immediately pushes EVAL goals.
+    New code should use _collect_embedded_func_goals instead so the
+    UNIFY goal can be pushed in between (correct LIFO ordering).
+    """
+    eval_goals = _collect_embedded_func_goals(t, eng, visited)
+    for ft, rv, rl in eval_goals:
+        eng.push_goal(GoalType.EVAL, ft, rv, rl)
+    return t
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Engine
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -522,8 +597,17 @@ class Engine:
             self.push_goal(GoalType.PROVE, body, _DEFRULES, None)
 
         # Bind head's coref to thegoal (= head ← thegoal)
+        # For non-strict functions, suppress eager arithmetic evaluation of arguments.
+        _non_strict = (defn is not None and
+                       hasattr(self, 'non_strict_set') and
+                       defn in self.non_strict_set)
+        _prev_no_arith = getattr(self, 'no_arith_eval', False)
+        if _non_strict:
+            self.no_arith_eval = True
         mark = self.trail.mark()
         ok = self.unifier.unify(thegoal, head)
+        if _non_strict:
+            self.no_arith_eval = _prev_no_arith
         if not ok:
             self.trail.undo_to(mark)
             # Try next clause if any
@@ -552,6 +636,14 @@ class Engine:
         if not ok:
             self.trail.undo_to(mark)
         return ok
+
+    def _push_embedded_func_goals_method(self, t: 'PsiTerm', visited: set) -> 'PsiTerm':
+        """Walk t and replace user-function sub-terms with fresh vars, pushing
+        EVAL goals for each.  Returns (possibly modified) term safe to UNIFY.
+        Uses goal-stack instead of Python recursion so that deeply-recursive
+        functions like largeterm(1000) don't blow the Python call stack.
+        """
+        return _push_embedded_func_goals(t, self, visited)
 
     def eval_aim(self) -> bool:
         """Handle an 'eval' goal (function evaluation)."""
@@ -644,6 +736,26 @@ class Engine:
                     if _evaled is not None:
                         funct.attr_list[_key] = _evaled
 
+        # Expand disjunctions embedded in function arguments.
+        # e.g. f(s({1;2;3})) → try f(s(1)), then f(s(2)), then f(s(3)).
+        # Push choice points for alternatives 2..N before trying alt 1.
+        from wild_life.built_ins import _term_contains_disjunction, _expand_term_disjunctions
+        if _term_contains_disjunction(funct, self):
+            _alts = _expand_term_disjunctions(funct, self)
+            if len(_alts) > 1:
+                # Push choice points for alternatives 2..N (in reverse so first
+                # alternative is tried next, then 2nd, etc.)
+                for _alt in reversed(_alts[1:]):
+                    _vm2: dict = {}
+                    _h2 = copy_term(head_orig, _vm2)
+                    _b2 = copy_term(body_orig, _vm2)
+                    self.push_choice_point(GoalType.EVAL, _alt, result, active)
+                funct = _alts[0]
+                # Recompute fresh head/body copies for the first alternative
+                _vm = {}
+                head = copy_term(head_orig, _vm)
+                body = copy_term(body_orig, _vm)
+
         # Unify head with funct first (to bind head arguments)
         mark = self.trail.mark()
         ok = self.unifier.unify(funct, head)
@@ -707,12 +819,24 @@ class Engine:
 
         # Body is a compound with possible embedded user-function sub-terms
         # (e.g. [X|app2(L1,L2)] where app2 is a recursive function).
-        # Evaluate those sub-terms so UNIFY sees the fully-reduced term.
-        from wild_life.built_ins import _eval_embedded_user_funcs
-        _eval_embedded_user_funcs(body_d2, self, 0, set())
+        # Push EVAL goals for each embedded user-function call onto the goal
+        # stack so they are evaluated *iteratively* (not via Python recursion).
+        # This avoids hitting Python's stack depth limit for deeply-recursive
+        # functions like largeterm(1000).
+        #
+        # Correct LIFO ordering:
+        #   1. Push UNIFY first  → it sits below EVAL goals on the stack
+        #   2. Push EVAL goals after → they sit on top, so they run FIRST
+        # This ensures the fresh variables are bound before UNIFY fires.
+        eval_goals = _collect_embedded_func_goals(body_d2, self, set())
 
-        # Body is not pure arithmetic — push as a UNIFY goal for later resolution
+        # Push UNIFY first (runs LAST — body_d2 has fresh vars for embedded calls)
         self.push_goal(GoalType.UNIFY, body_d2, result, None)
+
+        # Push each EVAL goal (runs FIRST — binds the fresh vars before UNIFY)
+        for ft, rv, rl in eval_goals:
+            self.push_goal(GoalType.EVAL, ft, rv, rl)
+
         return True
 
     def match_aim(self) -> bool:

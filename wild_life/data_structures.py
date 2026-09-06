@@ -38,7 +38,8 @@ ERROR = 999  # エラー
 # フラグ定数
 QUOTED_TRUE = 1
 UNFOLDED_TRUE = 2
-SORT_VAR = 4   # sort-constrained variable (X:sort where sort is a user type/function)
+SORT_VAR = 4       # sort-constrained variable (X:sort where sort is a user type/function)
+NON_STRICT_TERM = 8  # arithmetic term bound in non-strict context (don't evaluate during display)
 
 # 演算子優先度の最大値
 MAX_PRECEDENCE = 1200

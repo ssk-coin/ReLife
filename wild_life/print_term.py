@@ -247,6 +247,9 @@ class PrintState:
         # Column tracking for line-wrapping
         self.col: int = 0
         self.max_col: int = MAX_COL
+        # When True, suppress arithmetic evaluation during printing
+        # (set inside backtick-quoted term contexts)
+        self.no_arith_eval: bool = False
 
     # ─── output helpers ────────────────────────────────────────────────────
 
@@ -762,12 +765,15 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
 
     # Evaluate pure constant arithmetic expressions (e.g. X bound to 1+2 → show 3).
     # Only trigger for compound arithmetic terms (no value yet, has attributes, arith op).
+    # Suppressed inside backtick-quoted contexts (no_arith_eval flag).
     _arith_ops_print = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
                                   'max', 'min', 'abs', 'sqrt', 'floor', 'ceiling',
                                   'round', 'truncate', 'exp', 'log', 'sin', 'cos', 'tan',
                                   'strlen'))
     _psym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
-    if _psym in _arith_ops_print and t.value is None and t.attr_list and wl:
+    from wild_life.data_structures import NON_STRICT_TERM as _NST_PRINT
+    if (not ps.no_arith_eval and _psym in _arith_ops_print and t.value is None and t.attr_list and wl
+            and not (t.flags & _NST_PRINT)):
         _pval = _eval_pure_arith(t, wl)
         if _pval is not None:
             # Construct a synthetic number term for display only
@@ -826,12 +832,15 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
 
     # Backtick-quoted term: `(expr) → print as expr (one level of backtick stripped).
     # In Wild Life, `expr means "prevent evaluation"; when printing, the backtick
-    # is invisible — the inner term is displayed directly.
+    # is invisible — the inner term is displayed directly without arithmetic evaluation.
     if (t.type is not None and t.type.keyword is not None
             and t.type.keyword.symbol == '`'):
         inner = t.attr_list.get('1')
         if inner is not None:
+            old_no_arith_eval = ps.no_arith_eval
+            ps.no_arith_eval = True
             _pretty_psi_term(ps, inner.deref(), sprec, depth, wl)
+            ps.no_arith_eval = old_no_arith_eval
             return
 
     # Sort-constrained variable: X:sort where sort ≠ @ and term is unbound.

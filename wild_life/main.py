@@ -396,10 +396,20 @@ def run_repl(
                     engine.noisy = saved_noisy
 
                 if success:
-                    # Detect new choice points: cs_before was None and now it's not,
-                    # or cs_before was a node and now there are more nodes above it.
-                    has_new_choices = (engine.choice_stack is not None and
-                                       engine.choice_stack is not cs_before)
+                    # Detect new PROVE/UNIFY choice points above cs_before.
+                    # EVAL choice points (from function rule alternatives) are
+                    # implementation details — they don't represent interactive
+                    # backtracking alternatives the user would want to explore.
+                    from wild_life.data_structures import GoalType as _GoalType
+                    _EVAL_TYPES = (_GoalType.EVAL, _GoalType.EVAL_CUT)
+                    _cp = engine.choice_stack
+                    has_new_choices = False
+                    while _cp is not None and _cp is not cs_before:
+                        if (_cp.goal_stack is not None and
+                                _cp.goal_stack.type not in _EVAL_TYPES):
+                            has_new_choices = True
+                            break
+                        _cp = _cp.next
                     # Check if the CURRENT QUERY has own named variables
                     # (not just inherited from parent frames)
                     own_bindings_str = _format_bindings(var_tree, engine)

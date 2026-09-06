@@ -161,6 +161,40 @@ def _try_eval_arith_to_term(t: PsiTerm, eng) -> Optional[PsiTerm]:
     return _make_number(eng, v)
 
 
+def _normalize_arith_in_term(t: PsiTerm, eng, _seen=None) -> PsiTerm:
+    """Return a copy of t with arithmetic sub-expressions evaluated.
+
+    Used by assert/asserta so that storing ``mynum(N+1)`` where N=31
+    stores ``mynum(32)`` (an integer) rather than the expression tree.
+    Avoids infinite loops on cyclic terms via the _seen set.
+    """
+    if _seen is None:
+        _seen = set()
+    t = t.deref()
+    tid = id(t)
+    if tid in _seen:
+        return t
+    _seen.add(tid)
+
+    # If the whole term is an arithmetic expression, evaluate it
+    arith = _try_eval_arith_to_term(t, eng)
+    if arith is not None:
+        return arith
+
+    # Otherwise, walk attrs and normalize each child
+    if not t.attr_list:
+        return t
+    # Build a shallow copy of the compound term with normalized children
+    new_t = PsiTerm()
+    new_t.type = t.type
+    new_t.value = t.value
+    new_t.flags = t.flags
+    new_t.status = t.status
+    for k, v in t.attr_list.items():
+        new_t.attr_list[k] = _normalize_arith_in_term(v, eng, _seen)
+    return new_t
+
+
 def _term_to_display_string(t: PsiTerm, eng) -> str:
     """Convert a psi-term to its display string (like write/1 would produce)."""
     import io
@@ -1154,9 +1188,43 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
         body = copy_term(b0, _vm)
         body_d = body.deref()
 
-        # Skip conditional rules (value | guard)
+        # Handle conditional rule: body = val_part | guard
+        # Run the guard with an inner proof and return the value part.
         if body_d.type is not None and body_d.type is eng.wl.such_that:
-            continue
+            val_part = body_d.attr_list.get('1')
+            cond_part = body_d.attr_list.get('2')
+            if val_part is None or cond_part is None:
+                continue
+            # Bind head arguments first (for arity > 0 functions)
+            mark = eng.trail.mark()
+            if head.attr_list:
+                ok_h = eng.unifier.unify(t, head)
+                if not ok_h:
+                    eng.trail.undo_to(mark)
+                    continue
+            # Run the guard in an inner proof loop.
+            # IMPORTANT: clear goal_stack so only the guard is proved;
+            # the outer continuation must not run inside this inner loop.
+            from wild_life.inference import GoalType as _GoalType, _DEFRULES as _DR, _INNER_RUN_BARRIER as _IRB
+            cp_save = eng.choice_stack
+            gs_save = eng.goal_stack
+            eng.goal_stack = None
+            eng.push_goal(_GoalType.PROVE, cond_part, _DR, None)
+            old_ok = eng.main_loop_ok
+            _barrier = cp_save if cp_save is not None else _IRB
+            cond_ok = eng.run(cs_barrier=_barrier)
+            eng.main_loop_ok = old_ok
+            eng.choice_stack = cp_save
+            eng.goal_stack = gs_save
+            if cond_ok:
+                val_d = val_part.deref()
+                ok_a, val = _eval_arith(val_d, eng)
+                if ok_a:
+                    return _make_number(eng, val)
+                return val_d
+            else:
+                eng.trail.undo_to(mark)
+                continue
 
         mark = eng.trail.mark()
         ok = eng.unifier.unify(t, head)
@@ -1780,6 +1848,9 @@ def bi_cond(goal: PsiTerm, eng) -> bool:
     mark = eng.trail.mark()
     cp_save = eng.choice_stack
     gs_save = eng.goal_stack
+    # IMPORTANT: clear goal_stack before the inner run so only cond_g is
+    # proved — the continuation must NOT run inside the inner run.
+    eng.goal_stack = None
     eng.push_goal(GoalType.PROVE, cond_g, _DEFRULES_SENTINEL, None)
     old_main_loop_ok = eng.main_loop_ok
     _barrier = cp_save if cp_save is not None else _INNER_RUN_BARRIER
@@ -1787,7 +1858,7 @@ def bi_cond(goal: PsiTerm, eng) -> bool:
     eng.main_loop_ok = old_main_loop_ok
 
     eng.choice_stack = cp_save   # discard Cond's choice points either way
-    eng.goal_stack = gs_save
+    eng.goal_stack = gs_save     # restore the outer continuation
 
     if cond_ok:
         # Cond succeeded → push Then
@@ -1818,6 +1889,9 @@ def _collect_solutions(template: PsiTerm, g: PsiTerm, eng) -> list:
     shared_map: dict = {}
     template_copy = copy_term(template, shared_map)
     goal_copy = copy_term(g, shared_map)
+    # IMPORTANT: clear goal_stack so the inner runs only prove goal_copy;
+    # the outer continuation must NOT run inside the inner loop.
+    eng.goal_stack = None
     eng.push_goal(GoalType.PROVE, goal_copy, _DEFRULES_SENTINEL, None)
 
     collected = []
@@ -1869,6 +1943,9 @@ def bi_assert(goal: PsiTerm, eng) -> bool:
     arg = _get_one_arg(goal)
     if arg is None:
         return False
+    # Evaluate arithmetic sub-expressions before storing so that
+    # assert(mynum(N+1)) with N=31 stores mynum(32) not mynum(31+1).
+    arg = _normalize_arith_in_term(arg, eng)
     eng.assert_first = False
     eng.assert_clause(arg)
     return True
@@ -1879,6 +1956,8 @@ def bi_asserta(goal: PsiTerm, eng) -> bool:
     arg = _get_one_arg(goal)
     if arg is None:
         return False
+    # Evaluate arithmetic sub-expressions before storing.
+    arg = _normalize_arith_in_term(arg, eng)
     eng.assert_first = True
     eng.assert_clause(arg)
     eng.assert_first = False
@@ -2533,11 +2612,12 @@ def bi_member(goal: PsiTerm, eng) -> bool:
     items = _list_to_python(a2, eng)
     if not items:
         return False
-    # Set up choice points for each member
+    # Set up choice points for each member.
+    # Use UNIFY choice points (not PROVE) so backtracking unifies x with the
+    # alternative item via unify_aim, not prove_aim which expects a rule list.
     x = a1
-    for i, item in enumerate(reversed(items)):
-        if i < len(items) - 1:
-            eng.push_choice_point(GoalType.PROVE, x, item, None)
+    for item in reversed(items[1:]):
+        eng.push_choice_point(GoalType.UNIFY, x, item, None)
     # Try first item
     mark = eng.trail.mark()
     ok = _unify(eng, x, items[0])
