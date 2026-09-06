@@ -466,9 +466,11 @@ class Parser:
         重複特性はエラー
         """
         if key in attr_list:
+            line = self.ts.line_count
             sys.stderr.write(
-                f"*** Syntax error: duplicate feature {key}\n"
+                f"*** Syntax error: duplicate feature {key} (near line {line})\n"
             )
+            self.parse_ok = False
         else:
             attr_list[key] = psi
 
@@ -669,11 +671,12 @@ class Parser:
 
 # ==================== 文字列からパース ====================
 
-def parse_string(s: str) -> Tuple[Optional[PsiTerm], int, dict]:
+def parse_string(s: str, line_num: int = 0) -> Tuple[Optional[PsiTerm], int, dict]:
     """文字列を LIFE 項としてパースする
 
     Args:
         s: パースする文字列 (例: "f(X,Y)?")
+        line_num: REPL の行番号 (0 = unknown). エラーメッセージに "near line N" として使う.
 
     Returns:
         (parsed_term, kind, var_tree)
@@ -686,7 +689,7 @@ def parse_string(s: str) -> Tuple[Optional[PsiTerm], int, dict]:
     from wild_life.tokenizer import tokenizer_from_string
     from wild_life.data_structures import ERROR
 
-    ts = tokenizer_from_string(s)
+    ts = tokenizer_from_string(s, line_num=line_num)
     p = Parser(ts)
     term, kind = p.parse()
     var_tree = dict(ts.var_tree)   # パース後に変数マップを保存

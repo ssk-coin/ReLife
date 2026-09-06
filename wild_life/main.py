@@ -195,11 +195,13 @@ def run_repl(
     # ---- Main REPL ---------------------------------------------------------
     # No initial prompt — the first output comes from the load or the first query.
     exit_code = 0
+    repl_line_number = 0   # running line counter for error messages
 
     while True:
         try:
             try:
                 line = input()
+                repl_line_number += 1
             except EOFError:
                 # Print a final newline so the last prompt ends cleanly.
                 sys.stdout.write("\n")
@@ -304,7 +306,8 @@ def run_repl(
 
             # ---- Parse the input ------------------------------------------
             try:
-                term, sort, var_tree = parse_string(line_stripped)
+                term, sort, var_tree = parse_string(line_stripped,
+                                                    line_num=repl_line_number)
             except Exception as exc:
                 sys.stderr.write(f"Parse error: {exc}\n")
                 _write_prompt(depth)

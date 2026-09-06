@@ -360,20 +360,35 @@ class WildLifeRuntime:
         self.comment = self.update_symbol(bi, "comment")
         self.comment.type = DefType.TYPE
 
-        # nil, alist (リスト)
+        # list: abstract supertype of cons and nil.
+        # When users write 'X <| list', X becomes a subtype of the abstract list type,
+        # but NOT a list constructor — it won't get list-notation printing.
+        self.list_type = self.update_symbol(bi, "list")
+        self.list_type.type = DefType.TYPE
+        self._make_type_link(self.list_type, self.top)
+
+        # nil: the empty list []. Subtype of list.
         self.nil = self.update_symbol(bi, "nil")
         self.nil.type = DefType.TYPE
-        self._make_type_link(self.nil, self.top)
+        self._make_type_link(self.nil, self.list_type)
 
-        self.alist = self.update_symbol(bi, "alist")
+        # The user-facing name for the list cons cell is 'cons' (as in cons(H,T)).
+        # Internal alias 'alist' is also registered for backward compatibility.
+        # cons is a subtype of list.
+        self.alist = self.update_symbol(bi, "cons")
         self.alist.type = DefType.TYPE
-        self._make_type_link(self.alist, self.top)
+        self._make_type_link(self.alist, self.list_type)
+        bi.symbol_table["alist"] = self.alist   # alist -> cons alias
 
-        # disjunction (論理和 {a;b;c})
-        self.disjunction = self.update_symbol(bi, "disjunction")
+        # disjunction / disj (論理和 {a;b;c})
+        # The user-facing name is 'disj'; 'disjunction' is a backward-compat alias.
+        self.disjunction = self.update_symbol(bi, "disj")
         self.disjunction.type = DefType.TYPE
         self._make_type_link(self.disjunction, self.top)
+        bi.symbol_table["disjunction"] = self.disjunction  # disjunction -> disj alias
 
+        # disj_nil: the empty disjunction {}
+        # User-facing name is 'disj_nil'; when printing it prints as '{}'.
         self.disj_nil = self.update_symbol(bi, "disj_nil")
         self.disj_nil.type = DefType.TYPE
         self._make_type_link(self.disj_nil, self.disjunction)

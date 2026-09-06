@@ -500,8 +500,20 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
         ps.write("[]")
         _maybe_resid(ps, t)
         return
+    # nil with extra attributes — print as [](...)
+    if t.type == wl.nil and t.attr_list:
+        ps.write("[]")
+        _pretty_attr(ps, t.attr_list, depth + 1, wl)
+        _maybe_resid(ps, t)
+        return
     if wl.disj_nil and t.type == wl.disj_nil and not t.attr_list:
         ps.write("{}")
+        _maybe_resid(ps, t)
+        return
+    # disj_nil with extra attributes — print as {}(...)
+    if wl.disj_nil and t.type == wl.disj_nil and t.attr_list:
+        ps.write("{}")
+        _pretty_attr(ps, t.attr_list, depth + 1, wl)
         _maybe_resid(ps, t)
         return
 
