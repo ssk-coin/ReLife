@@ -707,9 +707,44 @@ def parse_string(s: str, line_num: int = 0,
     # (The Parser sets them AFTER init_var_tree() in its parse() call.)
     p = Parser(ts, inherited_vars=inherited_vars)
     term, kind = p.parse()
-    var_tree = dict(ts.var_tree)   # パース後に変数マップを保存
     if not p.parse_ok:
         return None, ERROR, {}
+    # Return only variables that were ACTUALLY USED in the parsed text.
+    # Inherited vars that were pre-populated but not referenced in this query
+    # should NOT be included, or every query at depth>0 would appear to have
+    # own variable bindings (even "gc?" with no variables in the source).
+    full_var_tree = dict(ts.var_tree)
+    if inherited_vars:
+        # Only keep vars that were not pure pass-throughs from inherited_vars.
+        # A var was "used" in the current query if:
+        #   (a) it was NOT in inherited_vars (newly created), or
+        #   (b) it was in inherited_vars AND was referenced (same PsiTerm object)
+        # Since inherited vars are referenced by the same PsiTerm object, we can
+        # distinguish: a var is "own" if its name was actually scanned in the input.
+        # The tokenizer only adds to var_tree when it scans a variable token, so
+        # every entry in var_tree was scanned.  But we pre-populated with inherited,
+        # so we need the set of vars scanned FROM THE INPUT TEXT specifically.
+        # Track this via the set of names that appear in the parsed text.
+        own_var_tree = {k: v for k, v in full_var_tree.items()
+                        if k not in inherited_vars}
+        # Also include vars that appear in inherited_vars AND were scanned in the
+        # current query.  The tokenizer only adds a var to var_tree when it's
+        # actually encountered while scanning, so any var present in the post-parse
+        # var_tree that was also in inherited_vars was indeed referenced in the text.
+        # However, we pre-populated var_tree with ALL inherited vars at init time,
+        # so all inherited vars appear even if not referenced.  To filter, check
+        # whether the variable name appears literally in the source string.
+        import re as _re
+        # Collect all identifiers that look like variable names (start with uppercase
+        # or _) in the source string.
+        var_pattern = _re.compile(r'\b([A-Z_][A-Za-z0-9_]*)\b')
+        referenced_names = set(var_pattern.findall(s))
+        for k, v in full_var_tree.items():
+            if k in inherited_vars and k in referenced_names:
+                own_var_tree[k] = v
+        var_tree = own_var_tree
+    else:
+        var_tree = full_var_tree
     return term, kind, var_tree
 
 

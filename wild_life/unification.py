@@ -338,6 +338,19 @@ class Unifier:
         if not self._unify_attrs(u, v):
             return False
 
+        # After successful structural unification, merge the two psi-terms by
+        # binding v → u (via coref).  This preserves the sharing relationship
+        # so that print_variables can detect when two variables refer to the
+        # same canonical term and show e.g. "Y = X" instead of "Y = !".
+        # Only do this for non-numeric atoms (numbers are primitive values that
+        # should remain separate; ChoicePoint values in '!' terms are OK to merge).
+        from wild_life.data_structures import ChoicePoint as _CP_merge
+        _u_prim = isinstance(u.value, (int, float, str)) if u.value is not None else False
+        _v_prim = isinstance(v.value, (int, float, str)) if v.value is not None else False
+        if not _u_prim and not _v_prim and v.coref is None:
+            # Bind v → u so deref(v) returns u (the canonical psi-term).
+            self.bind(v, u)
+
         return True
 
     def _unify_types(self, u: PsiTerm, v: PsiTerm) -> bool:
@@ -383,18 +396,32 @@ class Unifier:
 
     def _unify_values(self, u: PsiTerm, v: PsiTerm) -> bool:
         """値 (数値・文字列) を単一化する"""
+        # ChoicePoint values are cut-barrier references stored in '!' (cut)
+        # psi-terms for execution semantics only.  Two cut atoms are always
+        # equal regardless of their stored cut points; skip value comparison.
+        from wild_life.data_structures import ChoicePoint as _CP
+        u_cp = isinstance(u.value, _CP)
+        v_cp = isinstance(v.value, _CP)
+
         # 両方が値を持つ場合は等値チェック
         if u.value is not None and v.value is not None:
+            # Both are ChoicePoint references → cut atoms are structurally equal
+            if u_cp and v_cp:
+                return True
             if isinstance(u.value, (int, float)) and isinstance(v.value, (int, float)):
                 return float(u.value) == float(v.value)
             return u.value == v.value
 
         # 片方だけが値を持つ場合
         if u.value is not None and v.value is None:
-            self.bind_value(v, u.value)
+            # Don't propagate a ChoicePoint cut-point to v — cut atoms share
+            # the same sort and that is enough for structural equality.
+            if not u_cp:
+                self.bind_value(v, u.value)
             return True
         if v.value is not None and u.value is None:
-            self.bind_value(u, v.value)
+            if not v_cp:
+                self.bind_value(u, v.value)
             return True
 
         return True  # 両方 None
