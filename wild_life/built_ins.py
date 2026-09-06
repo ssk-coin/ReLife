@@ -2853,10 +2853,31 @@ def register_all(wl) -> None:
     # System
     _reg('halt', bi_halt)
     _reg('abort', bi_abort)
-    # gc — garbage collection (memory management).  In Python the GC is
-    # automatic; this is a no-op that simply succeeds.  It does NOT touch
-    # the choice stack (it is not a cut operation).
+    # gc — garbage collection (memory management).  In Wild Life, heap
+    # compaction discards choice points that contain stale retract (DEL_CLAUSE)
+    # backtrack information, but leaves regular PROVE/CLAUSE choice points
+    # (which point to live clause lists) intact.  We model this by removing
+    # DEL_CLAUSE choice points from the stack while keeping all others.
     def _bi_gc(goal, eng):
+        from wild_life.data_structures import GoalType as _GoalType
+        # Walk the choice stack and filter out DEL_CLAUSE nodes.
+        # The stack is a singly-linked list (newest at head, oldest at tail).
+        # Build a new list of kept nodes, then relink them.
+        kept = []
+        cp = eng.choice_stack
+        while cp is not None:
+            gs = cp.goal_stack
+            if gs is None or gs.type != _GoalType.DEL_CLAUSE:
+                kept.append(cp)
+            cp = cp.next
+        # Relink the kept nodes
+        if kept:
+            for i in range(len(kept) - 1):
+                kept[i].next = kept[i + 1]
+            kept[-1].next = None
+            eng.choice_stack = kept[0]
+        else:
+            eng.choice_stack = None
         return True
     _reg('gc', _bi_gc)
     _reg('garbage_collect', _bi_gc)
