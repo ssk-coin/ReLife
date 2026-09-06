@@ -1529,6 +1529,70 @@ def bi_retract(goal: PsiTerm, eng) -> bool:
     return True
 
 
+def bi_store_arrow(goal: PsiTerm, eng) -> bool:
+    """X <- V / X <<- V — destructive (non-backtrackable) assignment.
+
+    Two modes:
+    1. Global/persistent variable (LHS has a function/predicate definition):
+       Retract all existing rules and assert LHS -> RHS (like setq).
+    2. Local variable / already-bound term:
+       Evaluate RHS as arithmetic or copy term, then destructively update
+       the psi-term (not added to trail → permanent, non-backtrackable).
+    """
+    a1 = goal.attr_list.get('1')
+    a2 = goal.attr_list.get('2')
+    if a1 is None or a2 is None:
+        return False
+
+    # Deref LHS
+    lhs = a1.deref()
+    defn = lhs.type
+
+    # Mode 1: LHS is a named function/predicate symbol (global variable)
+    if (defn is not None and
+            hasattr(defn, 'rule') and
+            defn.rule is not None and
+            lhs.value is None and
+            not lhs.attr_list):
+        # Use setq-like behavior: clear all rules, assert new value
+        from wild_life.unification import copy_term as _copy_term
+        rhs_d = a2.deref()
+        # Try arithmetic eval for numeric RHS
+        ok, val = _eval_arith(a2, eng)
+        if ok:
+            # Build a numeric psi-term as the new value
+            new_val = PsiTerm()
+            new_val.type = eng.wl.real
+            new_val.value = val
+            rhs_d = new_val
+        defn.rule = []          # clear existing rules
+        defn.type = DefType.FUNCTION
+        _vm: dict = {}
+        head_copy = _copy_term(lhs, _vm)
+        defn.rule.append((head_copy, rhs_d))
+        return True
+
+    # Mode 2: Local variable / bound term — destructive in-place update
+    ok, val = _eval_arith(a2, eng)
+    if ok:
+        lhs.value = val
+        lhs.coref = None
+        lhs.attr_list = {}
+        if lhs.type is None or lhs.type is eng.wl.top:
+            lhs.type = eng.wl.real
+        return True
+
+    # Non-arithmetic RHS: destructively copy rhs structure into lhs
+    rhs = a2.deref()
+    lhs.value = rhs.value
+    lhs.type = rhs.type
+    lhs.attr_list = dict(rhs.attr_list)
+    lhs.coref = None   # clear any forwarding pointer
+    lhs.flags = rhs.flags
+    lhs.resid = rhs.resid
+    return True
+
+
 def bi_setq(goal: PsiTerm, eng) -> bool:
     """setq(X, V) — set (global) functional fact X -> V.
 
@@ -2668,6 +2732,8 @@ def register_all(wl) -> None:
     _reg('==', bi_identical)
     _reg('\\==', bi_not_identical)
     _reg('compare', bi_compare)
+    _reg('<-', bi_store_arrow)      # destructive assignment
+    _reg('<<-', bi_store_arrow)     # strict destructive assignment (same semantics)
 
     # Type testing
     _reg('var', bi_var)
