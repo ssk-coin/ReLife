@@ -550,7 +550,16 @@ def copy_term(t: PsiTerm, var_map: Optional[Dict[int, PsiTerm]] = None) -> PsiTe
         return result
 
     # 複合項
+    # Preserve structural sharing: if the same Python object appears at
+    # multiple positions in a rule (e.g. an empty sort-typed term X:sort
+    # acting as a shared variable, or any shared sub-structure), all
+    # occurrences must map to the SAME fresh copy.  Register the result in
+    # var_map *before* recursing so that circular structures are also safe.
+    tid = id(t)
+    if tid in var_map:
+        return var_map[tid]
     result = PsiTerm()
+    var_map[tid] = result  # register before recursing
     result.type = t.type
     result.value = t.value
     result.flags = t.flags

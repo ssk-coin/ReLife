@@ -613,17 +613,28 @@ class Engine:
                         return False
                 return True
 
-        # Pre-evaluate any user-defined function call arguments in funct.
+        # Pre-evaluate any function call arguments in funct.
         # This enables patterns like f(g(x)) where g(x) needs to be evaluated
         # before pattern matching against f's head (e.g. rev(reverse(L),[]) ).
-        from wild_life.built_ins import _eval_user_func_sync, _is_user_function
+        from wild_life.built_ins import (
+            _eval_user_func_sync, _is_user_function,
+            _try_eval_string_func, _try_eval_arith_to_term,
+        )
         for _key in list(funct.attr_list.keys()):
             _attr = funct.attr_list[_key].deref()
             if _is_user_function(_attr):
                 _evaled = _eval_user_func_sync(_attr, self)
                 if _evaled is not None and _evaled is not _attr:
-                    # Update funct's attribute to the evaluated result
                     funct.attr_list[_key] = _evaled
+            else:
+                # Try built-in function evaluation (features, root_sort, etc.)
+                _evaled = _try_eval_string_func(_attr, self)
+                if _evaled is not None:
+                    funct.attr_list[_key] = _evaled
+                else:
+                    _evaled = _try_eval_arith_to_term(_attr, self)
+                    if _evaled is not None:
+                        funct.attr_list[_key] = _evaled
 
         # Unify head with funct first (to bind head arguments)
         mark = self.trail.mark()
@@ -631,6 +642,41 @@ class Engine:
         if not ok:
             self.trail.undo_to(mark)
             return False
+
+        # Sort-constrained computation rule fix:
+        # Rule form: X:sort -> body_expr(X, ...)
+        # The parser stores head_orig as one SORT_VAR and body's X occurrences
+        # as INDEPENDENT SORT_VAR tokens (different Python objects, different ids).
+        # copy_term with shared _vm therefore produces a DIFFERENT copy X'_body
+        # for the body than X'_head for the head — they don't share the binding.
+        # After unify(funct, head) binds X'_head → funct, X'_body remains free.
+        # Fix: walk body and bind every free SORT_VAR of the same sort to funct.
+        from wild_life.data_structures import SORT_VAR as _SORT_VAR_FLAG
+        _head_orig_d = head_orig  # head_orig is the stored (un-copied) head
+        if ((_head_orig_d.flags & _SORT_VAR_FLAG) and
+                _head_orig_d.type is not None and
+                not _head_orig_d.attr_list):
+            _sort_type = _head_orig_d.type
+            _sv_visited: set = set()
+
+            def _bind_free_sort_vars(t: 'PsiTerm') -> None:
+                """Bind free SORT_VARs of _sort_type to funct, in-place."""
+                if id(t) in _sv_visited:
+                    return
+                _sv_visited.add(id(t))
+                if ((t.flags & _SORT_VAR_FLAG) and
+                        t.type is _sort_type and
+                        t.coref is None):
+                    self.trail.trail_psi(t, 'coref')
+                    t.coref = funct
+                    return
+                td = t.deref()
+                if id(td) not in _sv_visited:
+                    _sv_visited.add(id(td))
+                    for _child in list(td.attr_list.values()):
+                        _bind_free_sort_vars(_child)
+
+            _bind_free_sort_vars(body)
 
         # Now that head args are bound, try arithmetic evaluation of body
         body_d2 = body.deref()

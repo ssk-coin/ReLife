@@ -262,6 +262,30 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             lst = pair
         return lst
 
+    elif sym == '.':
+        # T.F — feature access: get feature F of term T
+        a1 = t.attr_list.get('1')  # T
+        a2 = t.attr_list.get('2')  # F (feature label)
+        if a1 is None or a2 is None:
+            return None
+        term = a1.deref()
+        feat = a2.deref()
+        # Determine the feature key string
+        if feat.value is not None and feat.type and feat.type.keyword:
+            fsym = feat.type.keyword.symbol
+            if fsym in ('integer', 'real'):
+                fkey = str(int(feat.value))
+            else:
+                fkey = fsym
+        elif feat.type and feat.type.keyword:
+            fkey = feat.type.keyword.symbol
+        else:
+            return None
+        val = term.attr_list.get(fkey)
+        if val is None:
+            return None
+        return val.deref()
+
     return None
 
 
@@ -496,9 +520,11 @@ def bi_read_term(goal: PsiTerm, eng) -> bool:
 # Arithmetic
 # ─────────────────────────────────────────────────────────────────────────────
 
+_ARITH_DEBUG = False  # Set True to debug arithmetic evaluation
+
 def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     """Evaluate an arithmetic expression. Returns (ok, value)."""
-    if t is None or _depth > 20:
+    if t is None or _depth > 40:
         return False, 0.0
     t = t.deref()
     wl = eng.wl
@@ -510,25 +536,51 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     # User-defined function: try to evaluate it inline (no condition case)
     if t.type is not None and t.type.type == DefType.FUNCTION and t.type.rule:
         active = [(h, b) for (h, b) in t.type.rule if h is not None and b is not None]
-        if active:
-            from wild_life.unification import copy_term
-            h0, b0 = active[0]
+        from wild_life.unification import copy_term
+        # Pre-evaluate built-in function calls in args (e.g. features(X)) so
+        # that they are resolved before we try to unify with rule heads.
+        # Create a shallow copy of t with evaluated args.
+        t_pre = PsiTerm()
+        t_pre.type = t.type
+        t_pre.value = t.value
+        t_pre.attr_list = {}
+        for _k, _v in t.attr_list.items():
+            _vd = _v.deref()
+            _evaled_arg = _try_eval_string_func(_vd, eng)
+            t_pre.attr_list[_k] = _evaled_arg if _evaled_arg is not None else _vd
+        for _ri, (h0, b0) in enumerate(active):
             _vm: dict = {}
             head = copy_term(h0, _vm)
             body = copy_term(b0, _vm)
             body_d = body.deref()
+            # Skip sort-constrained rules: head is a bare variable (no attrs).
+            # These rules are X:sort -> body, designed for eval_aim not direct
+            # arithmetic. Evaluating them causes infinite recursion because the
+            # body typically calls features(X) which can't be resolved here.
+            head_d = head.deref()
+            if not head_d.attr_list:
+                continue
             # Handle conditional: body = (value | condition) — skip if conditioned
             if body_d.type is not None and body_d.type is wl.such_that:
-                pass  # Can't evaluate conditionals without engine; skip
-            else:
-                # Unify head with t to bind arguments
-                mark = eng.trail.mark()
-                ok = eng.unifier.unify(t, head)
-                if ok:
-                    result = _eval_arith(body_d, eng, _depth + 1)
-                    eng.trail.undo_to(mark)
-                    return result
+                continue  # Can't evaluate conditionals without engine; skip
+            # Unify head with pre-evaluated copy of t to bind arguments
+            mark = eng.trail.mark()
+            ok = eng.unifier.unify(t_pre, head)
+            if ok:
+                result = _eval_arith(body_d, eng, _depth + 1)
                 eng.trail.undo_to(mark)
+                if result[0]:
+                    return result
+                # Evaluation failed; try next rule
+            eng.trail.undo_to(mark)
+
+    # Feature access: T.F → evaluate as arithmetic if possible
+    if sym == '.':
+        arg1, arg2 = _get_two_args(t)
+        feat_val = _try_eval_string_func(t, eng)
+        if feat_val is not None:
+            return _eval_arith(feat_val, eng, _depth + 1)
+        return False, 0.0
 
     # Binary operators
     arg1, arg2 = _get_two_args(t)
@@ -887,8 +939,9 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
             inner = _eval_user_func_sync(body_d2, eng, _depth + 1)
             if inner is not None:
                 return inner
-            # Body is a user function but can't eval synchronously — return body as-is
-            return body_d2
+            # Body is a user function but can't eval synchronously — signal failure
+            # (don't return body_d2 as that would be a wrong replacement for t)
+            return None
 
         # Body is a non-arithmetic, non-function term — return as-is
         return body_d2
