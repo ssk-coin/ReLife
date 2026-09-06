@@ -657,6 +657,18 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
             return False, 0.0
         return _eval_arith(a1d, eng, _depth + 1)
 
+    # strlen(String) — length of string as integer
+    if sym == 'strlen':
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return False, 0.0
+        a1d = a1.deref()
+        if a1d.value is not None:
+            return True, float(len(str(a1d.value)))
+        if a1d.type and a1d.type.keyword:
+            return True, float(len(a1d.type.keyword.symbol))
+        return True, 0.0
+
     return False, 0.0
 
 
@@ -2830,6 +2842,7 @@ def register_all(wl) -> None:
     _reg('term_to_atom', bi_term_to_atom)
     _reg('string_codes', bi_string_codes)
     _reg('string_length', bi_string_length)
+    _reg('strlen', bi_string_length)   # alias: strlen(String, Len)
     _reg('char_type', bi_char_type)
 
     # Lists

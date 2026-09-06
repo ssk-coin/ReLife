@@ -18,6 +18,80 @@ MAX_COL = 79        # column limit for line wrapping
 
 DOTDOT = ": "
 
+import math as _math
+
+def _eval_pure_arith(t: 'PsiTerm', wl, _depth: int = 0):
+    """Evaluate a pure constant arithmetic expression.
+
+    Returns a float value if t is a ground arithmetic expression (no free
+    variables), or None if evaluation is not possible.  This is used when
+    printing binding values so that ``X:(1+2)`` displays as ``X = 3``.
+    Only evaluated when the full engine is unavailable.
+    """
+    if t is None or _depth > 30:
+        return None
+    t = t.deref()
+    if t is None:
+        return None
+    # Concrete numeric value
+    if t.value is not None and t.type is not None:
+        if wl and t.type.is_subtype_of(wl.real):
+            return float(t.value)
+    # Unbound variable or non-numeric term
+    sym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+    if not sym or not t.attr_list:
+        return None
+
+    def _arg(n):
+        a = t.attr_list.get(n)
+        if a is None:
+            return None
+        return _eval_pure_arith(a.deref(), wl, _depth + 1)
+
+    v1 = _arg('1')
+    v2 = _arg('2')
+
+    _ops2 = {
+        '+': lambda a, b: a + b,
+        '-': lambda a, b: a - b,
+        '*': lambda a, b: a * b,
+        '/': lambda a, b: a / b if b != 0 else None,
+        '//': lambda a, b: float(int(a) // int(b)) if b != 0 else None,
+        'mod': lambda a, b: float(int(a) % int(b)) if b != 0 else None,
+        '**': lambda a, b: a ** b,
+        '^': lambda a, b: a ** b,
+        'max': lambda a, b: max(a, b),
+        'min': lambda a, b: min(a, b),
+    }
+    if sym in _ops2 and v1 is not None and v2 is not None:
+        try:
+            r = _ops2[sym](v1, v2)
+            return float(r) if r is not None else None
+        except Exception:
+            return None
+
+    _ops1 = {
+        '-': lambda a: -a,
+        'abs': lambda a: abs(a),
+        'sqrt': lambda a: _math.sqrt(a),
+        'floor': lambda a: float(_math.floor(a)),
+        'ceiling': lambda a: float(_math.ceil(a)),
+        'round': lambda a: float(round(a)),
+        'truncate': lambda a: float(_math.trunc(a)),
+        'exp': lambda a: _math.exp(a),
+        'log': lambda a: _math.log(a),
+        'sin': lambda a: _math.sin(a),
+        'cos': lambda a: _math.cos(a),
+        'tan': lambda a: _math.tan(a),
+    }
+    if sym in _ops1 and v1 is not None:
+        try:
+            return float(_ops1[sym](v1))
+        except Exception:
+            return None
+
+    return None
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Character classification helpers (mirror of print.c's helpers)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -605,6 +679,29 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
     if t is None:
         return
     t = t.deref()
+
+    # Evaluate pure constant arithmetic expressions (e.g. X bound to 1+2 → show 3).
+    # Only trigger for compound arithmetic terms (no value yet, has attributes, arith op).
+    _arith_ops_print = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+                                  'max', 'min', 'abs', 'sqrt', 'floor', 'ceiling',
+                                  'round', 'truncate', 'exp', 'log', 'sin', 'cos', 'tan'))
+    _psym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+    if _psym in _arith_ops_print and t.value is None and t.attr_list and wl:
+        _pval = _eval_pure_arith(t, wl)
+        if _pval is not None:
+            # Construct a synthetic number term for display only
+            _pt = PsiTerm()
+            if _pval == int(_pval) and wl.integer and wl.integer.is_subtype_of(wl.real):
+                _pt.type = wl.integer
+                _pt.value = int(_pval)
+            elif wl.real:
+                _pt.type = wl.real
+                _pt.value = _pval
+            else:
+                _pt.type = t.type  # fallback
+                _pt.value = _pval
+            _print_value(ps, _pt, wl)
+            return
 
     # List / disjunction sugar
     if (t.type == wl.alist or t.type == wl.disjunction):
