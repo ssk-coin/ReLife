@@ -433,7 +433,6 @@ def run_repl(
             # ---- Fact / rule: assert into database ------------------------
             elif sort == FACT:
                 try:
-                    engine.assert_first = False
                     engine.assert_clause(term)
                     sys.stdout.write("\n*** Yes\n")
                 except SortCycleException:

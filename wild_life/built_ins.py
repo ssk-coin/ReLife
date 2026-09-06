@@ -1017,6 +1017,31 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         eng.push_goal(GoalType.EVAL, a_d, result, a_d.type.rule)
         return True
 
+    # Handle bagof/findall/setof in functional position:
+    #   L = bagof(Template, Goal)  →  collect all solutions and unify with L
+    _BAGOF_NAMES = frozenset(('bagof', 'findall', 'setof'))
+    if (b_d.type is not None and
+            b_d.type._builtin_func is not None and
+            b_d.type.keyword and
+            b_d.type.keyword.symbol in _BAGOF_NAMES):
+        tmpl = b_d.attr_list.get('1')
+        g_   = b_d.attr_list.get('2')
+        if tmpl is not None and g_ is not None and '3' not in b_d.attr_list:
+            collected = _collect_solutions(tmpl.deref(), g_.deref(), eng)
+            result_list = eng.wl.make_list(collected)
+            return _unify(eng, a_d, result_list)
+
+    if (a_d.type is not None and
+            a_d.type._builtin_func is not None and
+            a_d.type.keyword and
+            a_d.type.keyword.symbol in _BAGOF_NAMES):
+        tmpl = a_d.attr_list.get('1')
+        g_   = a_d.attr_list.get('2')
+        if tmpl is not None and g_ is not None and '3' not in a_d.attr_list:
+            collected = _collect_solutions(tmpl.deref(), g_.deref(), eng)
+            result_list = eng.wl.make_list(collected)
+            return _unify(eng, b_d, result_list)
+
     # Handle disjunction on RHS: A = {b1;b2;...} → try A=b1, choice for rest
     if b_d.type is not None and b_d.type is eng.wl.disjunction:
         elems = _collect_disjunction(b_d, eng)
@@ -1413,47 +1438,32 @@ def bi_cond(goal: PsiTerm, eng) -> bool:
         return True
 
 
-def bi_findall(goal: PsiTerm, eng) -> bool:
-    """findall(Template, Goal, Bag) — collect all solutions."""
-    arg1, rest = _get_two_args(goal)
-    if arg1 is None or rest is None:
-        return False
-    template = arg1
-    g = rest.attr_list.get('1')
-    bag_out = rest.attr_list.get('2')
-    if g is None or bag_out is None:
-        # Try 3-arg form
-        a1 = goal.attr_list.get('1')
-        a2 = goal.attr_list.get('2')
-        a3 = goal.attr_list.get('3')
-        if not (a1 and a2 and a3):
-            return False
-        template = a1.deref()
-        g = a2.deref()
-        bag_out = a3.deref()
+def _collect_solutions(template: PsiTerm, g: PsiTerm, eng) -> list:
+    """Collect all solutions of goal g, returning copies of template.
 
-    solutions = []
+    Helper shared by findall/bagof/setof.
+    Saves/restores trail, choice_stack, goal_stack.
+
+    Template and goal are copied together (shared var_map) so that variables
+    in the template are bound when the goal is solved.
+    """
     wl = eng.wl
     mark = eng.trail.mark()
     cp_save = eng.choice_stack
     gs_save = eng.goal_stack
 
-    # Run the goal, collecting template copies for each solution
-    def collect_solution():
-        sol = copy_term(template)
-        solutions.append(sol)
-        return False  # force backtracking to get all solutions
-
-    # Temporarily push collect goal — simplified: run directly
-    goal_copy = copy_term(g)
+    # Copy template and goal with shared variable mapping so they share variables.
+    shared_map: dict = {}
+    template_copy = copy_term(template, shared_map)
+    goal_copy = copy_term(g, shared_map)
     eng.push_goal(GoalType.PROVE, goal_copy, _DEFRULES_SENTINEL, None)
 
-    # Collect all solutions via repeated backtracking
     collected = []
     while True:
         result = eng.run()
         if result:
-            collected.append(copy_term(template))
+            # Copy template_copy with current bindings resolved
+            collected.insert(0, copy_term(template_copy))
             if not eng.choice_stack or eng.choice_stack is cp_save:
                 break
             eng.backtrack()
@@ -1463,10 +1473,33 @@ def bi_findall(goal: PsiTerm, eng) -> bool:
     eng.trail.undo_to(mark)
     eng.choice_stack = cp_save
     eng.goal_stack = gs_save
+    return collected
 
-    # Build a list of collected solutions
-    result_list = wl.make_list(collected)
-    return _unify(eng, bag_out, result_list)
+
+def bi_findall(goal: PsiTerm, eng) -> bool:
+    """findall(Template, Goal, Bag) — collect all solutions.
+
+    Supports both:
+      findall(Template, Goal, Bag)   — 3-arg predicate form
+      _A = findall(Template, Goal)   — 2-arg functional form (handled via bi_unify)
+    """
+    wl = eng.wl
+    # Try 3-arg form first
+    a1 = goal.attr_list.get('1')
+    a2 = goal.attr_list.get('2')
+    a3 = goal.attr_list.get('3')
+    if a1 and a2 and a3:
+        template = a1.deref()
+        g = a2.deref()
+        bag_out = a3.deref()
+        collected = _collect_solutions(template, g, eng)
+        result_list = wl.make_list(collected)
+        return _unify(eng, bag_out, result_list)
+
+    # 2-arg functional form: result must be provided separately
+    # This path is normally reached via bi_unify's bagof-as-function handling.
+    # Called as predicate with 2 args → fail (use = form instead)
+    return False
 
 
 def bi_assert(goal: PsiTerm, eng) -> bool:

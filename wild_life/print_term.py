@@ -12,8 +12,9 @@ from wild_life.data_structures import (
     PsiTerm, Definition, OperatorType
 )
 
-PRINT_DEPTH = 10
+PRINT_DEPTH = 200   # max nesting depth; list length is unlimited
 MAX_PRECEDENCE = 1200
+MAX_COL = 79        # column limit for line wrapping
 
 DOTDOT = ": "
 
@@ -89,6 +90,9 @@ class PrintState:
         self.printed_pointers: Dict[int, str] = {}
         # Buffer for indenting mode
         self._buf: List[str] = []
+        # Column tracking for line-wrapping
+        self.col: int = 0
+        self.max_col: int = MAX_COL
 
     # ─── output helpers ────────────────────────────────────────────────────
 
@@ -97,6 +101,12 @@ class PrintState:
             self._buf.append(s)
         else:
             self.outfile.write(s)
+        # Track column position
+        nl = s.rfind('\n')
+        if nl >= 0:
+            self.col = len(s) - nl - 1
+        else:
+            self.col += len(s)
 
     def flush(self) -> None:
         if self.indent:
@@ -120,9 +130,14 @@ class PrintState:
         return '_' + ''.join(reversed(parts))
 
     def _unique_name(self, var_tree: dict) -> str:
+        # Collect all names already in use (from var_tree AND from pointer_names)
+        used = set(var_tree.keys())
+        for v in self.pointer_names.values():
+            if v and v != 'SHARED':
+                used.add(v)
         while True:
             name = self._nice_name()
-            if name not in var_tree:
+            if name not in used:
                 return name
 
     def go_through(self, t: 'PsiTerm', var_tree: dict = None) -> None:
@@ -387,63 +402,165 @@ def _check_legal_cons(t: 'PsiTerm', t_type) -> bool:
 
 
 def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
-    """Pretty-print a list or disjunction."""
+    """Pretty-print a list or disjunction with column-aware wrapping.
+
+    If the entire list fits on the current line (col + flat_length <= max_col),
+    it is printed inline.  Otherwise each element is placed on its own line,
+    indented to align with the first element (one past the opening bracket).
+    """
+    import io
+
     t_type = t.type
 
     if t_type == wl.alist or (wl.alist and t_type and
             t_type.is_subtype_of(wl.alist)):
-        if t_type != wl.alist:
-            _print_symbol(ps, t_type.keyword)
-            ps.write(DOTDOT)
-        ps.write("[")
-        sep = ","
-        end = "]"
+        prefix_str = '' if t_type == wl.alist else (t_type.keyword.symbol + ': ')
+        open_br, sep, close_br = '[', ',', ']'
     elif t_type == wl.disjunction:
-        ps.write("{")
-        sep = ";"
-        end = "}"
+        prefix_str = ''
+        open_br, sep, close_br = '{', ';', '}'
     else:
-        ps.write("[")
-        sep = ","
-        end = "]"
+        prefix_str = ''
+        open_br, sep, close_br = '[', ',', ']'
 
-    list_depth = 0
-    done = False
-    while not done:
-        if list_depth == ps.print_depth:
-            ps.write("...")
-        arg1, arg2 = _get_two_args(t.attr_list)
-        if arg1:
-            arg1 = arg1.deref()
-        if arg2:
-            arg2 = arg2.deref()
+    # Column where the opening bracket will land
+    indent_col = ps.col + len(prefix_str) + 1  # align with first element
 
-        if list_depth < ps.print_depth:
-            _pretty_tag_or_psi_term(ps, arg1, 999, depth)
+    # ── helper: iterate over list nodes ───────────────────────────────────────
+    def _iter_list(start):
+        """Yield (arg1, arg2, is_tail) tuples; is_tail=True for the last arg2."""
+        cur = start
+        list_depth = 0
+        while True:
+            if list_depth >= ps.print_depth:
+                yield None, None, True   # sentinel for "..."
+                return
+            arg1, arg2 = _get_two_args(cur.attr_list)
+            if arg1: arg1 = arg1.deref()
+            if arg2: arg2 = arg2.deref()
+            tid2 = id(arg2) if arg2 is not None else None
+            if arg2 is None:
+                yield arg1, None, True
+                return
+            if tid2 in ps.pointer_names and ps.pointer_names[tid2]:
+                yield arg1, arg2, True   # improper list with named tail
+                return
+            if (arg2.type == wl.nil and not arg2.attr_list) or \
+               (arg2.type == wl.disj_nil and not arg2.attr_list):
+                yield arg1, None, True
+                return
+            if not _check_legal_cons(arg2, t_type):
+                yield arg1, arg2, True   # improper list
+                return
+            yield arg1, None, False
+            cur = arg2
+            list_depth += 1
 
+    # ── flat rendering into a buffer ──────────────────────────────────────────
+    flat_buf = io.StringIO()
+    flat_ps = PrintState(outfile=flat_buf)
+    flat_ps.print_depth = ps.print_depth
+    flat_ps.const_quote = ps.const_quote
+    flat_ps.write_resids = ps.write_resids
+    flat_ps.pointer_names = ps.pointer_names
+    flat_ps.printed_pointers = dict(ps.printed_pointers)
+    flat_ps.col = ps.col + len(prefix_str)  # column just before '['
+    flat_ps.max_col = 10_000                # suppress inner wrapping during probe
+
+    if prefix_str:
+        flat_ps.write(prefix_str)
+    flat_ps.write(open_br)
+
+    # Re-iterate the original term for flat rendering
+    cur = t
+    list_depth_f = 0
+    first_f = True
+    done_f = False
+    t_walk = t
+    while not done_f:
+        if list_depth_f >= ps.print_depth:
+            flat_ps.write("...")
+            done_f = True
+            break
+        arg1, arg2 = _get_two_args(t_walk.attr_list)
+        if arg1: arg1 = arg1.deref()
+        if arg2: arg2 = arg2.deref()
+        if not first_f:
+            flat_ps.write(sep)
+        first_f = False
+        _pretty_tag_or_psi_term(flat_ps, arg1, 999, depth)
         if arg2 is None:
-            done = True
+            done_f = True
+        else:
+            tid2 = id(arg2)
+            if tid2 in flat_ps.pointer_names and flat_ps.pointer_names[tid2]:
+                flat_ps.write("|")
+                _pretty_tag_or_psi_term(flat_ps, arg2, MAX_PRECEDENCE + 1, depth)
+                done_f = True
+            elif (arg2.type == wl.nil and not arg2.attr_list) or \
+                 (arg2.type == wl.disj_nil and not arg2.attr_list):
+                done_f = True
+            elif not _check_legal_cons(arg2, t_type):
+                flat_ps.write("|")
+                _pretty_tag_or_psi_term(flat_ps, arg2, MAX_PRECEDENCE + 1, depth)
+                done_f = True
+            else:
+                t_walk = arg2
+        list_depth_f += 1
+
+    flat_ps.write(close_br)
+    flat_str = flat_buf.getvalue()
+
+    # ── decide: inline or multi-line ─────────────────────────────────────────
+    if ps.col + len(flat_str) <= ps.max_col:
+        # Fits: write the flat string and sync printed_pointers
+        ps.write(flat_str)
+        ps.printed_pointers.update(flat_ps.printed_pointers)
+        return
+
+    # Multi-line: each element on its own line, indented to indent_col
+    if prefix_str:
+        ps.write(prefix_str)
+    ps.write(open_br)
+
+    t_walk2 = t
+    list_depth2 = 0
+    first2 = True
+    done2 = False
+    while not done2:
+        if list_depth2 >= ps.print_depth:
+            ps.write("...")
+            done2 = True
+            break
+        arg1, arg2 = _get_two_args(t_walk2.attr_list)
+        if arg1: arg1 = arg1.deref()
+        if arg2: arg2 = arg2.deref()
+        if not first2:
+            ps.write(sep)
+            ps.write("\n")
+            ps.write(" " * indent_col)
+        first2 = False
+        _pretty_tag_or_psi_term(ps, arg1, 999, depth)
+        if arg2 is None:
+            done2 = True
         else:
             tid2 = id(arg2)
             if tid2 in ps.pointer_names and ps.pointer_names[tid2]:
                 ps.write("|")
                 _pretty_tag_or_psi_term(ps, arg2, MAX_PRECEDENCE + 1, depth)
-                done = True
+                done2 = True
             elif (arg2.type == wl.nil and not arg2.attr_list) or \
                  (arg2.type == wl.disj_nil and not arg2.attr_list):
-                done = True
+                done2 = True
             elif not _check_legal_cons(arg2, t_type):
                 ps.write("|")
                 _pretty_tag_or_psi_term(ps, arg2, MAX_PRECEDENCE + 1, depth)
-                done = True
+                done2 = True
             else:
-                if list_depth < ps.print_depth:
-                    ps.write(sep)
-                t = arg2
+                t_walk2 = arg2
+        list_depth2 += 1
 
-        list_depth += 1
-
-    ps.write(end)
+    ps.write(close_br)
 
 
 def _pretty_tag_or_psi_term(ps: PrintState, p: Optional['PsiTerm'],
@@ -702,8 +819,16 @@ def print_variables(var_tree: dict, outfile: IO = None,
                     print_depth: int = PRINT_DEPTH, wl=None) -> bool:
     """
     Print all query variables in the form 'X = value'.
-    Returns True if there were any variables.
+
+    When all bindings fit on one line (total <= MAX_COL chars) they are printed
+    inline: ``A = v1, B = v2.``
+    Otherwise each binding goes on its own line:
+    ``A = v1, \\nB = v2, \\nC = v3.``
+    (the separator `, ` appears at the end of the previous line).
+    Returns True if there were any variables printed.
     """
+    import io
+
     if wl is None:
         from wild_life.runtime import WL as wl
     if not var_tree:
@@ -717,35 +842,67 @@ def print_variables(var_tree: dict, outfile: IO = None,
     ps.write_resids = True
     ps.indent = False
 
-    # Scan all variables
+    # Scan all variables to build pointer_names / printed_pointers
     for name, pterm in var_tree.items():
         if pterm is not None:
             ps._go_through_term(pterm.deref())
     ps.insert_variables(var_tree, True)
     ps.forbid_variables(var_tree)
 
-    first = True
-    for name in sorted(var_tree.keys()):
-        pterm = var_tree[name]
-        if pterm is None:
-            continue
-        t = pterm.deref()
-        if not first:
-            outfile.write(", ")
-        first = False
-        outfile.write(name)
-        outfile.write(" = ")
+    sorted_names = [n for n in sorted(var_tree.keys()) if var_tree[n] is not None]
+    if not sorted_names:
+        return False
 
+    # ── Render each binding's value to a string ───────────────────────────────
+    # We render to a buffer so we can check total length before deciding
+    # whether to use single-line or multi-line format.
+    # Column offset = len("NAME = ") so that nested lists indent correctly.
+    binding_strs: list = []
+    for name in sorted_names:
+        pterm = var_tree[name]
+        t = pterm.deref()
         n2 = ps.printed_pointers.get(id(t))
         if n2 and n2 < name:
-            outfile.write(n2)
+            val_str = n2
         else:
-            _pretty_psi_term(ps, t, MAX_PRECEDENCE + 1, 0, wl)
-            ps.flush()
+            val_buf = io.StringIO()
+            val_ps = PrintState(outfile=val_buf)
+            val_ps.print_depth = print_depth
+            val_ps.const_quote = True
+            val_ps.write_resids = True
+            val_ps.pointer_names = ps.pointer_names
+            val_ps.printed_pointers = dict(ps.printed_pointers)
+            val_ps.col = len(name) + 3   # column just after "NAME = "
+            val_ps.max_col = ps.max_col
+            _pretty_psi_term(val_ps, t, MAX_PRECEDENCE + 1, 0, wl)
+            val_str = val_buf.getvalue()
+            # Carry forward any newly named pointers
+            ps.printed_pointers.update(val_ps.printed_pointers)
+        binding_strs.append((name, val_str))
 
-    if not first:
-        outfile.write(".")
-    return not first
+    # ── Decide single-line vs multi-line ──────────────────────────────────────
+    # total = sum of "NAME = VAL" + ", " separators + "." terminator
+    total_len = sum(len(n) + 3 + len(v) for n, v in binding_strs)
+    total_len += 2 * (len(binding_strs) - 1)   # ", " between bindings
+    total_len += 1                              # "." at end
+    multi_line = total_len > ps.max_col or any('\n' in v for _, v in binding_strs)
+
+    # ── Emit ──────────────────────────────────────────────────────────────────
+    for i, (name, val_str) in enumerate(binding_strs):
+        is_last = (i == len(binding_strs) - 1)
+        outfile.write(name)
+        outfile.write(" = ")
+        outfile.write(val_str)
+        if not is_last:
+            outfile.write(", ")
+            if multi_line:
+                outfile.write("\n")
+    outfile.write(".")
+    # Wild Life appends an extra blank line when bindings span multiple lines.
+    if multi_line:
+        outfile.write("\n")
+
+    return True
 
 
 def display_psi_term(t: Optional['PsiTerm'], outfile: IO = None,
