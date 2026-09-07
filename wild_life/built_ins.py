@@ -982,8 +982,13 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         t_pre.attr_list = {}
         for _k, _v in t.attr_list.items():
             _vd = _v.deref()
-            _evaled_arg = _try_eval_string_func(_vd, eng)
-            t_pre.attr_list[_k] = _evaled_arg if _evaled_arg is not None else _vd
+            # Try arithmetic evaluation first (handles N-1, N*2, etc. in recursive calls)
+            _ok_arith, _arith_val = _eval_arith(_vd, eng, _depth + 1)
+            if _ok_arith:
+                t_pre.attr_list[_k] = _make_number(eng, _arith_val)
+            else:
+                _evaled_arg = _try_eval_string_func(_vd, eng)
+                t_pre.attr_list[_k] = _evaled_arg if _evaled_arg is not None else _vd
         for _ri, (h0, b0) in enumerate(active):
             _vm: dict = {}
             head = copy_term(h0, _vm)
