@@ -845,10 +845,17 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
 
     # Sort-constrained variable: X:sort where sort ≠ @ and term is unbound.
     # In Wild Life, such a variable prints as "sortname~" (e.g. "real~", "bool~").
+    # The ~ signals "there is a pending constraint":
+    #   - Pure sort annotation (X:real, no resid) → always write "~"
+    #   - Arithmetic constraint (resid present) → let _maybe_resid handle "~"
+    #     to print it only for PENDING resids; already-resolved ones get no "~"
     from wild_life.data_structures import SORT_VAR
     if (t.flags & SORT_VAR) and t.value is None and not t.attr_list:
         _print_symbol_q(ps, t.type.keyword if t.type else None)
-        ps.write("~")
+        if not t.resid:
+            # Pure sort annotation: no residuated goals attached; always pending
+            ps.write("~")
+        # else: has residuations — let _maybe_resid write ~ for each pending one
         _maybe_resid(ps, t)
         return
 

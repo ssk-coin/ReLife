@@ -318,27 +318,55 @@ class WildLifeRuntime:
         self.constant.type = DefType.TYPE
         self._make_type_link(self.constant, self.top)
 
-        # real (supertype of integer)
+        # built_in: abstract supertype of the built-in numeric/string/list/bool types.
+        # children(built_in) = [list, string, real, bool]  (insertion order matters)
+        self.built_in = self.update_symbol(bi, "built_in")
+        self.built_in.type = DefType.TYPE
+        self._make_type_link(self.built_in, self.top)
+
+        # list — first child of built_in; abstract supertype of cons and nil.
+        # When users write 'X <| list', X becomes a subtype of the abstract list type,
+        # but NOT a list constructor — it won't get list-notation printing.
+        self.list_type = self.update_symbol(bi, "list")
+        self.list_type.type = DefType.TYPE
+        self._make_type_link(self.list_type, self.built_in)
+
+        # cons (list cell): first child of list; expected order is [cons, []]
+        # Internal alias 'alist' is also registered for backward compatibility.
+        self.alist = self.update_symbol(bi, "cons")
+        self.alist.type = DefType.TYPE
+        self._make_type_link(self.alist, self.list_type)
+        bi.symbol_table["alist"] = self.alist   # alist -> cons alias
+
+        # nil: the empty list []. Second child of list.
+        self.nil = self.update_symbol(bi, "nil")
+        self.nil.type = DefType.TYPE
+        self._make_type_link(self.nil, self.list_type)
+
+        # string — second child of built_in (canonical name; 'quoted_string' is an alias)
+        self.quoted_string = self.update_symbol(bi, "string")
+        self.quoted_string.type = DefType.TYPE
+        self._make_type_link(self.quoted_string, self.built_in)
+        bi.symbol_table["quoted_string"] = self.quoted_string  # quoted_string -> string alias
+
+        # real — third child of built_in (supertype of int)
         self.real = self.update_symbol(bi, "real")
         self.real.type = DefType.TYPE
-        self._make_type_link(self.real, self.top)
+        self._make_type_link(self.real, self.built_in)
 
-        # integer <| real (integer is a subtype of real)
-        self.integer = self.update_symbol(bi, "integer")
+        # int <| real (canonical name is 'int'; 'integer' is a backward-compat alias)
+        self.integer = self.update_symbol(bi, "int")
         self.integer.type = DefType.TYPE
         self._make_type_link(self.integer, self.real)
+        bi.symbol_table["integer"] = self.integer  # integer -> int alias
 
-        # quoted_string
-        self.quoted_string = self.update_symbol(bi, "quoted_string")
-        self.quoted_string.type = DefType.TYPE
-        self._make_type_link(self.quoted_string, self.top)
-
-        # boolean
-        self.boolean = self.update_symbol(bi, "boolean")
+        # bool — fourth child of built_in (canonical name; 'boolean' is an alias)
+        self.boolean = self.update_symbol(bi, "bool")
         self.boolean.type = DefType.TYPE
-        self._make_type_link(self.boolean, self.top)
+        self._make_type_link(self.boolean, self.built_in)
+        bi.symbol_table["boolean"] = self.boolean  # boolean -> bool alias
 
-        # true, false (boolean のサブタイプ)
+        # true, false (bool のサブタイプ)
         self.true = self.update_symbol(bi, "true")
         self.true.type = DefType.TYPE
         self._make_type_link(self.true, self.boolean)
@@ -359,26 +387,6 @@ class WildLifeRuntime:
         # comment (コメントトークン)
         self.comment = self.update_symbol(bi, "comment")
         self.comment.type = DefType.TYPE
-
-        # list: abstract supertype of cons and nil.
-        # When users write 'X <| list', X becomes a subtype of the abstract list type,
-        # but NOT a list constructor — it won't get list-notation printing.
-        self.list_type = self.update_symbol(bi, "list")
-        self.list_type.type = DefType.TYPE
-        self._make_type_link(self.list_type, self.top)
-
-        # nil: the empty list []. Subtype of list.
-        self.nil = self.update_symbol(bi, "nil")
-        self.nil.type = DefType.TYPE
-        self._make_type_link(self.nil, self.list_type)
-
-        # The user-facing name for the list cons cell is 'cons' (as in cons(H,T)).
-        # Internal alias 'alist' is also registered for backward compatibility.
-        # cons is a subtype of list.
-        self.alist = self.update_symbol(bi, "cons")
-        self.alist.type = DefType.TYPE
-        self._make_type_link(self.alist, self.list_type)
-        bi.symbol_table["alist"] = self.alist   # alist -> cons alias
 
         # disjunction / disj (論理和 {a;b;c})
         # The user-facing name is 'disj'; 'disjunction' is a backward-compat alias.
@@ -470,8 +478,8 @@ class WildLifeRuntime:
         self.apply = self.update_symbol(bi, "apply")
         self.apply.type = DefType.FUNCTION
 
-        self.built_in = self.update_symbol(bi, "built_in")
-        self.built_in.type = DefType.TYPE
+        # built_in is already defined in _init_built_in_types above; just look it up.
+        # (self.built_in is already set; this is a no-op lookup.)
 
         self.xf_sym = self.update_symbol(bi, "xf")
         self.yf_sym = self.update_symbol(bi, "yf")

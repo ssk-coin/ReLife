@@ -93,6 +93,13 @@ class Trail:
         old_val = getattr(t, field)
         self._trail.append((t, field, old_val))
 
+    def trail_copy(self, obj, field: str):
+        """フィールドのシャローコピーをトレイルに記録 (リストなど可変オブジェクト用)"""
+        import copy
+        old_val = getattr(obj, field)
+        saved = copy.copy(old_val)
+        self._trail.append((obj, field, saved))
+
     def undo_to(self, mark: int):
         """mark 位置までトレイルを巻き戻す"""
         while len(self._trail) > mark:
@@ -569,10 +576,34 @@ class Unifier:
         """残留ゴールを覚醒させる
         変数が束縛されたときに呼ばれる
         C版の wakeup() に対応
+
+        pending=True のゴールをエンジンのゴールスタックに再投入する。
+        同一ゴールオブジェクトを複数回投入しないよう管理する。
         """
-        # 残留ゴールは inference.py の実行エンジンが処理する
-        # ここではフラグを設定するだけ
-        pass
+        if var.resid is None:
+            return
+        if self.engine is None:
+            return
+
+        # Collect unique pending goals (by object identity)
+        seen_goals: set = set()
+        goals_to_wake = []
+        for r in var.resid:
+            g = getattr(r, 'goal', None)
+            if g is not None and getattr(g, 'pending', False):
+                gid = id(g)
+                if gid not in seen_goals:
+                    seen_goals.add(gid)
+                    goals_to_wake.append(g)
+
+        # Mark pending goals as no longer pending (they will be re-evaluated)
+        # and push them back onto the goal stack.
+        # IMPORTANT: trail the pending flag change so that on backtrack the
+        # goal becomes pending again and can be re-awakened next time.
+        for g in goals_to_wake:
+            self.trail.trail_psi(g, 'pending')  # restore pending=True on backtrack
+            g.pending = False
+            self.engine.push_goal(g.type, g.a, g.b, g.c)
 
     def unify_noeval(self, u: PsiTerm, v: PsiTerm) -> bool:
         """評価なしの単一化

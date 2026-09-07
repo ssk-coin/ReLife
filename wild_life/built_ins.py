@@ -77,6 +77,161 @@ def _get_sym(t: PsiTerm) -> str:
     return t.type.keyword.symbol if (t.type and t.type.keyword) else ''
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Arithmetic type-constraint propagation helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Binary and unary operators that return a real number.
+_ARITH_OPS_SET = frozenset((
+    '+', '-', '*', '/', '//', 'mod', '**', '^',
+    'max', 'min', 'abs', 'sqrt', 'sin', 'cos', 'tan',
+    'exp', 'log', 'floor', 'ceiling', 'truncate', 'round',
+))
+
+
+def _collect_arith_vars(t: 'PsiTerm', wl, result: list, seen: set) -> None:
+    """Collect all unbound variables in an arithmetic expression.
+
+    Collects both fresh top-sort variables and sort-constrained variables
+    (e.g. type=real with SORT_VAR flag set by earlier arithmetic propagation).
+    """
+    from wild_life.data_structures import SORT_VAR
+    if t is None:
+        return
+    t = t.deref()
+    tid = id(t)
+    if tid in seen:
+        return
+    seen.add(tid)
+    # Unbound variable: top-sort, or sort-constrained (SORT_VAR flag), no attrs, no value
+    is_free = not t.attr_list and t.value is None and t.coref is None
+    if is_free and (t.type is wl.top or t.type is None or bool(t.flags & SORT_VAR)):
+        if t not in result:
+            result.append(t)
+        return
+    # Numeric literal — ground, no variables inside
+    if t.value is not None:
+        return
+    sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
+    if sym in _ARITH_OPS_SET:
+        for val in t.attr_list.values():
+            _collect_arith_vars(val, wl, result, seen)
+
+
+def _attach_arith_resid(var: 'PsiTerm', wl, pending_goal, eng=None) -> None:
+    """Constrain var to sort real and attach a pending residuated goal.
+
+    Sets the SORT_VAR flag so the unifier continues to treat the variable as
+    bindable (even though its type is no longer WL.top).  When the variable is
+    later bound, _wakeup_resid fires the pending goal.
+
+    If eng is provided, the resid list modification is trailed so that it is
+    undone on backtracking (preventing accumulation of stale resid entries).
+    """
+    from wild_life.data_structures import Residuation, SORT_VAR
+    var = var.deref()
+    # Constrain to real sort only if still totally unconstrained
+    if var.type is wl.top or var.type is None:
+        var.type = wl.real
+    # Mark as a sort-constrained variable so the unifier still binds it and
+    # calls _wakeup_resid when it gets a value.
+    var.flags |= SORT_VAR
+    # Attach a single pending residuation for display (~).
+    # Avoid duplicating the same goal object.
+    if var.resid is None:
+        if eng is not None:
+            eng.trail.trail_psi(var, 'resid')  # trail: resid was None
+        var.resid = [Residuation(goal=pending_goal)]
+    else:
+        # Don't attach the same goal twice
+        for r in var.resid:
+            if r.goal is pending_goal:
+                return
+        if eng is not None:
+            eng.trail.trail_copy(var, 'resid')  # trail: save copy of list
+        var.resid.append(Residuation(goal=pending_goal))
+
+
+def _var_in_expr(target: 'PsiTerm', expr: 'PsiTerm', visited: set) -> bool:
+    """Return True if *target* (by identity after deref) appears in *expr*.
+
+    Follows coref chains via deref() and recurses through attr_list children.
+    Used to detect self-referential constraints (e.g. B=A-B → A appears in expr).
+    """
+    if expr is None:
+        return False
+    expr_d = expr.deref()
+    if id(expr_d) == id(target):
+        return True
+    eid = id(expr)
+    if eid in visited:
+        return False
+    visited.add(eid)
+    for child in expr_d.attr_list.values():
+        if _var_in_expr(target, child, visited):
+            return True
+    return False
+
+
+def _simplify_arith(t: 'PsiTerm', eng,
+                    allow_identity: bool = True) -> 'Optional[PsiTerm]':
+    """Partial arithmetic simplification using identity rules.
+
+    Wild Life 1.02 always applies (when one operand is a known constant):
+        0 + X  →  X        (left-zero for +)
+        X - 0  →  X        (right-zero for -)
+        0 * X  →  0        (left-zero / annihilator for *)
+
+    The following identity rule is applied only when allow_identity=True,
+    i.e. when the LHS variable fires the constraint (not a pure expression-var
+    wakeup):
+        X * 1  →  X        (right-identity for *)
+
+    Rules NOT applied in Wild Life 1.02:
+        X + 0  →  X        (right-zero for +)
+        1 * X  →  X        (left-identity for *)
+        X * 0  →  0        (right-zero for *)
+        X / 1  →  X        (right-identity for /)
+
+    Returns a PsiTerm on success, None if no simplification applies.
+    """
+    if t is None:
+        return None
+    t = t.deref()
+    sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
+    if sym not in _ARITH_OPS_SET:
+        return None
+
+    arg1, arg2 = _get_two_args(t)
+
+    ok1, v1 = _eval_arith(arg1, eng) if arg1 else (False, 0.0)
+    ok2, v2 = _eval_arith(arg2, eng) if arg2 else (False, 0.0)
+
+    # Both fully evaluable — let the normal path handle it
+    if ok1 and ok2:
+        return None
+
+    wl = eng.wl
+
+    if sym == '+':
+        if ok1 and v1 == 0.0 and arg2 is not None:
+            return arg2.deref()           # 0 + X = X  (always)
+        # X + 0 = X: NOT applied in Wild Life 1.02
+    elif sym == '-':
+        if ok2 and v2 == 0.0 and arg1 is not None:
+            return arg1.deref()           # X - 0 = X  (always)
+    elif sym == '*':
+        if ok1 and v1 == 0.0:
+            return wl.make_integer(0)     # 0 * X = 0  (always, left-zero)
+        # X * 1 = X: applied only when LHS fires (allow_identity=True)
+        if allow_identity and ok2 and v2 == 1.0 and arg1 is not None:
+            return arg1.deref()           # X * 1 = X  (LHS-fire only)
+        # 1 * X = X, X * 0 = 0: NOT applied in Wild Life 1.02
+    # X / 1 = X: NOT applied in Wild Life 1.02
+
+    return None
+
+
 def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
     """Try to evaluate a boolean function application.
 
@@ -321,20 +476,27 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         return _make_atom(eng, defn.keyword.symbol)
 
     elif sym == 'children':
-        # children(Sort) -> list of immediate child sorts
+        # children(Sort) -> list of immediate child sorts.
+        # For concrete numeric/string values (atoms with a .value), return [].
         a1 = t.attr_list.get('1')
         if a1 is None:
             return None
         a1 = a1.deref()
+        # Concrete values (numbers, strings) have no child sorts.
+        if a1.value is not None:
+            if eng is None:
+                return None
+            return eng.wl.make_list([])
         defn = a1.type
         if defn is None or eng is None:
             return None
         wl = eng.wl
+        # Use defn.children directly to avoid duplicates from symbol aliases.
         child_atoms = []
-        for mod in wl._all_modules():
-            for sym_name, child_defn in mod.symbol_table.items():
-                if defn in getattr(child_defn, 'parents', []):
-                    child_atoms.append(wl.make_atom(sym_name, mod))
+        for child_defn in getattr(defn, 'children', []):
+            if child_defn.keyword is None:
+                continue
+            child_atoms.append(wl.make_atom(child_defn.keyword.symbol, wl.bi_module))
         return wl.make_list(child_atoms)
 
     elif sym == 'features':
@@ -1384,10 +1546,125 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         a_evaled = _try_eval_bool(a_d, eng)
         if a_evaled is not None:
             a_d = a_evaled
+    # Detect whether this call is a re-fire of a suspended residuated goal
+    # (as opposed to the initial constraint setup).  The eq_term created during
+    # residuation is tagged with _resid_marker=True; when _wakeup_resid fires
+    # the pending goal it passes the tagged eq_term as *goal*, so we can detect
+    # re-fires here without any extra bookkeeping.
+    is_resid_refiring: bool = getattr(goal, '_resid_marker', False)
+
     # Try arithmetic evaluation on the RHS (for A = 1+2 style)
     b_arith = _try_eval_arith_to_term(b_d, eng)
     if b_arith is not None:
+        # Expression fully evaluated — proceed to unify LHS with result.
+        # DROP rule: if this is a re-fire and LHS is still free AND both
+        # operands were independently evaluable (standard binary path, not
+        # a unary-minus fallthrough), Wild Life does NOT propagate the
+        # result back to LHS.  We detect this by checking if both args of
+        # the original b_d were independently evaluable (standard binary).
+        # Unary-minus fallthrough (A-B with A known, B free → -A) is
+        # identified by NOT both args being ok, and should PROCEED.
+        if is_resid_refiring:
+            a_d_check = a_d.deref()
+            a_d_is_free_check = (a_d_check.value is None and not a_d_check.attr_list)
+            if a_d_is_free_check:
+                # Check if standard binary evaluation (both args ok) → DROP.
+                # (Unary fallthrough: only one arg ok → PROCEED with result.)
+                arg1_bd, arg2_bd = _get_two_args(b_d)
+                if arg1_bd is not None and arg2_bd is not None:
+                    ok1_bd, _ = _eval_arith(arg1_bd, eng)
+                    ok2_bd, _ = _eval_arith(arg2_bd, eng)
+                    if ok1_bd and ok2_bd:
+                        return True  # DROP: both args known → standard binary, not unary
         b_d = b_arith
+    else:
+        # Arithmetic expression that couldn't be fully evaluated (has variables).
+        wl = eng.wl
+        b_sym = b_d.type.keyword.symbol if b_d.type and b_d.type.keyword else ''
+        if b_sym in _ARITH_OPS_SET:
+            # Check whether LHS is currently free (determines which rules apply).
+            a_d_cur = a_d.deref()
+            a_d_cur_is_free = (a_d_cur.value is None and not a_d_cur.attr_list)
+
+            # When an expression-variable fires the constraint (is_resid_refiring=True
+            # and LHS still free) and the LHS variable itself appears in the expression
+            # (self-referential), Wild Life drops the constraint immediately.
+            if is_resid_refiring and a_d_cur_is_free:
+                if _var_in_expr(a_d_cur, b_d, set()):
+                    return True  # DROP: self-referential when expression-var fires
+
+            # Identity simplification rules (e.g. X*1=X) are only applied when the
+            # LHS fires the constraint or during initial setup, NOT when a pure
+            # expression-variable fires.  Always-rules (0+X=X, X-0=X, 0*X=0) apply
+            # regardless of which variable triggered the wakeup.
+            allow_id = not (is_resid_refiring and a_d_cur_is_free)
+            b_simplified = _simplify_arith(b_d, eng, allow_identity=allow_id)
+            if b_simplified is not None:
+                # Simplification succeeded — recurse to handle the simplified form.
+                b_d = b_simplified
+                b_arith2 = _try_eval_arith_to_term(b_d, eng)
+                if b_arith2 is not None:
+                    b_d = b_arith2
+            else:
+                # No algebraic simplification — propagate real-sort constraints
+                # to all unbound variables in the expression and to a_d.
+                vars_in_expr: list = []
+                _collect_arith_vars(b_d, wl, vars_in_expr, set())
+                if vars_in_expr:
+                    a_d_final = a_d.deref()
+                    a_d_is_free = (a_d_final.value is None and not a_d_final.attr_list)
+
+                    if is_resid_refiring and a_d_is_free:
+                        # Expression-var fired, simplification failed → DROP.
+                        return True
+
+                    if not a_d_is_free:
+                        if not is_resid_refiring:
+                            # Initial setup with LHS already bound: just accept.
+                            return True
+                        # LHS fires: check whether the LHS var (via its bound value)
+                        # appears in the expression via coref chains.  This detects
+                        # self-referential constraints like B=A-B where the constraint
+                        # fires when B is bound (B appears in its own expression).
+                        if _var_in_expr(a_d_final, b_d, set()):
+                            return True  # DROP: self-referential (LHS var in expr)
+                        # is_resid_refiring, LHS bound, not self-ref: re-suspension
+                        # (G2) only when expression has exactly ONE unique free var.
+                        # With two or more free vars Wild Life drops the constraint.
+                        if len(vars_in_expr) > 1:
+                            return True  # DROP: too many free vars for LHS-fire G2
+
+                    from wild_life.data_structures import Goal, Residuation
+                    # Create one pending goal that represents the suspended constraint.
+                    # Store as PROVE of '=(a_d, b_d)' so that on wakeup it goes
+                    # through bi_unify (with arithmetic evaluation).
+                    eq_defn = getattr(wl, 'eqsym', None) or wl.syntax_module.symbol_table.get('=')
+                    eq_term = PsiTerm(type_def=eq_defn)
+                    eq_term.attr_list['1'] = a_d
+                    eq_term.attr_list['2'] = b_d
+                    # Tag as a residuated goal so future re-fires are identified.
+                    eq_term._resid_marker = True
+                    pending_goal = Goal(GoalType.PROVE, eq_term, None, None, pending=True)
+                    for v in vars_in_expr:
+                        _attach_arith_resid(v, wl, pending_goal, eng)
+                    if is_resid_refiring and not a_d_is_free:
+                        # G2 re-suspension: attach to the ORIGINAL LHS variable node
+                        # (not the bound value) so the tilde shows on the LHS variable.
+                        a_orig = a  # original arg from _get_two_args(goal), pre-deref
+                        if a_orig.resid is None:
+                            if eng is not None:
+                                eng.trail.trail_psi(a_orig, 'resid')
+                            a_orig.resid = [Residuation(goal=pending_goal)]
+                        else:
+                            if not any(r.goal is pending_goal for r in a_orig.resid):
+                                if eng is not None:
+                                    eng.trail.trail_copy(a_orig, 'resid')
+                                a_orig.resid.append(Residuation(goal=pending_goal))
+                    else:
+                        # Initial setup: constrain a_d (free) to real and attach.
+                        _attach_arith_resid(a_d_final, wl, pending_goal, eng)
+                    # The goal is now suspended — return True (constraint stored).
+                    return True
     # Try string function evaluation on RHS (psi2str, str2psi, strcon)
     b_str = _try_eval_string_func(b_d, eng)
     if b_str is not None:
@@ -2226,13 +2503,14 @@ def bi_children(goal: PsiTerm, eng) -> bool:
     defn = sort_term.type
     if defn is None:
         return _unify(eng, a2, wl.make_atom('[]', wl.user_module))
-    # Collect subtypes
+    # Use the Definition's own children list to avoid duplicates from aliases.
+    # Each Definition has a .children list populated by _make_type_link.
     children = []
-    for mod in wl._all_modules():
-        for sym_name, child_defn in mod.symbol_table.items():
-            if defn in getattr(child_defn, 'parents', []):
-                child_atom = wl.make_atom(sym_name, mod)
-                children.append(child_atom)
+    for child_defn in getattr(defn, 'children', []):
+        if child_defn.keyword is None:
+            continue
+        child_atom = wl.make_atom(child_defn.keyword.symbol, wl.bi_module)
+        children.append(child_atom)
     result_list = wl.make_list(children)
     return _unify(eng, a2, result_list)
 
