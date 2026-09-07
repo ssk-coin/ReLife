@@ -1659,27 +1659,78 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
             continue
 
         body_d2 = body_d.deref()
-        # Try arithmetic evaluation
-        ok_a, val = _eval_arith(body_d2, eng)
-        if ok_a:
-            return _make_number(eng, val)
-
-        # Try recursive user-function evaluation
-        if _is_user_function(body_d2):
-            inner = _eval_user_func_sync(body_d2, eng, _depth + 1)
-            if inner is not None:
-                return inner
-            # Body is a user function but can't eval synchronously — signal failure
-            # (don't return body_d2 as that would be a wrong replacement for t)
+        result = _eval_body_sync(body_d2, eng, _depth + 1)
+        if result is None and _is_user_function(body_d2):
+            # Body is a user function that can't eval synchronously
             return None
-
-        # Body is a compound with possible embedded user-function sub-terms
-        # (e.g. [X|app2(L1,L2)] where the tail is a recursive function call).
-        # Evaluate those sub-terms so the result is a fully-reduced term.
-        _eval_embedded_user_funcs(body_d2, eng, _depth + 1, set())
-        return body_d2
+        return result if result is not None else body_d2
 
     return None
+
+
+def _is_cond_builtin_local(t: 'PsiTerm') -> bool:
+    """Return True if t is the built-in cond(…) call."""
+    if t is None or t.type is None or t.type.keyword is None:
+        return False
+    if t.type.keyword.symbol != 'cond':
+        return False
+    return getattr(t.type, '_builtin_func', None) is not None
+
+
+def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
+    """Synchronously evaluate a function body expression.
+
+    Handles: arithmetic, user-defined function calls, built-in cond(C,T,E),
+    and compound terms with embedded user-function sub-terms.
+    Returns the evaluated PsiTerm or None if evaluation cannot proceed.
+    """
+    if _depth > 40:
+        return None
+
+    # Arithmetic expression?
+    ok_a, val = _eval_arith(body_d, eng)
+    if ok_a:
+        return _make_number(eng, val)
+
+    # User-defined function call?
+    if _is_user_function(body_d):
+        return _eval_user_func_sync(body_d, eng, _depth)
+
+    # Built-in cond(C, T, E) — evaluate functionally
+    if _is_cond_builtin_local(body_d):
+        args = list(body_d.attr_list.values()) if body_d.attr_list else []
+        if len(args) < 2:
+            return None
+        cond_g = args[0].deref()
+        then_g = args[1].deref()
+        else_g = args[2].deref() if len(args) >= 3 else None
+
+        from wild_life.inference import GoalType as _GT, _DEFRULES as _DR, _INNER_RUN_BARRIER as _IRB
+        mark_c = eng.trail.mark()
+        cp_save = eng.choice_stack
+        gs_save = eng.goal_stack
+        eng.goal_stack = None
+        eng.push_goal(_GT.PROVE, cond_g, _DR, None)
+        old_ok = eng.main_loop_ok
+        barrier = cp_save if cp_save is not None else _IRB
+        cond_ok = eng.run(cs_barrier=barrier)
+        eng.main_loop_ok = old_ok
+        eng.choice_stack = cp_save
+        eng.goal_stack = gs_save
+
+        if cond_ok:
+            branch = then_g.deref()
+        else:
+            eng.trail.undo_to(mark_c)
+            if else_g is None:
+                return None
+            branch = else_g.deref()
+
+        return _eval_body_sync(branch, eng, _depth + 1)
+
+    # Compound term: evaluate embedded user-function and cond sub-terms in-place
+    _eval_embedded_user_funcs(body_d, eng, _depth, set())
+    return body_d
 
 
 def _eval_embedded_user_funcs(
@@ -1704,6 +1755,12 @@ def _eval_embedded_user_funcs(
                 _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited)
             else:
                 _eval_embedded_user_funcs(child, eng, _depth + 1, visited)
+        elif _is_cond_builtin_local(child):
+            # Evaluate built-in cond(C, T, E) sub-terms in-place
+            evaled = _eval_body_sync(child, eng, _depth + 1)
+            if evaled is not None and evaled is not child:
+                td.attr_list[key] = evaled
+                _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited)
         elif child.attr_list:
             _eval_embedded_user_funcs(child, eng, _depth + 1, visited)
 
