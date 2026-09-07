@@ -46,14 +46,29 @@ class CutException(Exception):
 
 
 class AbortException(Exception):
-    """abort 例外"""
-    pass
+    """abort 例外
+
+    hook_called: True ならば aborthook が既に呼ばれ、改行なしで出力が終わっている。
+    その場合 main.py の例外ハンドラは余分な '\\n' を書かない。
+    """
+    def __init__(self, hook_called: bool = False):
+        self.hook_called = hook_called
 
 
 class HaltException(Exception):
     """halt 例外"""
     def __init__(self, code: int = 0):
         self.code = code
+
+
+class SortCycleException(Exception):
+    """ソート階層にサイクルが検出されたときに送出される例外。
+
+    cycle_path: サイクルを形成する Definition オブジェクトのリスト
+                (parent から child まで、child を末尾に含む)
+    """
+    def __init__(self, cycle_path: list):
+        self.cycle_path = cycle_path
 
 
 # ==================== トレイル (アンドゥスタック) ====================
@@ -77,6 +92,13 @@ class Trail:
         """PsiTerm のフィールドをトレイルに記録"""
         old_val = getattr(t, field)
         self._trail.append((t, field, old_val))
+
+    def trail_copy(self, obj, field: str):
+        """フィールドのシャローコピーをトレイルに記録 (リストなど可変オブジェクト用)"""
+        import copy
+        old_val = getattr(obj, field)
+        saved = copy.copy(old_val)
+        self._trail.append((obj, field, saved))
 
     def undo_to(self, mark: int):
         """mark 位置までトレイルを巻き戻す"""
@@ -156,6 +178,60 @@ def compute_glb(d1: Definition, d2: Definition) -> Optional[Definition]:
     return most_specific
 
 
+def compute_all_glbs(d1: Definition, d2: Definition) -> List[Definition]:
+    """2つの型の全ての最大下限 (GLB) を計算する。
+
+    単一の GLB しかない場合は1要素リストを返す。
+    複数の非比較可能なミニマルサブタイプがある場合は全てを返す。
+    共通サブタイプがなければ空リストを返す。
+
+    例: four_wheels と vehicle の GLB は [truck, car] の両方になりうる。
+    """
+    if d1 is d2:
+        return [d1]
+    if d1 is WL.top:
+        return [d2]
+    if d2 is WL.top:
+        return [d1]
+    if d1.is_subtype_of(d2):
+        return [d1]
+    if d2.is_subtype_of(d1):
+        return [d2]
+
+    # d1 の全サブタイプを収集 (children 方向に BFS)
+    d1_subs: set = set()
+    queue = list(d1.children)
+    while queue:
+        d = queue.pop(0)
+        if d not in d1_subs:
+            d1_subs.add(d)
+            queue.extend(d.children)
+
+    # d2 の全サブタイプの中で d1_subs に入っているものを探す
+    common = []
+    queue = list(d2.children)
+    visited: set = set()
+    while queue:
+        d = queue.pop(0)
+        if d not in visited:
+            visited.add(d)
+            if d in d1_subs:
+                common.append(d)
+            queue.extend(d.children)
+
+    if not common:
+        return []
+
+    # 最大下限 (GLB) の元を選ぶ: common の中で他の要素のサブタイプでないもの
+    # (より特殊な共通サブタイプが存在しない、つまり d1・d2 の直接の共通サブタイプ)
+    # 例: four_wheels & vehicle → [truck, car] (rolls_royce は car のサブタイプなので除外)
+    maximal: List[Definition] = []
+    for d in common:
+        if not any(other is not d and d.is_subtype_of(other) for other in common):
+            maximal.append(d)
+    return maximal
+
+
 def types_compatible(d1: Definition, d2: Definition) -> bool:
     """2つの型が単一化可能かどうか判定。
 
@@ -230,32 +306,50 @@ class Unifier:
         u_is_var = (u.type is WL.top and not u.attr_list and not u.resid)
         v_is_var = (v.type is WL.top and not v.attr_list and not v.resid)
 
-        # Sort-constrained function variables (X:sort where sort is a user-defined
-        # function) are treated as bindable variables — in LIFE, a sort-annotated
-        # variable can be bound once the sort's function produces a concrete value.
-        # We recognise them as variables when they have no concrete value and no attrs.
+        # Sort-constrained variables (X:sort — marked SORT_VAR by the parser, or
+        # X:ran where ran is a FUNCTION sort) are treated as bindable variables.
         if not u_is_var and not v_is_var:
-            from wild_life.data_structures import DefType, QUOTED_TRUE
-            if (u.value is None and not u.attr_list and not u.resid and
+            from wild_life.data_structures import DefType, QUOTED_TRUE, SORT_VAR
+            # SORT_VAR flag: set by parser for any X:sort syntax
+            if u.flags & SORT_VAR:
+                u_is_var = True
+            elif (u.value is None and not u.attr_list and not u.resid and
                     not (u.flags & QUOTED_TRUE) and
                     u.type is not None and u.type.type == DefType.FUNCTION and
                     u.type._builtin_func is None):
                 u_is_var = True
-            if (v.value is None and not v.attr_list and not v.resid and
+            if v.flags & SORT_VAR:
+                v_is_var = True
+            elif (v.value is None and not v.attr_list and not v.resid and
                     not (v.flags & QUOTED_TRUE) and
                     v.type is not None and v.type.type == DefType.FUNCTION and
                     v.type._builtin_func is None):
                 v_is_var = True
 
         if u_is_var:
-            # If u is a function-sort variable (type != WL.top) and v is a plain
+            # If u is a sort-constrained variable (type != WL.top) and v is a plain
             # top variable, bind v→u so that dereferencing v returns u (which
-            # retains its sort constraint).  This preserves sort information for
-            # later _is_user_function checks (e.g. pick_op(X':ran) unifying with
-            # the head parameter A1 of the rule body).
+            # retains its sort constraint).  For FUNCTION sorts this preserves sort
+            # information for _is_user_function checks; for regular SORT sorts it
+            # ensures the sort constraint is visible after binding.
+            from wild_life.data_structures import SORT_VAR as _SORT_VAR_FLAG
             u_is_fn_sort = (u.type is not WL.top)
+            u_is_sort_var = bool(u.flags & _SORT_VAR_FLAG)  # user X:sort annotation
             if u_is_fn_sort and v_is_var:
-                self.bind(v, u)   # v.coref = u; v.deref() = u (ran_def sort kept)
+                # u has a sort/function-sort constraint; v is a variable.
+                # If v also has a sort constraint (SORT_VAR), we must verify
+                # type compatibility — both sorts must have a common sub-sort.
+                if u_is_sort_var and (v.flags & _SORT_VAR_FLAG) and v.type is not WL.top:
+                    if not self._unify_types(u, v):
+                        return False
+                self.bind(v, u)   # v.coref = u; v.deref() = u (sort kept)
+                self._wakeup_resid(u, v)
+            elif u_is_sort_var and u_is_fn_sort and not v_is_var:
+                # Sort-constrained variable (X:sort) vs ground/non-variable term.
+                # Enforce the sort constraint: v's type must be a sub-sort of u's sort.
+                if not self._unify_types(u, v):
+                    return False
+                self.bind(u, v)
                 self._wakeup_resid(u, v)
             else:
                 self.bind(u, v)
@@ -266,7 +360,11 @@ class Unifier:
             # Eagerly evaluate pure arithmetic expressions to prevent deeply-nested
             # expression chains in recursive predicates like loop(N-1).
             # Only apply when u is a compound arithmetic op (not a function sort or var).
-            if self.engine is not None and not u_is_var:
+            # Skip if engine is in non-strict call context (engine.no_arith_eval=True).
+            from wild_life.data_structures import SORT_VAR as _SORT_VAR_FLAG
+            v_is_sort_var = bool(v.flags & _SORT_VAR_FLAG) and v.type is not WL.top
+            _skip_arith = getattr(self.engine, 'no_arith_eval', False) if self.engine else False
+            if self.engine is not None and not u_is_var and not _skip_arith:
                 _arith_ops = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
                                         'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
                 _sym = u.type.keyword.symbol if u.type and u.type.keyword else ''
@@ -281,6 +379,20 @@ class Unifier:
                             return True
                     except Exception:
                         pass
+            # Non-strict context: mark the arithmetic term so display doesn't evaluate it
+            if _skip_arith and u.type and u.type.keyword:
+                _sym2 = u.type.keyword.symbol
+                _arith_ops2 = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+                                         'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
+                if _sym2 in _arith_ops2:
+                    from wild_life.data_structures import NON_STRICT_TERM as _NST
+                    self.trail.trail_psi(u, 'flags')
+                    u.flags |= _NST
+            # Sort-constrained variable (v) vs ground/non-variable (u):
+            # enforce the sort constraint — u's type must be a sub-sort of v's sort.
+            if v_is_sort_var:
+                if not self._unify_types(v, u):
+                    return False
             self.bind(v, u)
             self._wakeup_resid(v, u)
             return True
@@ -320,6 +432,19 @@ class Unifier:
         if not self._unify_attrs(u, v):
             return False
 
+        # After successful structural unification, merge the two psi-terms by
+        # binding v → u (via coref).  This preserves the sharing relationship
+        # so that print_variables can detect when two variables refer to the
+        # same canonical term and show e.g. "Y = X" instead of "Y = !".
+        # Only do this for non-numeric atoms (numbers are primitive values that
+        # should remain separate; ChoicePoint values in '!' terms are OK to merge).
+        from wild_life.data_structures import ChoicePoint as _CP_merge
+        _u_prim = isinstance(u.value, (int, float, str)) if u.value is not None else False
+        _v_prim = isinstance(v.value, (int, float, str)) if v.value is not None else False
+        if not _u_prim and not _v_prim and v.coref is None:
+            # Bind v → u so deref(v) returns u (the canonical psi-term).
+            self.bind(v, u)
+
         return True
 
     def _unify_types(self, u: PsiTerm, v: PsiTerm) -> bool:
@@ -354,29 +479,56 @@ class Unifier:
 
         # 直交した型 (どちらもサブタイプでない) → 互換性チェック
         # ユーザー定義の共通サブタイプがあれば GLB が存在する
-        glb = compute_glb(du, dv)
-        if glb is None:
+        if self.engine is not None:
+            glbs = compute_all_glbs(du, dv)
+        else:
+            _g = compute_glb(du, dv)
+            glbs = [_g] if _g is not None else []
+
+        if not glbs:
             return False            # 共通サブタイプなし → 型が非互換
 
-        # 共通サブタイプが見つかった → 両方の型を GLB に制約
+        # 複数の GLB がある場合: バックトラック用チョイスポイントを積む
+        # (最初の GLB で進め、残りをチョイスポイントとして積む)
+        if len(glbs) > 1 and self.engine is not None:
+            for alt_glb in reversed(glbs[1:]):
+                alt_psi = PsiTerm(type_def=alt_glb)
+                self.engine.push_choice_point(GoalType.UNIFY, u, alt_psi, None)
+
+        # 最初の GLB で進める
+        glb = glbs[0]
         self.bind_type(u, glb)
         self.bind_type(v, glb)
         return True
 
     def _unify_values(self, u: PsiTerm, v: PsiTerm) -> bool:
         """値 (数値・文字列) を単一化する"""
+        # ChoicePoint values are cut-barrier references stored in '!' (cut)
+        # psi-terms for execution semantics only.  Two cut atoms are always
+        # equal regardless of their stored cut points; skip value comparison.
+        from wild_life.data_structures import ChoicePoint as _CP
+        u_cp = isinstance(u.value, _CP)
+        v_cp = isinstance(v.value, _CP)
+
         # 両方が値を持つ場合は等値チェック
         if u.value is not None and v.value is not None:
+            # Both are ChoicePoint references → cut atoms are structurally equal
+            if u_cp and v_cp:
+                return True
             if isinstance(u.value, (int, float)) and isinstance(v.value, (int, float)):
                 return float(u.value) == float(v.value)
             return u.value == v.value
 
         # 片方だけが値を持つ場合
         if u.value is not None and v.value is None:
-            self.bind_value(v, u.value)
+            # Don't propagate a ChoicePoint cut-point to v — cut atoms share
+            # the same sort and that is enough for structural equality.
+            if not u_cp:
+                self.bind_value(v, u.value)
             return True
         if v.value is not None and u.value is None:
-            self.bind_value(u, v.value)
+            if not v_cp:
+                self.bind_value(u, v.value)
             return True
 
         return True  # 両方 None
@@ -424,10 +576,34 @@ class Unifier:
         """残留ゴールを覚醒させる
         変数が束縛されたときに呼ばれる
         C版の wakeup() に対応
+
+        pending=True のゴールをエンジンのゴールスタックに再投入する。
+        同一ゴールオブジェクトを複数回投入しないよう管理する。
         """
-        # 残留ゴールは inference.py の実行エンジンが処理する
-        # ここではフラグを設定するだけ
-        pass
+        if var.resid is None:
+            return
+        if self.engine is None:
+            return
+
+        # Collect unique pending goals (by object identity)
+        seen_goals: set = set()
+        goals_to_wake = []
+        for r in var.resid:
+            g = getattr(r, 'goal', None)
+            if g is not None and getattr(g, 'pending', False):
+                gid = id(g)
+                if gid not in seen_goals:
+                    seen_goals.add(gid)
+                    goals_to_wake.append(g)
+
+        # Mark pending goals as no longer pending (they will be re-evaluated)
+        # and push them back onto the goal stack.
+        # IMPORTANT: trail the pending flag change so that on backtrack the
+        # goal becomes pending again and can be re-awakened next time.
+        for g in goals_to_wake:
+            self.trail.trail_psi(g, 'pending')  # restore pending=True on backtrack
+            g.pending = False
+            self.engine.push_goal(g.type, g.a, g.b, g.c)
 
     def unify_noeval(self, u: PsiTerm, v: PsiTerm) -> bool:
         """評価なしの単一化
@@ -484,7 +660,34 @@ def copy_term(t: PsiTerm, var_map: Optional[Dict[int, PsiTerm]] = None) -> PsiTe
     if var_map is None:
         var_map = {}
 
+    # Sort-constrained variable (X:sort — marked with SORT_VAR flag by the parser).
+    # The tokenizer creates a fresh proxy token for each occurrence of X (tok.coref = stored_X),
+    # so the SORT_VAR flag ends up on stored_X (the deref target), not on the proxy token.
+    # We check SORT_VAR both BEFORE and AFTER deref so all occurrences of X share the
+    # same copy regardless of whether they come via a proxy token or a direct reference.
+    # In both cases, key the var_map by id(stored_X) so all occurrences converge.
+    from wild_life.data_structures import SORT_VAR
+    if t.flags & SORT_VAR:
+        tid = id(t)
+        if tid not in var_map:
+            new_var = PsiTerm()
+            new_var.type = t.type  # same sort constraint
+            new_var.flags = t.flags
+            var_map[tid] = new_var
+        return var_map[tid]
+
     t = t.deref()
+
+    # Post-deref SORT_VAR check: handles proxy tokens (tok.coref = stored_X)
+    # where the SORT_VAR flag is on stored_X, not on tok.
+    if t.flags & SORT_VAR:
+        tid = id(t)
+        if tid not in var_map:
+            new_var = PsiTerm()
+            new_var.type = t.type
+            new_var.flags = t.flags
+            var_map[tid] = new_var
+        return var_map[tid]
 
     # 変数 (未束縛 top)
     if t.type is WL.top and not t.attr_list and not t.resid:
@@ -492,20 +695,6 @@ def copy_term(t: PsiTerm, var_map: Optional[Dict[int, PsiTerm]] = None) -> PsiTe
         if tid not in var_map:
             new_var = PsiTerm()
             new_var.type = WL.top
-            var_map[tid] = new_var
-        return var_map[tid]
-
-    # Sort-constrained function variable (X:ran where ran is DefType.FUNCTION)
-    # These must be copied as fresh constrained variables, not as constants.
-    if (t.value is None and not t.attr_list and not t.resid and
-            t.type is not None and t.type is not WL.top and
-            t.type.type == DefType.FUNCTION and t.type._builtin_func is None and
-            not (t.flags & 1)):  # not QUOTED_TRUE
-        tid = id(t)
-        if tid not in var_map:
-            new_var = PsiTerm()
-            new_var.type = t.type  # same sort constraint
-            new_var.flags = t.flags
             var_map[tid] = new_var
         return var_map[tid]
 
@@ -519,7 +708,16 @@ def copy_term(t: PsiTerm, var_map: Optional[Dict[int, PsiTerm]] = None) -> PsiTe
         return result
 
     # 複合項
+    # Preserve structural sharing: if the same Python object appears at
+    # multiple positions in a rule (e.g. an empty sort-typed term X:sort
+    # acting as a shared variable, or any shared sub-structure), all
+    # occurrences must map to the SAME fresh copy.  Register the result in
+    # var_map *before* recursing so that circular structures are also safe.
+    tid = id(t)
+    if tid in var_map:
+        return var_map[tid]
     result = PsiTerm()
+    var_map[tid] = result  # register before recursing
     result.type = t.type
     result.value = t.value
     result.flags = t.flags

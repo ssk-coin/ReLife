@@ -116,7 +116,7 @@ def run_repl(
     from wild_life.built_ins import register_all
     from wild_life.inference import Engine
     from wild_life.parser_ import parse_string
-    from wild_life.unification import HaltException, AbortException
+    from wild_life.unification import HaltException, AbortException, SortCycleException
     from wild_life.data_structures import QUERY, FACT, ERROR
 
     # ---- Initialise runtime (modules, types, operators) --------------------
@@ -193,11 +193,13 @@ def run_repl(
     # ---- Main REPL ---------------------------------------------------------
     # No initial prompt — the first output comes from the load or the first query.
     exit_code = 0
+    repl_line_number = 0   # running line counter for error messages
 
     while True:
         try:
             try:
                 line = input()
+                repl_line_number += 1
             except EOFError:
                 # Print a final newline so the last prompt ends cleanly.
                 sys.stdout.write("\n")
@@ -301,8 +303,18 @@ def run_repl(
                 continue
 
             # ---- Parse the input ------------------------------------------
+            # Build inherited variable scope from all active frames so that
+            # variables with matching names in a nested query reuse the
+            # same psi-term objects as their outer-query counterparts.
+            inherited = {}
+            if depth > 0:
+                for f in frame_stack:
+                    if f.var_tree:
+                        inherited.update(f.var_tree)
             try:
-                term, sort, var_tree = parse_string(line_stripped)
+                term, sort, var_tree = parse_string(line_stripped,
+                                                    line_num=repl_line_number,
+                                                    inherited_vars=inherited if inherited else None)
             except Exception as exc:
                 sys.stderr.write(f"Parse error: {exc}\n")
                 _write_prompt(depth)
@@ -312,8 +324,23 @@ def run_repl(
                 _write_prompt(depth)
                 continue
 
-            # EOF sentinel from parser
+            # EOF sentinel from parser (actual end-of-stream)
             if hasattr(term, 'type') and term.type is not None and term.type is WL.eof:
+                break
+
+            # end_of_file atom as a fact/declaration also terminates the session.
+            # In Wild Life, writing 'end_of_file.' in the input stream terminates
+            # the interactive session just like an actual EOF.
+            if (sort == FACT and
+                    hasattr(term, 'type') and
+                    term.type is not None and
+                    getattr(term.type, 'keyword', None) is not None and
+                    getattr(term.type.keyword, 'symbol', None) == 'end_of_file' and
+                    not term.attr_list and term.value is None):
+                # If we're inside nested queries, print *** No before terminating
+                if depth > 0:
+                    sys.stdout.write("\n*** No\n")
+                    sys.stdout.write("\n")
                 break
 
             if sort == ERROR:
@@ -338,11 +365,15 @@ def run_repl(
                     success = engine.prove(term, cs_barrier=cs_before)
                 except HaltException:
                     return 0
-                except AbortException:
+                except AbortException as _ae:
                     engine.goal_stack = None
                     engine.trail.undo_to(pre_mark)
                     engine.choice_stack = cs_before
-                    sys.stdout.write("\n")
+                    # When the aborthook ran it already wrote its output (ending
+                    # with a newline), so we skip the leading '\n' to keep the
+                    # next prompt on its own line without an extra blank line.
+                    if not _ae.hook_called:
+                        sys.stdout.write("\n")
                     _write_prompt(depth)
                     continue
                 except KeyboardInterrupt:
@@ -363,10 +394,20 @@ def run_repl(
                     engine.noisy = saved_noisy
 
                 if success:
-                    # Detect new choice points: cs_before was None and now it's not,
-                    # or cs_before was a node and now there are more nodes above it.
-                    has_new_choices = (engine.choice_stack is not None and
-                                       engine.choice_stack is not cs_before)
+                    # Detect new PROVE/UNIFY choice points above cs_before.
+                    # EVAL choice points (from function rule alternatives) are
+                    # implementation details — they don't represent interactive
+                    # backtracking alternatives the user would want to explore.
+                    from wild_life.data_structures import GoalType as _GoalType
+                    _EVAL_TYPES = (_GoalType.EVAL, _GoalType.EVAL_CUT)
+                    _cp = engine.choice_stack
+                    has_new_choices = False
+                    while _cp is not None and _cp is not cs_before:
+                        if (_cp.goal_stack is not None and
+                                _cp.goal_stack.type not in _EVAL_TYPES):
+                            has_new_choices = True
+                            break
+                        _cp = _cp.next
                     # Check if the CURRENT QUERY has own named variables
                     # (not just inherited from parent frames)
                     own_bindings_str = _format_bindings(var_tree, engine)
@@ -409,9 +450,13 @@ def run_repl(
             # ---- Fact / rule: assert into database ------------------------
             elif sort == FACT:
                 try:
-                    engine.assert_first = False
                     engine.assert_clause(term)
                     sys.stdout.write("\n*** Yes\n")
+                except SortCycleException:
+                    # Sort cycle detected interactively: error already written to
+                    # stderr by _assert_type.  Do NOT output *** Yes/No or a prompt;
+                    # just silently continue to the next input line.
+                    continue
                 except HaltException:
                     return 0
                 except Exception as exc:

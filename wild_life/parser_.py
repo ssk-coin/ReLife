@@ -57,10 +57,14 @@ class Parser:
     C版の parser.c の関数群をクラスにまとめたもの
     """
 
-    def __init__(self, tokenizer: TokenizerState):
+    def __init__(self, tokenizer: TokenizerState,
+                 inherited_vars: dict = None):
         self.ts = tokenizer          # トークナイザ
         self.stack: List[StackEntry] = []  # パーサスタック
         self.parse_ok: bool = True   # パースエラーフラグ
+        # Variable bindings to inherit from outer query scopes.
+        # Set after init_var_tree() in parse() so they survive the reset.
+        self._inherited_vars: dict = inherited_vars or {}
 
         if not WL._initialized:
             init()
@@ -165,18 +169,22 @@ class Parser:
                     # a1 が未束縛変数 -> sort 制約を設定する
                     # a2 が具体的な型定義を持つ場合は、a1.type にその型を設定する
                     # (coref ではなく type を設定することで copy_term が新しい変数を作れる)
-                    from wild_life.data_structures import DefType
+                    from wild_life.data_structures import DefType, SORT_VAR
                     if (a2.type is not None and a2.type is not WL.top and
                             a2.value is None and not a2.attr_list and not a2.resid and
-                            a2.type.type == DefType.FUNCTION):
-                        # sort-annotated variable: X:ran -> set a1.type = ran_def
+                            a2.type.type in (DefType.FUNCTION, DefType.TYPE)):
+                        # sort-annotated variable: X:ran or X:s1 -> set a1.type = sort_def
+                        # Mark a1 with SORT_VAR so copy_term/unify can distinguish it
+                        # from a ground term of the same sort (e.g. the constant `a`
+                        # when `a <| s1` is declared).
                         a1.type = a2.type
+                        a1.flags |= SORT_VAR
                         result = arg1
                         result.attr_list = {}
                         result.resid = None
                         return result
                     else:
-                        # 通常の束縛 (not a function sort)
+                        # 通常の束縛 (not a sort)
                         a1.coref = arg2
                         result = arg1
                         result.attr_list = {}
@@ -462,9 +470,11 @@ class Parser:
         重複特性はエラー
         """
         if key in attr_list:
+            line = self.ts.line_count
             sys.stderr.write(
-                f"*** Syntax error: duplicate feature {key}\n"
+                f"*** Syntax error: duplicate feature {key} (near line {line})\n"
             )
+            self.parse_ok = False
         else:
             attr_list[key] = psi
 
@@ -621,6 +631,10 @@ class Parser:
         self.stack = []
         self.parse_ok = True
         self.ts.init_var_tree()
+        # Inherit variable bindings from outer query scopes AFTER init_var_tree()
+        # so that same-named variables in nested queries reuse existing psi-terms.
+        if self._inherited_vars:
+            self.ts.var_tree.update(self._inherited_vars)
 
         # 式を読む
         s = self.read_life_form(None, None)
@@ -665,11 +679,16 @@ class Parser:
 
 # ==================== 文字列からパース ====================
 
-def parse_string(s: str) -> Tuple[Optional[PsiTerm], int, dict]:
+def parse_string(s: str, line_num: int = 0,
+                 inherited_vars: dict = None) -> Tuple[Optional[PsiTerm], int, dict]:
     """文字列を LIFE 項としてパースする
 
     Args:
         s: パースする文字列 (例: "f(X,Y)?")
+        line_num: REPL の行番号 (0 = unknown). エラーメッセージに "near line N" として使う.
+        inherited_vars: {変数名: PsiTerm} — 既存のスコープから継承する変数マップ.
+            これが与えられると, 同名の変数は既存の PsiTerm を再利用する (nested-query
+            変数共有). None の場合は従来通り全変数を新規作成する.
 
     Returns:
         (parsed_term, kind, var_tree)
@@ -682,12 +701,50 @@ def parse_string(s: str) -> Tuple[Optional[PsiTerm], int, dict]:
     from wild_life.tokenizer import tokenizer_from_string
     from wild_life.data_structures import ERROR
 
-    ts = tokenizer_from_string(s)
-    p = Parser(ts)
+    ts = tokenizer_from_string(s, line_num=line_num)
+    # Pass inherited_vars to the Parser so that variables with matching
+    # names in a nested query reuse the existing psi-term objects.
+    # (The Parser sets them AFTER init_var_tree() in its parse() call.)
+    p = Parser(ts, inherited_vars=inherited_vars)
     term, kind = p.parse()
-    var_tree = dict(ts.var_tree)   # パース後に変数マップを保存
     if not p.parse_ok:
         return None, ERROR, {}
+    # Return only variables that were ACTUALLY USED in the parsed text.
+    # Inherited vars that were pre-populated but not referenced in this query
+    # should NOT be included, or every query at depth>0 would appear to have
+    # own variable bindings (even "gc?" with no variables in the source).
+    full_var_tree = dict(ts.var_tree)
+    if inherited_vars:
+        # Only keep vars that were not pure pass-throughs from inherited_vars.
+        # A var was "used" in the current query if:
+        #   (a) it was NOT in inherited_vars (newly created), or
+        #   (b) it was in inherited_vars AND was referenced (same PsiTerm object)
+        # Since inherited vars are referenced by the same PsiTerm object, we can
+        # distinguish: a var is "own" if its name was actually scanned in the input.
+        # The tokenizer only adds to var_tree when it scans a variable token, so
+        # every entry in var_tree was scanned.  But we pre-populated with inherited,
+        # so we need the set of vars scanned FROM THE INPUT TEXT specifically.
+        # Track this via the set of names that appear in the parsed text.
+        own_var_tree = {k: v for k, v in full_var_tree.items()
+                        if k not in inherited_vars}
+        # Also include vars that appear in inherited_vars AND were scanned in the
+        # current query.  The tokenizer only adds a var to var_tree when it's
+        # actually encountered while scanning, so any var present in the post-parse
+        # var_tree that was also in inherited_vars was indeed referenced in the text.
+        # However, we pre-populated var_tree with ALL inherited vars at init time,
+        # so all inherited vars appear even if not referenced.  To filter, check
+        # whether the variable name appears literally in the source string.
+        import re as _re
+        # Collect all identifiers that look like variable names (start with uppercase
+        # or _) in the source string.
+        var_pattern = _re.compile(r'\b([A-Z_][A-Za-z0-9_]*)\b')
+        referenced_names = set(var_pattern.findall(s))
+        for k, v in full_var_tree.items():
+            if k in inherited_vars and k in referenced_names:
+                own_var_tree[k] = v
+        var_tree = own_var_tree
+    else:
+        var_tree = full_var_tree
     return term, kind, var_tree
 
 

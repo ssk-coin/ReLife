@@ -565,14 +565,20 @@ def tokenizer_from_file(filename: str) -> TokenizerState:
     return TokenizerState(f, filename)
 
 
-def tokenizer_from_string(s: str) -> TokenizerState:
-    """文字列からトークナイザを作成"""
+def tokenizer_from_string(s: str, line_num: int = 0) -> TokenizerState:
+    """文字列からトークナイザを作成
+
+    Args:
+        s: パースする文字列
+        line_num: REPL の行番号 (0 = unknown). エラーメッセージに "near line N" として使う.
+    """
     if not WL._initialized:
         init()
     ts = TokenizerState(sys.stdin, "<string>")
     ts.string_parse = True
     ts.string_input = s
     ts.string_pos = 0
+    ts.line_count = line_num   # REPL の行番号を反映させる
     return ts
 
 

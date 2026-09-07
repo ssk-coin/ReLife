@@ -12,10 +12,165 @@ from wild_life.data_structures import (
     PsiTerm, Definition, OperatorType
 )
 
-PRINT_DEPTH = 10
+PRINT_DEPTH = 200   # max nesting depth; list length is unlimited
 MAX_PRECEDENCE = 1200
+MAX_COL = 79        # column limit for line wrapping
 
 DOTDOT = ": "
+
+import math as _math
+
+def _eval_pure_arith(t: 'PsiTerm', wl, _depth: int = 0):
+    """Evaluate a pure constant arithmetic expression.
+
+    Returns a float value if t is a ground arithmetic expression (no free
+    variables), or None if evaluation is not possible.  This is used when
+    printing binding values so that ``X:(1+2)`` displays as ``X = 3``.
+    Only evaluated when the full engine is unavailable.
+    """
+    if t is None or _depth > 30:
+        return None
+    t = t.deref()
+    if t is None:
+        return None
+    # Concrete numeric value
+    if t.value is not None and t.type is not None:
+        if wl and t.type.is_subtype_of(wl.real):
+            return float(t.value)
+    # Unbound variable or non-numeric term
+    sym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+    if not sym or not t.attr_list:
+        return None
+
+    def _arg(n):
+        a = t.attr_list.get(n)
+        if a is None:
+            return None
+        return _eval_pure_arith(a.deref(), wl, _depth + 1)
+
+    v1 = _arg('1')
+    v2 = _arg('2')
+
+    _ops2 = {
+        '+': lambda a, b: a + b,
+        '-': lambda a, b: a - b,
+        '*': lambda a, b: a * b,
+        '/': lambda a, b: a / b if b != 0 else None,
+        '//': lambda a, b: float(int(a) // int(b)) if b != 0 else None,
+        'mod': lambda a, b: float(int(a) % int(b)) if b != 0 else None,
+        '**': lambda a, b: a ** b,
+        '^': lambda a, b: a ** b,
+        'max': lambda a, b: max(a, b),
+        'min': lambda a, b: min(a, b),
+    }
+    if sym in _ops2 and v1 is not None and v2 is not None:
+        try:
+            r = _ops2[sym](v1, v2)
+            return float(r) if r is not None else None
+        except Exception:
+            return None
+
+    _ops1 = {
+        '-': lambda a: -a,
+        'abs': lambda a: abs(a),
+        'sqrt': lambda a: _math.sqrt(a),
+        'floor': lambda a: float(_math.floor(a)),
+        'ceiling': lambda a: float(_math.ceil(a)),
+        'round': lambda a: float(round(a)),
+        'truncate': lambda a: float(_math.trunc(a)),
+        'exp': lambda a: _math.exp(a),
+        'log': lambda a: _math.log(a),
+        'sin': lambda a: _math.sin(a),
+        'cos': lambda a: _math.cos(a),
+        'tan': lambda a: _math.tan(a),
+    }
+    if sym in _ops1 and v1 is not None:
+        try:
+            return float(_ops1[sym](v1))
+        except Exception:
+            return None
+
+    # strlen(String) → length as integer
+    if sym == 'strlen':
+        a = t.attr_list.get('1')
+        if a is None:
+            return None
+        ad = a.deref()
+        if ad.value is not None and ad.type is not None and wl:
+            if ad.type.is_subtype_of(wl.quoted_string):
+                return float(len(str(ad.value)))
+        return None
+
+    return None
+
+def _eval_pure_string(t: 'PsiTerm', wl, _depth: int = 0):
+    """Evaluate a ground string function call during printing.
+
+    Returns a str value if all arguments are concrete, or None if evaluation
+    is not possible (unbound variables, etc.). Handles strcon, substr, strlen.
+    """
+    if t is None or _depth > 10:
+        return None
+    t = t.deref()
+    if t is None:
+        return None
+
+    # Concrete string value
+    if t.value is not None and t.type is not None and wl:
+        if t.type.is_subtype_of(wl.quoted_string):
+            return str(t.value)
+
+    sym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+    if not sym or not t.attr_list:
+        return None
+
+    def _str_arg(n):
+        """Recursively evaluate argument n as a string."""
+        a = t.attr_list.get(n)
+        if a is None:
+            return None
+        return _eval_pure_string(a.deref(), wl, _depth + 1)
+
+    def _num_arg(n):
+        """Evaluate argument n as a number (integer)."""
+        a = t.attr_list.get(n)
+        if a is None:
+            return None
+        a = a.deref()
+        if a.value is not None and a.type is not None and a.type.is_subtype_of(wl.real):
+            return a.value
+        # Try pure arith
+        v = _eval_pure_arith(a, wl)
+        return v
+
+    if sym == 'strcon':
+        s1 = _str_arg('1')
+        s2 = _str_arg('2')
+        if s1 is None or s2 is None:
+            return None
+        return s1 + s2
+
+    if sym == 'substr':
+        s = _str_arg('1')
+        start_v = _num_arg('2')
+        length_v = _num_arg('3')
+        if s is None or start_v is None or length_v is None:
+            return None
+        start = int(start_v) - 1  # 1-indexed to 0-indexed
+        length = int(length_v)
+        if start < 0:
+            start = 0
+        return s[start:start + length] if start < len(s) else ''
+
+    if sym == 'strlen':
+        s = _str_arg('1')
+        if s is None:
+            return None
+        # Note: strlen returns an integer, not a string - handled separately
+        return None  # Don't handle here; strlen returns int, not string
+
+    return None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Character classification helpers (mirror of print.c's helpers)
@@ -38,7 +193,7 @@ _SINGLE_CHARS = set("!;,|[]{}()")
 def _is_single(c: str) -> bool:
     return c in _SINGLE_CHARS
 
-_SYMBOL_CHARS = set("#&*+-./:<=>?@\\^`~")
+_SYMBOL_CHARS = set("#&*+-./:<=>?@\\^`~|")
 
 def _is_symbol(c: str) -> bool:
     return c in _SYMBOL_CHARS
@@ -89,6 +244,12 @@ class PrintState:
         self.printed_pointers: Dict[int, str] = {}
         # Buffer for indenting mode
         self._buf: List[str] = []
+        # Column tracking for line-wrapping
+        self.col: int = 0
+        self.max_col: int = MAX_COL
+        # When True, suppress arithmetic evaluation during printing
+        # (set inside backtick-quoted term contexts)
+        self.no_arith_eval: bool = False
 
     # ─── output helpers ────────────────────────────────────────────────────
 
@@ -97,6 +258,12 @@ class PrintState:
             self._buf.append(s)
         else:
             self.outfile.write(s)
+        # Track column position
+        nl = s.rfind('\n')
+        if nl >= 0:
+            self.col = len(s) - nl - 1
+        else:
+            self.col += len(s)
 
     def flush(self) -> None:
         if self.indent:
@@ -120,9 +287,14 @@ class PrintState:
         return '_' + ''.join(reversed(parts))
 
     def _unique_name(self, var_tree: dict) -> str:
+        # Collect all names already in use (from var_tree AND from pointer_names)
+        used = set(var_tree.keys())
+        for v in self.pointer_names.values():
+            if v and v != 'SHARED':
+                used.add(v)
         while True:
             name = self._nice_name()
-            if name not in var_tree:
+            if name not in used:
                 return name
 
     def go_through(self, t: 'PsiTerm', var_tree: dict = None) -> None:
@@ -155,12 +327,54 @@ class PrintState:
                     self.pointer_names[tid] = name
 
     def forbid_variables(self, var_tree: dict) -> None:
-        """Pre-register top-level variables in printed_pointers."""
-        for name, pterm in var_tree.items():
+        """Pre-register top-level variables in printed_pointers.
+
+        For each shared psi-term, register the alphabetically FIRST variable
+        name so that later variables can display as aliases (e.g. 'C = B').
+
+        We skip variables that were directly bound to a concrete value (their
+        coref's value is not None) UNLESS some other query variable has its
+        coref pointing at them — in that case, the concrete-bound variable is
+        the "canonical owner" for the alias and must be registered so that the
+        aliasing variable can display e.g. "C = B".
+
+        This handles the important distinction:
+          - A=B*A? A=1? → both A and B are bound independently to the same
+            concrete node.  Neither aliases the other; both should print "1".
+          - A=B+C? B=C? A=23? → C was unified with B (C.coref = B).  B then
+            gets bound to 11.5.  C should print as "B" (alias), not "11.5".
+        """
+        var_id_set = {id(pterm)
+                      for pterm in var_tree.values()
+                      if pterm is not None}
+        # Find which query-variable nodes are directly aliased-to by another
+        # query variable (i.e. some other var's coref points at them).
+        aliased_to: set = set()
+        for pterm in var_tree.values():
+            if pterm is not None:
+                coref = getattr(pterm, 'coref', None)
+                if coref is not None and id(coref) in var_id_set:
+                    aliased_to.add(id(coref))
+
+        for name in sorted(var_tree.keys()):
+            pterm = var_tree.get(name)
             if pterm is None:
                 continue
+            coref = getattr(pterm, 'coref', None)
+            pid = id(pterm)
+            # Skip variables directly bound to a concrete value when no other
+            # query variable aliases to them.  They will print their concrete
+            # value directly, without registering an alias entry.
+            if (coref is not None
+                    and coref.value is not None
+                    and pid not in aliased_to):
+                continue
             t = pterm.deref()
-            self.printed_pointers[id(t)] = name
+            tid = id(t)
+            # Only register if not yet registered (sorted order ensures first
+            # (alphabetically) variable wins for each shared psi-term)
+            if tid not in self.printed_pointers:
+                self.printed_pointers[tid] = name
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -378,63 +592,165 @@ def _check_legal_cons(t: 'PsiTerm', t_type) -> bool:
 
 
 def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
-    """Pretty-print a list or disjunction."""
+    """Pretty-print a list or disjunction with column-aware wrapping.
+
+    If the entire list fits on the current line (col + flat_length <= max_col),
+    it is printed inline.  Otherwise each element is placed on its own line,
+    indented to align with the first element (one past the opening bracket).
+    """
+    import io
+
     t_type = t.type
 
     if t_type == wl.alist or (wl.alist and t_type and
             t_type.is_subtype_of(wl.alist)):
-        if t_type != wl.alist:
-            _print_symbol(ps, t_type.keyword)
-            ps.write(DOTDOT)
-        ps.write("[")
-        sep = ","
-        end = "]"
+        prefix_str = '' if t_type == wl.alist else (t_type.keyword.symbol + ': ')
+        open_br, sep, close_br = '[', ',', ']'
     elif t_type == wl.disjunction:
-        ps.write("{")
-        sep = ";"
-        end = "}"
+        prefix_str = ''
+        open_br, sep, close_br = '{', ';', '}'
     else:
-        ps.write("[")
-        sep = ","
-        end = "]"
+        prefix_str = ''
+        open_br, sep, close_br = '[', ',', ']'
 
-    list_depth = 0
-    done = False
-    while not done:
-        if list_depth == ps.print_depth:
-            ps.write("...")
-        arg1, arg2 = _get_two_args(t.attr_list)
-        if arg1:
-            arg1 = arg1.deref()
-        if arg2:
-            arg2 = arg2.deref()
+    # Column where the opening bracket will land
+    indent_col = ps.col + len(prefix_str) + 1  # align with first element
 
-        if list_depth < ps.print_depth:
-            _pretty_tag_or_psi_term(ps, arg1, 999, depth)
+    # ── helper: iterate over list nodes ───────────────────────────────────────
+    def _iter_list(start):
+        """Yield (arg1, arg2, is_tail) tuples; is_tail=True for the last arg2."""
+        cur = start
+        list_depth = 0
+        while True:
+            if list_depth >= ps.print_depth:
+                yield None, None, True   # sentinel for "..."
+                return
+            arg1, arg2 = _get_two_args(cur.attr_list)
+            if arg1: arg1 = arg1.deref()
+            if arg2: arg2 = arg2.deref()
+            tid2 = id(arg2) if arg2 is not None else None
+            if arg2 is None:
+                yield arg1, None, True
+                return
+            if tid2 in ps.pointer_names and ps.pointer_names[tid2]:
+                yield arg1, arg2, True   # improper list with named tail
+                return
+            if (arg2.type == wl.nil and not arg2.attr_list) or \
+               (arg2.type == wl.disj_nil and not arg2.attr_list):
+                yield arg1, None, True
+                return
+            if not _check_legal_cons(arg2, t_type):
+                yield arg1, arg2, True   # improper list
+                return
+            yield arg1, None, False
+            cur = arg2
+            list_depth += 1
 
+    # ── flat rendering into a buffer ──────────────────────────────────────────
+    flat_buf = io.StringIO()
+    flat_ps = PrintState(outfile=flat_buf)
+    flat_ps.print_depth = ps.print_depth
+    flat_ps.const_quote = ps.const_quote
+    flat_ps.write_resids = ps.write_resids
+    flat_ps.pointer_names = ps.pointer_names
+    flat_ps.printed_pointers = dict(ps.printed_pointers)
+    flat_ps.col = ps.col + len(prefix_str)  # column just before '['
+    flat_ps.max_col = 10_000                # suppress inner wrapping during probe
+
+    if prefix_str:
+        flat_ps.write(prefix_str)
+    flat_ps.write(open_br)
+
+    # Re-iterate the original term for flat rendering
+    cur = t
+    list_depth_f = 0
+    first_f = True
+    done_f = False
+    t_walk = t
+    while not done_f:
+        if list_depth_f >= ps.print_depth:
+            flat_ps.write("...")
+            done_f = True
+            break
+        arg1, arg2 = _get_two_args(t_walk.attr_list)
+        if arg1: arg1 = arg1.deref()
+        if arg2: arg2 = arg2.deref()
+        if not first_f:
+            flat_ps.write(sep)
+        first_f = False
+        _pretty_tag_or_psi_term(flat_ps, arg1, 999, depth)
         if arg2 is None:
-            done = True
+            done_f = True
+        else:
+            tid2 = id(arg2)
+            if tid2 in flat_ps.pointer_names and flat_ps.pointer_names[tid2]:
+                flat_ps.write("|")
+                _pretty_tag_or_psi_term(flat_ps, arg2, MAX_PRECEDENCE + 1, depth)
+                done_f = True
+            elif (arg2.type == wl.nil and not arg2.attr_list) or \
+                 (arg2.type == wl.disj_nil and not arg2.attr_list):
+                done_f = True
+            elif not _check_legal_cons(arg2, t_type):
+                flat_ps.write("|")
+                _pretty_tag_or_psi_term(flat_ps, arg2, MAX_PRECEDENCE + 1, depth)
+                done_f = True
+            else:
+                t_walk = arg2
+        list_depth_f += 1
+
+    flat_ps.write(close_br)
+    flat_str = flat_buf.getvalue()
+
+    # ── decide: inline or multi-line ─────────────────────────────────────────
+    if ps.col + len(flat_str) <= ps.max_col:
+        # Fits: write the flat string and sync printed_pointers
+        ps.write(flat_str)
+        ps.printed_pointers.update(flat_ps.printed_pointers)
+        return
+
+    # Multi-line: each element on its own line, indented to indent_col
+    if prefix_str:
+        ps.write(prefix_str)
+    ps.write(open_br)
+
+    t_walk2 = t
+    list_depth2 = 0
+    first2 = True
+    done2 = False
+    while not done2:
+        if list_depth2 >= ps.print_depth:
+            ps.write("...")
+            done2 = True
+            break
+        arg1, arg2 = _get_two_args(t_walk2.attr_list)
+        if arg1: arg1 = arg1.deref()
+        if arg2: arg2 = arg2.deref()
+        if not first2:
+            ps.write(sep)
+            ps.write("\n")
+            ps.write(" " * indent_col)
+        first2 = False
+        _pretty_tag_or_psi_term(ps, arg1, 999, depth)
+        if arg2 is None:
+            done2 = True
         else:
             tid2 = id(arg2)
             if tid2 in ps.pointer_names and ps.pointer_names[tid2]:
                 ps.write("|")
                 _pretty_tag_or_psi_term(ps, arg2, MAX_PRECEDENCE + 1, depth)
-                done = True
+                done2 = True
             elif (arg2.type == wl.nil and not arg2.attr_list) or \
                  (arg2.type == wl.disj_nil and not arg2.attr_list):
-                done = True
+                done2 = True
             elif not _check_legal_cons(arg2, t_type):
                 ps.write("|")
                 _pretty_tag_or_psi_term(ps, arg2, MAX_PRECEDENCE + 1, depth)
-                done = True
+                done2 = True
             else:
-                if list_depth < ps.print_depth:
-                    ps.write(sep)
-                t = arg2
+                t_walk2 = arg2
+        list_depth2 += 1
 
-        list_depth += 1
-
-    ps.write(end)
+    ps.write(close_br)
 
 
 def _pretty_tag_or_psi_term(ps: PrintState, p: Optional['PsiTerm'],
@@ -480,6 +796,45 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
         return
     t = t.deref()
 
+    # Evaluate pure constant arithmetic expressions (e.g. X bound to 1+2 → show 3).
+    # Only trigger for compound arithmetic terms (no value yet, has attributes, arith op).
+    # Suppressed inside backtick-quoted contexts (no_arith_eval flag).
+    _arith_ops_print = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+                                  'max', 'min', 'abs', 'sqrt', 'floor', 'ceiling',
+                                  'round', 'truncate', 'exp', 'log', 'sin', 'cos', 'tan',
+                                  'strlen'))
+    _psym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+    from wild_life.data_structures import NON_STRICT_TERM as _NST_PRINT
+    if (not ps.no_arith_eval and _psym in _arith_ops_print and t.value is None and t.attr_list and wl
+            and not (t.flags & _NST_PRINT)):
+        _pval = _eval_pure_arith(t, wl)
+        if _pval is not None:
+            # Construct a synthetic number term for display only
+            _pt = PsiTerm()
+            if _pval == int(_pval) and wl.integer and wl.integer.is_subtype_of(wl.real):
+                _pt.type = wl.integer
+                _pt.value = int(_pval)
+            elif wl.real:
+                _pt.type = wl.real
+                _pt.value = _pval
+            else:
+                _pt.type = t.type  # fallback
+                _pt.value = _pval
+            _print_value(ps, _pt, wl)
+            return
+
+    # Evaluate ground string function calls during printing
+    # (strcon, substr, strlen when all args are concrete strings/numbers)
+    _str_funcs_print = frozenset(('strcon', 'substr', 'strlen'))
+    if _psym in _str_funcs_print and t.value is None and t.attr_list and wl:
+        _sval = _eval_pure_string(t, wl)
+        if _sval is not None:
+            _pt = PsiTerm()
+            _pt.type = wl.quoted_string
+            _pt.value = _sval
+            _print_value(ps, _pt, wl)
+            return
+
     # List / disjunction sugar
     if (t.type == wl.alist or t.type == wl.disjunction):
         if _check_legal_cons(t, t.type):
@@ -491,8 +846,50 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
         ps.write("[]")
         _maybe_resid(ps, t)
         return
+    # nil with extra attributes — print as [](...)
+    if t.type == wl.nil and t.attr_list:
+        ps.write("[]")
+        _pretty_attr(ps, t.attr_list, depth + 1, wl)
+        _maybe_resid(ps, t)
+        return
     if wl.disj_nil and t.type == wl.disj_nil and not t.attr_list:
         ps.write("{}")
+        _maybe_resid(ps, t)
+        return
+    # disj_nil with extra attributes — print as {}(...)
+    if wl.disj_nil and t.type == wl.disj_nil and t.attr_list:
+        ps.write("{}")
+        _pretty_attr(ps, t.attr_list, depth + 1, wl)
+        _maybe_resid(ps, t)
+        return
+
+    # Backtick-quoted term: `(expr) → print as expr (one level of backtick stripped).
+    # In Wild Life, `expr means "prevent evaluation"; when printing, the backtick
+    # is invisible — the inner term is displayed directly without arithmetic evaluation.
+    if (t.type is not None and t.type.keyword is not None
+            and t.type.keyword.symbol == '`'):
+        inner = t.attr_list.get('1')
+        if inner is not None:
+            old_no_arith_eval = ps.no_arith_eval
+            ps.no_arith_eval = True
+            _pretty_psi_term(ps, inner.deref(), sprec, depth, wl)
+            ps.no_arith_eval = old_no_arith_eval
+            return
+
+    # Sort-constrained variable: X:sort where sort ≠ @ and term is unbound.
+    # In Wild Life, such a variable prints as "sortname~" (e.g. "real~", "bool~").
+    # The ~ signals "there is a pending constraint":
+    #   - Pure sort annotation (X:real, resid=None) → always write "~"
+    #   - Arithmetic dissolved (resid=[] empty list) → no "~" (constraint was solved)
+    #   - Arithmetic pending (resid=[...] with pending items) → _maybe_resid writes "~"
+    from wild_life.data_structures import SORT_VAR
+    if (t.flags & SORT_VAR) and t.value is None and not t.attr_list:
+        _print_symbol_q(ps, t.type.keyword if t.type else None)
+        if t.resid is None:
+            # resid=None: pure sort annotation (no arithmetic involved) → always ~
+            ps.write("~")
+        # else resid is a list (empty = arithmetic dissolved, or with pending items)
+        # _maybe_resid will write ~ only for pending resid goals
         _maybe_resid(ps, t)
         return
 
@@ -605,11 +1002,18 @@ def _pretty_attr(ps: PrintState, attr_list: dict, depth: int, wl) -> None:
 
 
 def _maybe_resid(ps: PrintState, t: 'PsiTerm') -> None:
-    """Print residuation markers if any."""
-    if t.resid:
+    """Print residuation markers if any.
+
+    The tilde '~' is only printed for FREE variables (value=None, no attrs).
+    Bound variables (concrete values) never show '~' even if they have stale
+    resid entries — this matches C Wild Life 1.02 behaviour where e.g. A=23
+    after 'A=B/C? A=23?' shows 'A = 23' (no tilde), not 'A = 23~'.
+    """
+    if t.resid and t.value is None and not t.attr_list:
         for r in t.resid:
             if getattr(r, 'goal', None) and getattr(r.goal, 'pending', False):
                 ps.write("~")
+                return  # Only write one tilde max
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -639,7 +1043,7 @@ def term_to_string(t: Optional['PsiTerm'], quoted: bool = True,
 
 def write_term(t: Optional['PsiTerm'], outfile: IO = None,
                quoted: bool = True, print_depth: int = PRINT_DEPTH,
-               var_tree: dict = None, wl=None) -> None:
+               var_tree: dict = None, wl=None, canonical: bool = False) -> None:
     """Write a term to outfile (default stdout)."""
     if wl is None:
         from wild_life.runtime import WL as wl
@@ -648,6 +1052,7 @@ def write_term(t: Optional['PsiTerm'], outfile: IO = None,
     ps = PrintState(outfile=outfile)
     ps.print_depth = print_depth
     ps.const_quote = quoted
+    ps.write_canon = canonical
     ps.indent = False
 
     vt = var_tree or {}
@@ -661,8 +1066,16 @@ def print_variables(var_tree: dict, outfile: IO = None,
                     print_depth: int = PRINT_DEPTH, wl=None) -> bool:
     """
     Print all query variables in the form 'X = value'.
-    Returns True if there were any variables.
+
+    When all bindings fit on one line (total <= MAX_COL chars) they are printed
+    inline: ``A = v1, B = v2.``
+    Otherwise each binding goes on its own line:
+    ``A = v1, \\nB = v2, \\nC = v3.``
+    (the separator `, ` appears at the end of the previous line).
+    Returns True if there were any variables printed.
     """
+    import io
+
     if wl is None:
         from wild_life.runtime import WL as wl
     if not var_tree:
@@ -676,35 +1089,70 @@ def print_variables(var_tree: dict, outfile: IO = None,
     ps.write_resids = True
     ps.indent = False
 
-    # Scan all variables
+    # Scan all variables to build pointer_names / printed_pointers
     for name, pterm in var_tree.items():
         if pterm is not None:
             ps._go_through_term(pterm.deref())
     ps.insert_variables(var_tree, True)
     ps.forbid_variables(var_tree)
 
-    first = True
-    for name in sorted(var_tree.keys()):
-        pterm = var_tree[name]
-        if pterm is None:
-            continue
-        t = pterm.deref()
-        if not first:
-            outfile.write(", ")
-        first = False
-        outfile.write(name)
-        outfile.write(" = ")
+    sorted_names = [n for n in sorted(var_tree.keys()) if var_tree[n] is not None]
+    if not sorted_names:
+        return False
 
+    # ── Render each binding's value to a string ───────────────────────────────
+    # We render to a buffer so we can check total length before deciding
+    # whether to use single-line or multi-line format.
+    # Column offset = len("NAME = ") so that nested lists indent correctly.
+    binding_strs: list = []
+    for name in sorted_names:
+        pterm = var_tree[name]
+        t = pterm.deref()
         n2 = ps.printed_pointers.get(id(t))
         if n2 and n2 < name:
-            outfile.write(n2)
+            val_str = n2
         else:
-            _pretty_psi_term(ps, t, MAX_PRECEDENCE + 1, 0, wl)
-            ps.flush()
+            val_buf = io.StringIO()
+            val_ps = PrintState(outfile=val_buf)
+            val_ps.print_depth = print_depth
+            val_ps.const_quote = True
+            val_ps.write_resids = True
+            val_ps.pointer_names = ps.pointer_names
+            val_ps.printed_pointers = dict(ps.printed_pointers)
+            val_ps.col = len(name) + 3   # column just after "NAME = "
+            val_ps.max_col = ps.max_col
+            # Use sprec=700 (the precedence of '=') so that operator expressions
+            # with prec >= 700 (like '->' prec 1200, ',' prec 1000) are
+            # surrounded by parentheses in the "X = VALUE" binding context.
+            _pretty_psi_term(val_ps, t, 700, 0, wl)
+            val_str = val_buf.getvalue()
+            # Carry forward any newly named pointers
+            ps.printed_pointers.update(val_ps.printed_pointers)
+        binding_strs.append((name, val_str))
 
-    if not first:
-        outfile.write(".")
-    return not first
+    # ── Decide single-line vs multi-line ──────────────────────────────────────
+    # total = sum of "NAME = VAL" + ", " separators + "." terminator
+    total_len = sum(len(n) + 3 + len(v) for n, v in binding_strs)
+    total_len += 2 * (len(binding_strs) - 1)   # ", " between bindings
+    total_len += 1                              # "." at end
+    multi_line = total_len > ps.max_col or any('\n' in v for _, v in binding_strs)
+
+    # ── Emit ──────────────────────────────────────────────────────────────────
+    for i, (name, val_str) in enumerate(binding_strs):
+        is_last = (i == len(binding_strs) - 1)
+        outfile.write(name)
+        outfile.write(" = ")
+        outfile.write(val_str)
+        if not is_last:
+            outfile.write(", ")
+            if multi_line:
+                outfile.write("\n")
+    outfile.write(".")
+    # Wild Life appends an extra blank line when bindings span multiple lines.
+    if multi_line:
+        outfile.write("\n")
+
+    return True
 
 
 def display_psi_term(t: Optional['PsiTerm'], outfile: IO = None,

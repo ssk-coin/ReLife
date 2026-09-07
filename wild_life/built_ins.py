@@ -77,6 +77,190 @@ def _get_sym(t: PsiTerm) -> str:
     return t.type.keyword.symbol if (t.type and t.type.keyword) else ''
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Arithmetic type-constraint propagation helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Binary and unary operators that return a real number.
+_ARITH_OPS_SET = frozenset((
+    '+', '-', '*', '/', '//', 'mod', '**', '^',
+    'max', 'min', 'abs', 'sqrt', 'sin', 'cos', 'tan',
+    'exp', 'log', 'floor', 'ceiling', 'truncate', 'round',
+))
+
+
+def _mark_real_sort(var: 'PsiTerm', wl, eng) -> None:
+    """Mark a free variable as constrained to sort real, with no pending constraints.
+
+    Sets type=real and SORT_VAR flag.  Sets resid=[] (empty list, not None) to
+    indicate 'involved in arithmetic but constraint dissolved/solved' — this
+    suppresses the tilde in display (print_term treats resid=None as 'always ~'
+    but resid=[] as 'no pending').
+
+    Used when an arithmetic constraint was immediately solved (e.g. A=A+0 → A=A)
+    so the variable is real-constrained but has no suspended residuation.
+    """
+    from wild_life.data_structures import SORT_VAR
+    var = var.deref()
+    if var.value is not None or var.attr_list:
+        return  # Not a free variable
+    if var.type is wl.top or var.type is None:
+        if eng is not None:
+            eng.trail.trail_psi(var, 'type')
+        var.type = wl.real
+    if not (var.flags & SORT_VAR):
+        if eng is not None:
+            eng.trail.trail_psi(var, 'flags')
+        var.flags |= SORT_VAR
+    # Set resid to empty list (not None) so print_term knows: "no pending constraints"
+    # (resid=None means "pure sort annotation, always show ~").
+    if var.resid is None:
+        if eng is not None:
+            eng.trail.trail_psi(var, 'resid')
+        var.resid = []
+
+
+def _collect_arith_vars(t: 'PsiTerm', wl, result: list, seen: set) -> None:
+    """Collect all unbound variables in an arithmetic expression.
+
+    Collects both fresh top-sort variables and sort-constrained variables
+    (e.g. type=real with SORT_VAR flag set by earlier arithmetic propagation).
+    """
+    from wild_life.data_structures import SORT_VAR
+    if t is None:
+        return
+    t = t.deref()
+    tid = id(t)
+    if tid in seen:
+        return
+    seen.add(tid)
+    # Unbound variable: top-sort, or sort-constrained (SORT_VAR flag), no attrs, no value
+    is_free = not t.attr_list and t.value is None and t.coref is None
+    if is_free and (t.type is wl.top or t.type is None or bool(t.flags & SORT_VAR)):
+        if t not in result:
+            result.append(t)
+        return
+    # Numeric literal — ground, no variables inside
+    if t.value is not None:
+        return
+    sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
+    if sym in _ARITH_OPS_SET:
+        for val in t.attr_list.values():
+            _collect_arith_vars(val, wl, result, seen)
+
+
+def _attach_arith_resid(var: 'PsiTerm', wl, pending_goal, eng=None) -> None:
+    """Constrain var to sort real and attach a pending residuated goal.
+
+    Sets the SORT_VAR flag so the unifier continues to treat the variable as
+    bindable (even though its type is no longer WL.top).  When the variable is
+    later bound, _wakeup_resid fires the pending goal.
+
+    If eng is provided, the resid list modification is trailed so that it is
+    undone on backtracking (preventing accumulation of stale resid entries).
+    """
+    from wild_life.data_structures import Residuation, SORT_VAR
+    var = var.deref()
+    # Constrain to real sort only if still totally unconstrained
+    if var.type is wl.top or var.type is None:
+        var.type = wl.real
+    # Mark as a sort-constrained variable so the unifier still binds it and
+    # calls _wakeup_resid when it gets a value.
+    var.flags |= SORT_VAR
+    # Attach a single pending residuation for display (~).
+    # Avoid duplicating the same goal object.
+    if var.resid is None:
+        if eng is not None:
+            eng.trail.trail_psi(var, 'resid')  # trail: resid was None
+        var.resid = [Residuation(goal=pending_goal)]
+    else:
+        # Don't attach the same goal twice
+        for r in var.resid:
+            if r.goal is pending_goal:
+                return
+        if eng is not None:
+            eng.trail.trail_copy(var, 'resid')  # trail: save copy of list
+        var.resid.append(Residuation(goal=pending_goal))
+
+
+def _var_in_expr(target: 'PsiTerm', expr: 'PsiTerm', visited: set) -> bool:
+    """Return True if *target* (by identity after deref) appears in *expr*.
+
+    Follows coref chains via deref() and recurses through attr_list children.
+    Used to detect self-referential constraints (e.g. B=A-B → A appears in expr).
+    """
+    if expr is None:
+        return False
+    expr_d = expr.deref()
+    if id(expr_d) == id(target):
+        return True
+    eid = id(expr)
+    if eid in visited:
+        return False
+    visited.add(eid)
+    for child in expr_d.attr_list.values():
+        if _var_in_expr(target, child, visited):
+            return True
+    return False
+
+
+def _simplify_arith(t: 'PsiTerm', eng) -> 'Optional[PsiTerm]':
+    """Partial arithmetic simplification using identity/annihilator rules.
+
+    Wild Life 1.02 applies all of these (when one operand is a known constant):
+        0 + X  →  X        (left-zero for +)
+        X + 0  →  X        (right-zero for +)
+        X - 0  →  X        (right-zero for -)
+        0 * X  →  0        (left-zero / annihilator for *)
+        X * 0  →  0        (right-zero / annihilator for *)
+        1 * X  →  X        (left-identity for *)
+        X * 1  →  X        (right-identity for *)
+
+    Returns a PsiTerm on success, None if no simplification applies.
+    """
+    if t is None:
+        return None
+    t = t.deref()
+    sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
+    if sym not in _ARITH_OPS_SET:
+        return None
+
+    arg1, arg2 = _get_two_args(t)
+
+    ok1, v1 = _eval_arith(arg1, eng) if arg1 else (False, 0.0)
+    ok2, v2 = _eval_arith(arg2, eng) if arg2 else (False, 0.0)
+
+    # Both fully evaluable — let the normal path handle it
+    if ok1 and ok2:
+        return None
+
+    wl = eng.wl
+
+    if sym == '+':
+        if ok1 and v1 == 0.0 and arg2 is not None:
+            return arg2.deref()           # 0 + X = X
+        if ok2 and v2 == 0.0 and arg1 is not None:
+            return arg1.deref()           # X + 0 = X
+    elif sym == '-':
+        if ok2 and v2 == 0.0 and arg1 is not None:
+            return arg1.deref()           # X - 0 = X
+        # X - X = 0 when both sides dereference to the same node
+        if arg1 is not None and arg2 is not None:
+            if id(arg1.deref()) == id(arg2.deref()):
+                return wl.make_integer(0) # X - X = 0
+    elif sym == '*':
+        if ok1 and v1 == 0.0:
+            return wl.make_integer(0)     # 0 * X = 0
+        if ok2 and v2 == 0.0:
+            return wl.make_integer(0)     # X * 0 = 0
+        if ok1 and v1 == 1.0 and arg2 is not None:
+            return arg2.deref()           # 1 * X = X
+        if ok2 and v2 == 1.0 and arg1 is not None:
+            return arg1.deref()           # X * 1 = X
+
+    return None
+
+
 def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
     """Try to evaluate a boolean function application.
 
@@ -161,6 +345,40 @@ def _try_eval_arith_to_term(t: PsiTerm, eng) -> Optional[PsiTerm]:
     return _make_number(eng, v)
 
 
+def _normalize_arith_in_term(t: PsiTerm, eng, _seen=None) -> PsiTerm:
+    """Return a copy of t with arithmetic sub-expressions evaluated.
+
+    Used by assert/asserta so that storing ``mynum(N+1)`` where N=31
+    stores ``mynum(32)`` (an integer) rather than the expression tree.
+    Avoids infinite loops on cyclic terms via the _seen set.
+    """
+    if _seen is None:
+        _seen = set()
+    t = t.deref()
+    tid = id(t)
+    if tid in _seen:
+        return t
+    _seen.add(tid)
+
+    # If the whole term is an arithmetic expression, evaluate it
+    arith = _try_eval_arith_to_term(t, eng)
+    if arith is not None:
+        return arith
+
+    # Otherwise, walk attrs and normalize each child
+    if not t.attr_list:
+        return t
+    # Build a shallow copy of the compound term with normalized children
+    new_t = PsiTerm()
+    new_t.type = t.type
+    new_t.value = t.value
+    new_t.flags = t.flags
+    new_t.status = t.status
+    for k, v in t.attr_list.items():
+        new_t.attr_list[k] = _normalize_arith_in_term(v, eng, _seen)
+    return new_t
+
+
 def _term_to_display_string(t: PsiTerm, eng) -> str:
     """Convert a psi-term to its display string (like write/1 would produce)."""
     import io
@@ -210,6 +428,14 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None or a2 is None:
             return None
         a1, a2 = a1.deref(), a2.deref()
+        # Only evaluate when both arguments are concrete strings
+        if eng is not None:
+            wl = eng.wl
+            def _is_string(x):
+                return (x.value is not None and x.type is not None
+                        and x.type.is_subtype_of(wl.quoted_string))
+            if not (_is_string(a1) or _is_string(a2)):
+                return None
         # Recursively evaluate if needed
         a1e = _try_eval_string_func(a1, eng)
         if a1e is not None:
@@ -217,12 +443,41 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         a2e = _try_eval_string_func(a2, eng)
         if a2e is not None:
             a2 = a2e
-        s1 = _term_to_display_string(a1, eng)
-        s2 = _term_to_display_string(a2, eng)
+        s1 = str(a1.value) if (a1.value is not None) else ''
+        s2 = str(a2.value) if (a2.value is not None) else ''
         return _make_string(eng, s1 + s2)
 
+    elif sym == 'substr':
+        # substr(String, Start, Length) -> substring (1-indexed, returns "" if out of range)
+        a1 = t.attr_list.get('1')
+        a2 = t.attr_list.get('2')
+        a3 = t.attr_list.get('3')
+        if a1 is None or a2 is None or a3 is None:
+            return None
+        a1d = a1.deref()
+        # Only evaluate when String is a concrete string
+        if eng is None or a1d.value is None:
+            return None
+        wl = eng.wl
+        if a1d.type is None or not a1d.type.is_subtype_of(wl.quoted_string):
+            return None
+        s = str(a1d.value)
+        # Evaluate start/length via arithmetic
+        ok2, start_f = _eval_arith(a2.deref(), eng)
+        ok3, length_f = _eval_arith(a3.deref(), eng)
+        if not ok2 or not ok3:
+            return None
+        start = int(start_f) - 1  # convert 1-indexed to 0-indexed
+        length = int(length_f)
+        if start < 0:
+            start = 0
+        result = s[start:start + length] if start < len(s) else ''
+        return _make_string(eng, result)
+
     elif sym == 'root_sort' or sym == 'sort':
-        # root_sort(T) -> the sort name of T as an atom
+        # root_sort(T) -> the root sort of T.
+        # For numeric/string atoms, the root sort is the value itself.
+        # For compound terms, it is the functor name as an atom.
         a1 = t.attr_list.get('1')
         if a1 is None:
             return None
@@ -230,7 +485,48 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         defn = a1.type
         if defn is None or defn.keyword is None:
             return None
+        # Unwrap backtick-quoted atoms: `foo → root sort is foo
+        if defn.keyword.symbol == '`':
+            inner = a1.attr_list.get('1')
+            if inner is not None:
+                a1 = inner.deref()
+                defn = a1.type
+                if defn is None or defn.keyword is None:
+                    return None
+        # For concrete numeric/string values the root sort is the value itself
+        if a1.value is not None and eng is not None:
+            wl = eng.wl
+            if defn.is_subtype_of(wl.integer):
+                return wl.make_integer(int(a1.value))
+            if defn.is_subtype_of(wl.real):
+                return wl.make_number(float(a1.value))
+            if defn.is_subtype_of(wl.quoted_string):
+                return _make_string(eng, str(a1.value))
         return _make_atom(eng, defn.keyword.symbol)
+
+    elif sym == 'children':
+        # children(Sort) -> list of immediate child sorts.
+        # For concrete numeric/string values (atoms with a .value), return [].
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return None
+        a1 = a1.deref()
+        # Concrete values (numbers, strings) have no child sorts.
+        if a1.value is not None:
+            if eng is None:
+                return None
+            return eng.wl.make_list([])
+        defn = a1.type
+        if defn is None or eng is None:
+            return None
+        wl = eng.wl
+        # Use defn.children directly to avoid duplicates from symbol aliases.
+        child_atoms = []
+        for child_defn in getattr(defn, 'children', []):
+            if child_defn.keyword is None:
+                continue
+            child_atoms.append(wl.make_atom(child_defn.keyword.symbol, wl.bi_module))
+        return wl.make_list(child_atoms)
 
     elif sym == 'features':
         # features(T) -> list of attribute labels
@@ -254,6 +550,30 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             lst = pair
         return lst
 
+    elif sym == '.':
+        # T.F — feature access: get feature F of term T
+        a1 = t.attr_list.get('1')  # T
+        a2 = t.attr_list.get('2')  # F (feature label)
+        if a1 is None or a2 is None:
+            return None
+        term = a1.deref()
+        feat = a2.deref()
+        # Determine the feature key string
+        if feat.value is not None and feat.type and feat.type.keyword:
+            fsym = feat.type.keyword.symbol
+            if fsym in ('integer', 'real'):
+                fkey = str(int(feat.value))
+            else:
+                fkey = fsym
+        elif feat.type and feat.type.keyword:
+            fkey = feat.type.keyword.symbol
+        else:
+            return None
+        val = term.attr_list.get(fkey)
+        if val is None:
+            return None
+        return val.deref()
+
     return None
 
 
@@ -264,6 +584,110 @@ def _unify(eng, a: PsiTerm, b: PsiTerm) -> bool:
     if not ok:
         eng.trail.undo_to(mark)
     return ok
+
+
+class _WriteFailure(Exception):
+    """Internal signal: write/writeq should return False (*** No)."""
+    pass
+
+
+def _eval_and_conjunction(t: PsiTerm, eng) -> Optional[PsiTerm]:
+    """Evaluate an and_sym (&) psi-term conjunction.
+
+    Returns the merged psi-term if the conjunction succeeds, or None if it fails.
+    Used by _write_term to handle writeq(`X & Y) before printing.
+    """
+    wl = eng.wl
+
+    def _strip_bq(x: PsiTerm) -> PsiTerm:
+        """Strip one level of backtick quotation."""
+        x = x.deref()
+        if (x.type is not None and x.type.keyword is not None
+                and x.type.keyword.symbol == '`'):
+            inner = x.attr_list.get('1')
+            if inner is not None:
+                return inner.deref()
+        return x
+
+    t1_ref = t.attr_list.get('1')
+    t2_ref = t.attr_list.get('2')
+    if t1_ref is None or t2_ref is None:
+        return None
+
+    t1 = t1_ref.deref()
+    t2 = t2_ref.deref()
+
+    # Recursively evaluate nested conjunctions
+    if t1.type is not None and t1.type is wl.and_sym:
+        t1 = _eval_and_conjunction(t1, eng)
+        if t1 is None:
+            return None
+    else:
+        t1 = _strip_bq(t1)
+
+    if t2.type is not None and t2.type is wl.and_sym:
+        t2 = _eval_and_conjunction(t2, eng)
+        if t2 is None:
+            return None
+    else:
+        t2 = _strip_bq(t2)
+
+    # Unify t1 and t2 through a fresh variable to find their meet
+    fresh = PsiTerm()
+    fresh.type = wl.top
+    mark = eng.trail.mark()
+    ok1 = eng.unifier.unify(fresh, t1)
+    if not ok1:
+        eng.trail.undo_to(mark)
+        return None
+    fresh_d = fresh.deref()
+    ok2 = eng.unifier.unify(fresh_d, t2)
+    if not ok2:
+        eng.trail.undo_to(mark)
+        return None
+    return fresh.deref()
+
+
+def _has_concrete_non_numeric_arg(t: PsiTerm, eng) -> bool:
+    """Return True if any immediate argument of arithmetic term t is a
+    concrete non-numeric atom (i.e. not an unbound variable, not a number).
+
+    Used to decide whether an arithmetic-evaluation failure should be a hard
+    failure (with warning) vs. a soft failure (term printed as-is).
+    """
+    from wild_life.data_structures import SORT_VAR
+    wl = eng.wl
+
+    def _is_concrete_non_numeric(a: PsiTerm) -> bool:
+        a = a.deref()
+        # Strip one backtick level
+        if (a.type is not None and a.type.keyword is not None
+                and a.type.keyword.symbol == '`'):
+            inner = a.attr_list.get('1')
+            if inner is not None:
+                a = inner.deref()
+        # Unbound top-type variable
+        if a.type is wl.top:
+            return False
+        # Sort-constrained variable (X:sort syntax)
+        if a.flags & SORT_VAR:
+            return False
+        # Symbol '@' is the top-type marker for unbound vars
+        sym_a = a.type.keyword.symbol if (a.type and a.type.keyword) else ''
+        if sym_a == '@':
+            return False
+        # Numeric value (integer or real)
+        if (a.value is not None and a.type and wl.real is not None
+                and a.type.is_subtype_of(wl.real)):
+            return False
+        # Everything else: a concrete atom / compound that is not numeric
+        return True
+
+    for key in ('1', '2'):
+        ref = t.attr_list.get(key) if t.attr_list else None
+        if ref is not None and _is_concrete_non_numeric(ref):
+            return True
+    return False
 
 
 def _psi_to_python(t: Optional[PsiTerm], eng):
@@ -286,8 +710,31 @@ def _psi_to_python(t: Optional[PsiTerm], eng):
 def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
     from wild_life.print_term import write_term
     var_tree = getattr(eng, '_last_var_tree', None)
-    # Evaluate arithmetic expressions before printing (e.g. 23+23 → 46)
-    # Guard against cyclic terms (e.g. X = s(X)) causing infinite recursion
+    wl = eng.wl if eng else None
+
+    # ── psi-term conjunction (&): evaluate before printing ──────────────────
+    # writeq(`X & Y) should evaluate the conjunction and print the result.
+    # If the conjunction fails, the predicate fails.
+    if wl and t.type is not None and t.type is wl.and_sym:
+        evaluated = _eval_and_conjunction(t, eng)
+        if evaluated is None:
+            raise _WriteFailure("conjunction failed")
+        t = evaluated
+
+    # ── bottom type ({} / disj_nil): cannot be written ──────────────────────
+    sym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+    if sym == '{}':
+        raise _WriteFailure("bottom type '{}'")
+    if wl and wl.disj_nil is not None and t.type is wl.disj_nil:
+        raise _WriteFailure("bottom type disj_nil")
+
+    # ── arithmetic evaluation (e.g. 23+23 → 46) ─────────────────────────────
+    # Guard against cyclic terms (e.g. X = s(X)) causing infinite recursion.
+    _arith_binary_ops = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+                                   'max', 'min'))
+    _arith_unary_ops = frozenset(('abs', 'sqrt', 'sin', 'cos', 'tan', 'exp',
+                                  'log', 'floor', 'ceiling', 'round',
+                                  'truncate'))
     try:
         t_eval = _try_eval_arith_to_term(t, eng)
         if t_eval is not None:
@@ -296,8 +743,18 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
             t_str = _try_eval_string_func(t, eng)
             if t_str is not None:
                 t = t_str
+            elif wl and sym in (_arith_binary_ops | _arith_unary_ops):
+                # The top-level operator is arithmetic but evaluation failed.
+                # If any immediate arg is a concrete non-numeric atom, this is
+                # a hard failure (emit warning + fail); otherwise just print.
+                if _has_concrete_non_numeric_arg(t, eng):
+                    expr_str = _term_to_str(t, eng, quoted=True)
+                    print(f"*** Warning: non-numeric argument(s) in '{expr_str}'.",
+                          file=sys.stderr)
+                    raise _WriteFailure("non-numeric argument")
     except RecursionError:
         pass
+
     write_term(t, outfile=stream or sys.stdout, quoted=quoted, wl=eng.wl,
                var_tree=var_tree)
 
@@ -321,6 +778,7 @@ def _write_all_args(goal: PsiTerm, eng, quoted: bool, stream=None) -> bool:
 
     In LIFE, write(a,b,c) writes each argument in order without separator.
     If the goal has no positional args, write the goal's sort name.
+    Returns False if any argument fails to write (e.g., bottom type, bad arithmetic).
     """
     attrs = goal.attr_list
     # Collect positional arguments '1', '2', '3', ...
@@ -331,12 +789,18 @@ def _write_all_args(goal: PsiTerm, eng, quoted: bool, stream=None) -> bool:
         if key not in attrs:
             break
         arg = attrs[key].deref()
-        _write_term(arg, eng, stream=stream, quoted=quoted)
+        try:
+            _write_term(arg, eng, stream=stream, quoted=quoted)
+        except _WriteFailure:
+            return False
         written_any = True
         i += 1
     if not written_any:
         # No positional args: treat as write of goal itself
-        _write_term(goal, eng, stream=stream, quoted=quoted)
+        try:
+            _write_term(goal, eng, stream=stream, quoted=quoted)
+        except _WriteFailure:
+            return False
     return True
 
 
@@ -348,6 +812,53 @@ def bi_write(goal: PsiTerm, eng) -> bool:
 def bi_writeq(goal: PsiTerm, eng) -> bool:
     """writeq(T) — write term T (or all positional args) with quoting."""
     return _write_all_args(goal, eng, quoted=True)
+
+
+def bi_write_canonical(goal: PsiTerm, eng) -> bool:
+    """write_canonical(T) — write term T in canonical (non-operator) form.
+
+    write_canonical writes all positional args concatenated in canonical form.
+    The canonical form uses functor(arg1,arg2,...) notation instead of
+    operator-sugar forms.
+    """
+    from wild_life.print_term import write_term
+    attrs = goal.attr_list
+    var_tree = getattr(eng, '_last_var_tree', None)
+    i = 1
+    written_any = False
+    while True:
+        key = str(i)
+        if key not in attrs:
+            break
+        arg = attrs[key].deref()
+        # Evaluate arithmetic first
+        try:
+            t_eval = _try_eval_arith_to_term(arg, eng)
+            if t_eval is not None:
+                arg = t_eval
+        except (RecursionError, Exception):
+            pass
+        # Unwrap backtick-quoted terms: `(X) → write X canonically
+        if (arg.type is not None and arg.type.keyword is not None
+                and arg.type.keyword.symbol == '`'):
+            inner = arg.attr_list.get('1')
+            if inner is not None:
+                arg = inner.deref()
+        write_term(arg, outfile=sys.stdout, quoted=True, wl=eng.wl,
+                   var_tree=var_tree, canonical=True)
+        written_any = True
+        i += 1
+    if not written_any:
+        # No positional args: write the goal itself canonically
+        try:
+            t_eval = _try_eval_arith_to_term(goal, eng)
+            if t_eval is not None:
+                goal = t_eval
+        except (RecursionError, Exception):
+            pass
+        write_term(goal, outfile=sys.stdout, quoted=True, wl=eng.wl,
+                   var_tree=var_tree, canonical=True)
+    return True
 
 
 def bi_print(goal: PsiTerm, eng) -> bool:
@@ -441,9 +952,11 @@ def bi_read_term(goal: PsiTerm, eng) -> bool:
 # Arithmetic
 # ─────────────────────────────────────────────────────────────────────────────
 
+_ARITH_DEBUG = False  # Set True to debug arithmetic evaluation
+
 def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     """Evaluate an arithmetic expression. Returns (ok, value)."""
-    if t is None or _depth > 20:
+    if t is None or _depth > 40:
         return False, 0.0
     t = t.deref()
     wl = eng.wl
@@ -455,25 +968,51 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     # User-defined function: try to evaluate it inline (no condition case)
     if t.type is not None and t.type.type == DefType.FUNCTION and t.type.rule:
         active = [(h, b) for (h, b) in t.type.rule if h is not None and b is not None]
-        if active:
-            from wild_life.unification import copy_term
-            h0, b0 = active[0]
+        from wild_life.unification import copy_term
+        # Pre-evaluate built-in function calls in args (e.g. features(X)) so
+        # that they are resolved before we try to unify with rule heads.
+        # Create a shallow copy of t with evaluated args.
+        t_pre = PsiTerm()
+        t_pre.type = t.type
+        t_pre.value = t.value
+        t_pre.attr_list = {}
+        for _k, _v in t.attr_list.items():
+            _vd = _v.deref()
+            _evaled_arg = _try_eval_string_func(_vd, eng)
+            t_pre.attr_list[_k] = _evaled_arg if _evaled_arg is not None else _vd
+        for _ri, (h0, b0) in enumerate(active):
             _vm: dict = {}
             head = copy_term(h0, _vm)
             body = copy_term(b0, _vm)
             body_d = body.deref()
+            # Skip sort-constrained rules: head is a bare variable (no attrs).
+            # These rules are X:sort -> body, designed for eval_aim not direct
+            # arithmetic. Evaluating them causes infinite recursion because the
+            # body typically calls features(X) which can't be resolved here.
+            head_d = head.deref()
+            if not head_d.attr_list:
+                continue
             # Handle conditional: body = (value | condition) — skip if conditioned
             if body_d.type is not None and body_d.type is wl.such_that:
-                pass  # Can't evaluate conditionals without engine; skip
-            else:
-                # Unify head with t to bind arguments
-                mark = eng.trail.mark()
-                ok = eng.unifier.unify(t, head)
-                if ok:
-                    result = _eval_arith(body_d, eng, _depth + 1)
-                    eng.trail.undo_to(mark)
-                    return result
+                continue  # Can't evaluate conditionals without engine; skip
+            # Unify head with pre-evaluated copy of t to bind arguments
+            mark = eng.trail.mark()
+            ok = eng.unifier.unify(t_pre, head)
+            if ok:
+                result = _eval_arith(body_d, eng, _depth + 1)
                 eng.trail.undo_to(mark)
+                if result[0]:
+                    return result
+                # Evaluation failed; try next rule
+            eng.trail.undo_to(mark)
+
+    # Feature access: T.F → evaluate as arithmetic if possible
+    if sym == '.':
+        arg1, arg2 = _get_two_args(t)
+        feat_val = _try_eval_string_func(t, eng)
+        if feat_val is not None:
+            return _eval_arith(feat_val, eng, _depth + 1)
+        return False, 0.0
 
     # Binary operators
     arg1, arg2 = _get_two_args(t)
@@ -529,13 +1068,277 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         # Bitwise NOT
         '\\': lambda a: float(~int(a)),
     }
-    if sym in ops1 and ok1:
+    if sym in ops1 and ok1 and arg2 is None:
         try:
             return True, float(ops1[sym](v1))
         except Exception:
             return False, 0.0
 
+    # eval(Expr) — evaluate arithmetic expression (also unwraps backtick-quoted terms)
+    if sym == 'eval':
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return False, 0.0
+        a1d = a1.deref()
+        # If arg is a backtick-quoted term `(Expr), unwrap it before evaluating
+        a1_sym = a1d.type.keyword.symbol if a1d.type and a1d.type.keyword else ''
+        if a1_sym == '`':
+            inner = a1d.attr_list.get('1')
+            if inner is not None:
+                return _eval_arith(inner.deref(), eng, _depth + 1)
+            return False, 0.0
+        return _eval_arith(a1d, eng, _depth + 1)
+
+    # strlen(String) — length of string as integer
+    if sym == 'strlen':
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return False, 0.0
+        a1d = a1.deref()
+        # Only evaluate when the argument is a concrete string value
+        if a1d.value is not None and eng is not None:
+            wl = eng.wl
+            if a1d.type and a1d.type.is_subtype_of(wl.quoted_string):
+                return True, float(len(str(a1d.value)))
+        # Fall through: cannot evaluate (unbound variable etc.)
+        return False, 0.0
+
     return False, 0.0
+
+
+def _get_linear_coeff(expr, x_var, eng):
+    """Return (a, b) such that expr = a*x_var + b, or None if not linear in x_var.
+
+    x_var is the PsiTerm node (already deref'd) for the single free variable.
+    a and b are floats.  Works recursively on +, -, *, unary -.
+    """
+    if expr is None:
+        return None
+    expr = expr.deref()
+    # Is this node the variable itself?
+    if id(expr) == id(x_var):
+        return (1.0, 0.0)
+    # Is it a concrete number?
+    ok, val = _eval_arith(expr, eng)
+    if ok:
+        return (0.0, val)
+    # Is it an arithmetic expression?
+    sym = expr.type.keyword.symbol if expr.type and expr.type.keyword else ''
+    if sym not in _ARITH_OPS_SET:
+        return None
+    arg1, arg2 = _get_two_args(expr)
+    if sym == '+':
+        if arg1 is None or arg2 is None:
+            return None
+        c1 = _get_linear_coeff(arg1, x_var, eng)
+        c2 = _get_linear_coeff(arg2, x_var, eng)
+        if c1 is None or c2 is None:
+            return None
+        return (c1[0] + c2[0], c1[1] + c2[1])
+    elif sym == '-':
+        if arg1 is None:
+            return None
+        c1 = _get_linear_coeff(arg1, x_var, eng)
+        if c1 is None:
+            return None
+        if arg2 is None:
+            # unary minus
+            return (-c1[0], -c1[1])
+        c2 = _get_linear_coeff(arg2, x_var, eng)
+        if c2 is None:
+            return None
+        return (c1[0] - c2[0], c1[1] - c2[1])
+    elif sym == '*':
+        if arg1 is None or arg2 is None:
+            return None
+        ok1, v1 = _eval_arith(arg1, eng)
+        ok2, v2 = _eval_arith(arg2, eng)
+        if ok1:
+            c2 = _get_linear_coeff(arg2, x_var, eng)
+            if c2 is None:
+                return None
+            return (v1 * c2[0], v1 * c2[1])
+        if ok2:
+            c1 = _get_linear_coeff(arg1, x_var, eng)
+            if c1 is None:
+                return None
+            return (c1[0] * v2, c1[1] * v2)
+        return None
+    elif sym == '/':
+        if arg1 is None or arg2 is None:
+            return None
+        ok2, v2 = _eval_arith(arg2, eng)
+        if ok2 and v2 != 0.0:
+            c1 = _get_linear_coeff(arg1, x_var, eng)
+            if c1 is None:
+                return None
+            return (c1[0] / v2, c1[1] / v2)
+        return None
+    return None
+
+
+def _try_solve_nonlinear(expr, x_var, v_lhs, eng):
+    """Try to solve expr = v_lhs for x_var when the expression is not linear.
+
+    Handles simple inversion patterns:
+      a / x = v  →  x = a / v    (denominator is the unknown)
+      x ^ n = v  →  x = v^(1/n)  (x to an integer power, v ≥ 0)
+
+    Returns the solution as a float, or None if no pattern matched.
+    """
+    if expr is None:
+        return None
+    expr = expr.deref()
+    sym = expr.type.keyword.symbol if expr.type and expr.type.keyword else ''
+    if sym not in _ARITH_OPS_SET:
+        return None
+    arg1, arg2 = _get_two_args(expr)
+    if arg1 is None or arg2 is None:
+        return None
+
+    if sym == '/':
+        arg1_d = arg1.deref()
+        arg2_d = arg2.deref()
+        # x / x = v → (v-1)*x = 0. If v≠1: x=0
+        if id(arg1_d) == id(x_var) and id(arg2_d) == id(x_var):
+            if abs(v_lhs - 1.0) > 1e-12:
+                return 0.0  # x=0
+        # a / x = v  →  x = a / v  (only when arg2 contains x_var and is x_var itself)
+        if id(arg2_d) == id(x_var):
+            ok1, v1 = _eval_arith(arg1, eng)
+            if ok1 and v_lhs != 0.0:
+                return v1 / v_lhs
+    # x * x = 0 → x = 0
+    if sym == '*':
+        arg1_d = arg1.deref()
+        arg2_d = arg2.deref()
+        if id(arg1_d) == id(x_var) and id(arg2_d) == id(x_var):
+            if abs(v_lhs) < 1e-12:
+                return 0.0
+    # Could extend with x^n etc., but division covers the main arith cases
+    return None
+
+
+def _linear_decompose_psi(expr, x_var, eng, wl):
+    """Decompose expr into (a_coeff, b_psi) where expr = a_coeff * x_var + b_psi.
+
+    a_coeff is a float (coefficient of x_var in expr).
+    b_psi is a PsiTerm for the remainder (may not be evaluable to a concrete number).
+    Returns None if expr is not linear in x_var.
+
+    This extends _get_linear_coeff to return a symbolic remainder PsiTerm
+    so we can solve cases like A = A+C → 0 = C even when C is free.
+    """
+    if expr is None:
+        return None
+    expr = expr.deref()
+    zero_term = wl.make_integer(0)
+    # Is this the variable itself?
+    if id(expr) == id(x_var):
+        return (1.0, zero_term)
+    # Is it a concrete number?
+    ok, val = _eval_arith(expr, eng)
+    if ok:
+        return (0.0, _make_number(eng, val))
+    # Is it an arithmetic expression?
+    sym = expr.type.keyword.symbol if expr.type and expr.type.keyword else ''
+    if sym not in _ARITH_OPS_SET:
+        # Another free variable (not x_var) — treat as constant remainder.
+        return (0.0, expr)
+    arg1, arg2 = _get_two_args(expr)
+    if sym == '+':
+        if arg1 is None or arg2 is None:
+            return None
+        r1 = _linear_decompose_psi(arg1, x_var, eng, wl)
+        r2 = _linear_decompose_psi(arg2, x_var, eng, wl)
+        if r1 is None or r2 is None:
+            return None
+        # b_psi = r1[1] + r2[1]
+        a_coeff = r1[0] + r2[0]
+        b1, b2 = r1[1], r2[1]
+        ok1, v1 = _eval_arith(b1, eng)
+        ok2, v2 = _eval_arith(b2, eng)
+        if ok1 and v1 == 0.0:
+            b_psi = b2
+        elif ok2 and v2 == 0.0:
+            b_psi = b1
+        else:
+            # Build b1 + b2 PsiTerm
+            plus_sym = expr.type  # reuse the same + type
+            b_psi = PsiTerm(type_def=plus_sym)
+            b_psi.attr_list['1'] = b1
+            b_psi.attr_list['2'] = b2
+        return (a_coeff, b_psi)
+    elif sym == '-':
+        if arg1 is None:
+            return None
+        r1 = _linear_decompose_psi(arg1, x_var, eng, wl)
+        if r1 is None:
+            return None
+        if arg2 is None:
+            # Unary minus
+            ok_b, v_b = _eval_arith(r1[1], eng)
+            if ok_b:
+                return (-r1[0], _make_number(eng, -v_b))
+            # Negate b_psi symbolically
+            minus_sym = expr.type
+            neg_b = PsiTerm(type_def=minus_sym)
+            neg_b.attr_list['1'] = r1[1]
+            return (-r1[0], neg_b)
+        r2 = _linear_decompose_psi(arg2, x_var, eng, wl)
+        if r2 is None:
+            return None
+        a_coeff = r1[0] - r2[0]
+        b1, b2 = r1[1], r2[1]
+        ok1, v1 = _eval_arith(b1, eng)
+        ok2, v2 = _eval_arith(b2, eng)
+        if ok2 and v2 == 0.0:
+            b_psi = b1
+        elif ok1 and v1 == 0.0:
+            # 0 - b2
+            minus_sym = expr.type
+            b_psi = PsiTerm(type_def=minus_sym)
+            b_psi.attr_list['1'] = zero_term
+            b_psi.attr_list['2'] = b2
+        else:
+            minus_sym = expr.type
+            b_psi = PsiTerm(type_def=minus_sym)
+            b_psi.attr_list['1'] = b1
+            b_psi.attr_list['2'] = b2
+        return (a_coeff, b_psi)
+    elif sym == '*':
+        if arg1 is None or arg2 is None:
+            return None
+        ok1, v1 = _eval_arith(arg1, eng)
+        ok2, v2 = _eval_arith(arg2, eng)
+        if ok1:
+            r2 = _linear_decompose_psi(arg2, x_var, eng, wl)
+            if r2 is None:
+                return None
+            ok_b, v_b = _eval_arith(r2[1], eng)
+            b_psi = _make_number(eng, v1 * v_b) if ok_b else r2[1]
+            return (v1 * r2[0], b_psi)
+        if ok2:
+            r1 = _linear_decompose_psi(arg1, x_var, eng, wl)
+            if r1 is None:
+                return None
+            ok_b, v_b = _eval_arith(r1[1], eng)
+            b_psi = _make_number(eng, r1[1] * v2) if ok_b else r1[1]
+            return (r1[0] * v2, b_psi)
+        return None
+    elif sym == '/':
+        if arg1 is None or arg2 is None:
+            return None
+        ok2, v2 = _eval_arith(arg2, eng)
+        if ok2 and v2 != 0.0:
+            r1 = _linear_decompose_psi(arg1, x_var, eng, wl)
+            if r1 is None:
+                return None
+            ok_b, v_b = _eval_arith(r1[1], eng)
+            b_psi = _make_number(eng, v_b / v2) if ok_b else r1[1]
+            return (r1[0] / v2, b_psi)
+        return None
+    return None
 
 
 def bi_is(goal: PsiTerm, eng) -> bool:
@@ -781,6 +1584,130 @@ def _is_user_function(t: PsiTerm) -> bool:
     return True
 
 
+def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
+    """Synchronously evaluate a user-defined function call.
+
+    This is used to eagerly evaluate function-call arguments before pattern
+    matching (e.g., reverse([1,2,3,4]) in rev(reverse([1,2,3,4]),[])).
+    Only evaluates simple (unconditional, deterministic first-rule) cases.
+
+    Returns the result PsiTerm, or None if evaluation can't proceed.
+    The engine trail is NOT rolled back — bindings persist on the trail.
+    """
+    if _depth > 40:
+        return None
+    if t is None:
+        return None
+    t = t.deref()
+    if not _is_user_function(t):
+        return None
+
+    from wild_life.unification import copy_term
+    from wild_life.data_structures import QUOTED_TRUE
+
+    # Try each rule in order (no backtracking support here)
+    rules = t.type.rule or []
+    active = [(h, b) for (h, b) in rules if h is not None and b is not None]
+    for h0, b0 in active:
+        _vm: dict = {}
+        head = copy_term(h0, _vm)
+        body = copy_term(b0, _vm)
+        body_d = body.deref()
+
+        # Handle conditional rule: body = val_part | guard
+        # Run the guard with an inner proof and return the value part.
+        if body_d.type is not None and body_d.type is eng.wl.such_that:
+            val_part = body_d.attr_list.get('1')
+            cond_part = body_d.attr_list.get('2')
+            if val_part is None or cond_part is None:
+                continue
+            # Bind head arguments first (for arity > 0 functions)
+            mark = eng.trail.mark()
+            if head.attr_list:
+                ok_h = eng.unifier.unify(t, head)
+                if not ok_h:
+                    eng.trail.undo_to(mark)
+                    continue
+            # Run the guard in an inner proof loop.
+            # IMPORTANT: clear goal_stack so only the guard is proved;
+            # the outer continuation must not run inside this inner loop.
+            from wild_life.inference import GoalType as _GoalType, _DEFRULES as _DR, _INNER_RUN_BARRIER as _IRB
+            cp_save = eng.choice_stack
+            gs_save = eng.goal_stack
+            eng.goal_stack = None
+            eng.push_goal(_GoalType.PROVE, cond_part, _DR, None)
+            old_ok = eng.main_loop_ok
+            _barrier = cp_save if cp_save is not None else _IRB
+            cond_ok = eng.run(cs_barrier=_barrier)
+            eng.main_loop_ok = old_ok
+            eng.choice_stack = cp_save
+            eng.goal_stack = gs_save
+            if cond_ok:
+                val_d = val_part.deref()
+                ok_a, val = _eval_arith(val_d, eng)
+                if ok_a:
+                    return _make_number(eng, val)
+                return val_d
+            else:
+                eng.trail.undo_to(mark)
+                continue
+
+        mark = eng.trail.mark()
+        ok = eng.unifier.unify(t, head)
+        if not ok:
+            eng.trail.undo_to(mark)
+            continue
+
+        body_d2 = body_d.deref()
+        # Try arithmetic evaluation
+        ok_a, val = _eval_arith(body_d2, eng)
+        if ok_a:
+            return _make_number(eng, val)
+
+        # Try recursive user-function evaluation
+        if _is_user_function(body_d2):
+            inner = _eval_user_func_sync(body_d2, eng, _depth + 1)
+            if inner is not None:
+                return inner
+            # Body is a user function but can't eval synchronously — signal failure
+            # (don't return body_d2 as that would be a wrong replacement for t)
+            return None
+
+        # Body is a compound with possible embedded user-function sub-terms
+        # (e.g. [X|app2(L1,L2)] where the tail is a recursive function call).
+        # Evaluate those sub-terms so the result is a fully-reduced term.
+        _eval_embedded_user_funcs(body_d2, eng, _depth + 1, set())
+        return body_d2
+
+    return None
+
+
+def _eval_embedded_user_funcs(
+        t: PsiTerm, eng, _depth: int, visited: set) -> None:
+    """Walk t's attribute tree and evaluate any user-function sub-terms.
+
+    Modifies t's attr_list in-place (replacing function calls with their
+    evaluated results).  t must be a fresh copy (not a stored rule term).
+    """
+    if _depth > 40:
+        return
+    td = t.deref()
+    if id(td) in visited:
+        return
+    visited.add(id(td))
+    for key in list(td.attr_list.keys()):
+        child = td.attr_list[key].deref()
+        if _is_user_function(child):
+            evaled = _eval_user_func_sync(child, eng, _depth + 1)
+            if evaled is not None and evaled is not child:
+                td.attr_list[key] = evaled
+                _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited)
+            else:
+                _eval_embedded_user_funcs(child, eng, _depth + 1, visited)
+        elif child.attr_list:
+            _eval_embedded_user_funcs(child, eng, _depth + 1, visited)
+
+
 def bi_unify(goal: PsiTerm, eng) -> bool:
     """X = Y — LIFE sort unification (with functional evaluation)."""
     a, b = _get_two_args(goal)
@@ -804,6 +1731,49 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         eng.push_goal(GoalType.UNIFY, result, b_d, None)
         eng.push_goal(GoalType.EVAL, a_d, result, a_d.type.rule)
         return True
+
+    # Handle bagof/findall/setof in functional position:
+    #   L = bagof(Template, Goal)  →  collect all solutions and unify with L
+    _BAGOF_NAMES = frozenset(('bagof', 'findall', 'setof'))
+    if (b_d.type is not None and
+            b_d.type._builtin_func is not None and
+            b_d.type.keyword and
+            b_d.type.keyword.symbol in _BAGOF_NAMES):
+        tmpl = b_d.attr_list.get('1')
+        g_   = b_d.attr_list.get('2')
+        if tmpl is not None and g_ is not None and '3' not in b_d.attr_list:
+            collected = _collect_solutions(tmpl.deref(), g_.deref(), eng)
+            result_list = eng.wl.make_list(collected)
+            return _unify(eng, a_d, result_list)
+
+    if (a_d.type is not None and
+            a_d.type._builtin_func is not None and
+            a_d.type.keyword and
+            a_d.type.keyword.symbol in _BAGOF_NAMES):
+        tmpl = a_d.attr_list.get('1')
+        g_   = a_d.attr_list.get('2')
+        if tmpl is not None and g_ is not None and '3' not in a_d.attr_list:
+            collected = _collect_solutions(tmpl.deref(), g_.deref(), eng)
+            result_list = eng.wl.make_list(collected)
+            return _unify(eng, b_d, result_list)
+
+    # Handle conjunction on RHS: A = t1 & t2  →  A = t1, A = t2 (psi-term merge)
+    # '&' is psi-term conjunction: the result must satisfy BOTH constraints.
+    if b_d.type is not None and b_d.type is eng.wl.and_sym:
+        t1 = b_d.attr_list.get('1')
+        t2 = b_d.attr_list.get('2')
+        if t1 is not None and t2 is not None:
+            # Push the second unification as the next goal; do the first inline.
+            eng.push_goal(GoalType.UNIFY, a_d, t2.deref(), None)
+            return _unify(eng, a_d, t1.deref())
+
+    # Handle conjunction on LHS: t1 & t2 = B  →  t1 = B, t2 = B (symmetric)
+    if a_d.type is not None and a_d.type is eng.wl.and_sym:
+        t1 = a_d.attr_list.get('1')
+        t2 = a_d.attr_list.get('2')
+        if t1 is not None and t2 is not None:
+            eng.push_goal(GoalType.UNIFY, t2.deref(), b_d, None)
+            return _unify(eng, t1.deref(), b_d)
 
     # Handle disjunction on RHS: A = {b1;b2;...} → try A=b1, choice for rest
     if b_d.type is not None and b_d.type is eng.wl.disjunction:
@@ -840,10 +1810,291 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         a_evaled = _try_eval_bool(a_d, eng)
         if a_evaled is not None:
             a_d = a_evaled
+    # Detect whether this call is a re-fire of a suspended residuated goal
+    # (as opposed to the initial constraint setup).  The eq_term created during
+    # residuation is tagged with _resid_marker=True; when _wakeup_resid fires
+    # the pending goal it passes the tagged eq_term as *goal*, so we can detect
+    # re-fires here without any extra bookkeeping.
+    is_resid_refiring: bool = getattr(goal, '_resid_marker', False)
+
     # Try arithmetic evaluation on the RHS (for A = 1+2 style)
     b_arith = _try_eval_arith_to_term(b_d, eng)
     if b_arith is not None:
+        # Expression fully evaluated — proceed to unify LHS with result.
         b_d = b_arith
+    else:
+        # Arithmetic expression that couldn't be fully evaluated (has variables).
+        wl = eng.wl
+        b_sym = b_d.type.keyword.symbol if b_d.type and b_d.type.keyword else ''
+        if b_sym in _ARITH_OPS_SET:
+            # Mark all free variables in the arithmetic expression (and the LHS
+            # if free) as constrained to sort real.  This ensures that even when
+            # the constraint is solved immediately (e.g. A=A+0 → trivial) the
+            # variable still displays as 'real' rather than '@'.
+            _arith_mark_vars: list = []
+            _collect_arith_vars(b_d, eng.wl, _arith_mark_vars, set())
+            for _amv in _arith_mark_vars:
+                _mark_real_sort(_amv, eng.wl, eng)
+            _lhs_chk = a_d.deref()
+            if _lhs_chk.value is None and not _lhs_chk.attr_list:
+                _mark_real_sort(_lhs_chk, eng.wl, eng)
+
+            # Check whether LHS is currently free (determines which rules apply).
+            a_d_cur = a_d.deref()
+            a_d_cur_is_free = (a_d_cur.value is None and not a_d_cur.attr_list)
+
+            # Try simplification first (before self-ref check).
+            b_simplified = _simplify_arith(b_d, eng)
+            if b_simplified is not None:
+                # Simplification succeeded — recurse to handle the simplified form.
+                b_d = b_simplified
+                b_arith2 = _try_eval_arith_to_term(b_d, eng)
+                if b_arith2 is not None:
+                    b_d = b_arith2
+            else:
+                # Gather free variables in the expression.
+                vars_in_expr: list = []
+                _collect_arith_vars(b_d, wl, vars_in_expr, set())
+
+                a_d_final = a_d.deref()
+                a_d_is_free = (a_d_final.value is None and not a_d_final.attr_list)
+
+                # --- Algebraic solving ---
+                # Case 1: LHS (a_d_final) is BOUND and expression has exactly
+                #         one free variable → solve  a_d_val = a*x + b  for x.
+                # Case 2: LHS is FREE and x_var appears in expression (self-ref):
+                #         a = a_coeff*a + b_psi  →  if a_coeff=1: unify b_psi with 0;
+                #         else: a = b_psi / (1 - a_coeff).
+                solved = False
+                if vars_in_expr:
+                    ok_lhs, v_lhs = _eval_arith(a_d_final, eng)
+                    if ok_lhs and len(vars_in_expr) == 1:
+                        x_var = vars_in_expr[0].deref()
+                        coeffs = _get_linear_coeff(b_d, x_var, eng)
+                        if coeffs is not None:
+                            a_coeff, b_const = coeffs
+                            # v_lhs = a_coeff * x + b_const  →  x = (v_lhs - b_const) / a_coeff
+                            if a_coeff != 0.0:
+                                x_val = (v_lhs - b_const) / a_coeff
+                                x_term = _make_number(eng, x_val)
+                                solved = True
+                                result = _unify(eng, x_var, x_term)
+                                if not result:
+                                    return False
+                                return True
+                        else:
+                            # Special pre-check: 0 = k/x  (numerator is concrete k)
+                            _tsnl_sym = b_d.type.keyword.symbol if b_d.type and b_d.type.keyword else ''
+                            if _tsnl_sym == '/' and ok_lhs and abs(v_lhs) < 1e-12:
+                                _tsnl_a1, _tsnl_a2 = _get_two_args(b_d)
+                                if _tsnl_a1 is not None and _tsnl_a2 is not None:
+                                    _tsnl_a2_d = _tsnl_a2.deref()
+                                    if id(_tsnl_a2_d) == id(x_var):
+                                        ok_ka, v_ka = _eval_arith(_tsnl_a1, eng)
+                                        if ok_ka:
+                                            if abs(v_ka) < 1e-12:
+                                                # 0 = 0/x: trivially satisfied → mark x as real (no tilde)
+                                                solved = True
+                                                _mark_real_sort(x_var, wl, eng)
+                                                return True
+                                            else:
+                                                # 0 = k/x where k≠0: impossible → fail
+                                                return False
+                            # Try non-linear inversion (e.g. a/x = v → x = a/v)
+                            x_val = _try_solve_nonlinear(b_d, x_var, v_lhs, eng)
+                            if x_val is not None:
+                                x_term = _make_number(eng, x_val)
+                                solved = True
+                                result = _unify(eng, x_var, x_term)
+                                if not result:
+                                    return False
+                                return True
+                    # Case 1b: LHS=0 and expression is X-Y with two free vars →
+                    #           0 = X - Y  →  X = Y  (unify both vars).
+                    if ok_lhs and v_lhs == 0.0 and len(vars_in_expr) == 2:
+                        b_d_sym = b_d.type.keyword.symbol if b_d.type and b_d.type.keyword else ''
+                        if b_d_sym == '-':
+                            ba1, ba2 = _get_two_args(b_d)
+                            if ba1 is not None and ba2 is not None:
+                                ok_ba1, _ = _eval_arith(ba1, eng)
+                                ok_ba2, _ = _eval_arith(ba2, eng)
+                                if not ok_ba1 and not ok_ba2:
+                                    solved = True
+                                    result = _unify(eng, ba1, ba2)
+                                    if not result:
+                                        return False
+                                    return True
+                    # Case 1c: v = A/B with both A,B free vars
+                    if ok_lhs and len(vars_in_expr) == 2:
+                        b_d_sym2 = b_d.type.keyword.symbol if b_d.type and b_d.type.keyword else ''
+                        if b_d_sym2 == '/':
+                            ba1, ba2 = _get_two_args(b_d)
+                            if ba1 is not None and ba2 is not None:
+                                ba1_d = ba1.deref()
+                                ba2_d = ba2.deref()
+                                ba1_free = (ba1_d.value is None and not ba1_d.attr_list)
+                                ba2_free = (ba2_d.value is None and not ba2_d.attr_list)
+                                if ba1_free and ba2_free:
+                                    same_var = (id(ba1_d) == id(ba2_d))
+                                    if same_var:
+                                        # v = A/A → (v-1)*A=0. If v≠1: A=0
+                                        if abs(v_lhs - 1.0) > 1e-12:
+                                            solved = True
+                                            x_term = _make_number(eng, 0.0)
+                                            result = _unify(eng, ba1_d, x_term)
+                                            if not result:
+                                                return False
+                                            return True
+                                        else:  # v=1: A/A=1 trivially true for any A≠0, mark real
+                                            solved = True
+                                            _mark_real_sort(ba1_d, wl, eng)
+                                            return True
+                                    elif v_lhs == 0.0:
+                                        # 0 = A/B → A=0, B=real
+                                        solved = True
+                                        _mark_real_sort(ba2_d, wl, eng)
+                                        x_term = _make_number(eng, 0.0)
+                                        result = _unify(eng, ba1_d, x_term)
+                                        if not result:
+                                            return False
+                                        return True
+                                    elif v_lhs == 1.0:
+                                        # 1 = A/B → A=B (unify)
+                                        solved = True
+                                        _mark_real_sort(ba1_d, wl, eng)
+                                        _mark_real_sort(ba2_d, wl, eng)
+                                        result = _unify(eng, ba1_d, ba2_d)
+                                        if not result:
+                                            return False
+                                        return True
+                                    # else v≠0,1 and different vars → suspend (fall through)
+
+                    if a_d_is_free and _var_in_expr(a_d_final, b_d, set()):
+                        # Self-referential: LHS appears in RHS.
+                        # a = a_coeff * a + b_psi
+                        decomp = _linear_decompose_psi(b_d, a_d_final, eng, wl)
+                        if decomp is not None:
+                            a_coeff, b_psi = decomp
+                            if abs(a_coeff - 1.0) < 1e-12:
+                                # a = a + b_psi → 0 = b_psi
+                                # b_psi may itself be an arithmetic expression
+                                # (e.g. 0-C_var), so push a new prove goal
+                                # "0 = b_psi" for the engine to solve rather
+                                # than attempting direct structural unification.
+                                zero_t = wl.make_integer(0)
+                                solved = True
+                                ok_bpsi, _ = _eval_arith(b_psi, eng)
+                                if ok_bpsi:
+                                    # b_psi is already concrete — just check it's 0
+                                    result = _unify(eng, b_psi, zero_t)
+                                    if not result:
+                                        return False
+                                    return True
+                                elif (b_psi.value is None and
+                                        not b_psi.attr_list and
+                                        (b_psi.type is wl.top or
+                                         getattr(b_psi, 'flags', 0) & __import__('wild_life.data_structures', fromlist=['SORT_VAR']).SORT_VAR)):
+                                    # b_psi is a free variable — unify directly with 0
+                                    result = _unify(eng, b_psi, zero_t)
+                                    if not result:
+                                        return False
+                                    return True
+                                else:
+                                    # b_psi is a compound expression — push 0 = b_psi
+                                    # as a new prove goal for the engine to handle
+                                    eq_defn = getattr(wl, 'eqsym', None) or (
+                                        wl.syntax_module.symbol_table.get('=')
+                                        if hasattr(wl, 'syntax_module') else None)
+                                    if eq_defn is not None:
+                                        new_eq = PsiTerm(type_def=eq_defn)
+                                        new_eq.attr_list['1'] = zero_t
+                                        new_eq.attr_list['2'] = b_psi
+                                        eng.push_goal(GoalType.PROVE, new_eq, None, None)
+                                    return True
+                            else:
+                                # a = a_coeff * a + b_psi → a = b_psi/(1-a_coeff)
+                                ok_b, v_b = _eval_arith(b_psi, eng)
+                                if ok_b:
+                                    x_val = v_b / (1.0 - a_coeff)
+                                    x_term = _make_number(eng, x_val)
+                                    solved = True
+                                    result = _unify(eng, a_d_final, x_term)
+                                    if not result:
+                                        return False
+                                    return True
+                        else:
+                            # decomp is None: try non-linear self-referential patterns
+                            _b_sym_nl = b_d.type.keyword.symbol if b_d.type and b_d.type.keyword else ''
+                            if _b_sym_nl == '/':
+                                _nls_a1, _nls_a2 = _get_two_args(b_d)
+                                if _nls_a1 is not None and _nls_a2 is not None:
+                                    _nls_a2_d = _nls_a2.deref()
+                                    if id(_nls_a2_d) == id(a_d_final):
+                                        # A = k/A → A² = k. If k=0: A=0.
+                                        ok_k, v_k = _eval_arith(_nls_a1, eng)
+                                        if ok_k and abs(v_k) < 1e-12:
+                                            solved = True
+                                            x_term = _make_number(eng, 0.0)
+                                            result = _unify(eng, a_d_final, x_term)
+                                            if not result:
+                                                return False
+                                            return True
+
+                    # Case 3: LHS is free, RHS has exactly one free var, expr = 1*B+0 → unify
+                    if (not solved and a_d_is_free
+                            and not _var_in_expr(a_d_final, b_d, set())
+                            and len(vars_in_expr) == 1):
+                        x_b = vars_in_expr[0].deref()
+                        coeffs_b = _get_linear_coeff(b_d, x_b, eng)
+                        if coeffs_b is not None:
+                            a_coeff_b, b_const_b = coeffs_b
+                            if a_coeff_b == 1.0 and abs(b_const_b) < 1e-12:
+                                # A = 1*B + 0 = B → unify A and B
+                                solved = True
+                                _mark_real_sort(a_d_final, wl, eng)
+                                _mark_real_sort(x_b, wl, eng)
+                                result = _unify(eng, a_d_final, x_b)
+                                if not result:
+                                    return False
+                                return True
+
+                if not solved:
+                    # Can't solve now — suspend (re-suspend with tildes).
+                    # Re-suspension is correct even for is_resid_refiring cases:
+                    # drop only when truly cyclic (a_coeff==1 with no const solution).
+                    if not vars_in_expr:
+                        # No free vars in expression — evaluate it and unify.
+                        ok_eval, v_eval = _eval_arith(b_d, eng)
+                        if ok_eval:
+                            b_d = _make_number(eng, v_eval)
+                        else:
+                            # Concrete but unevaluable (e.g. division by zero). Fail.
+                            return False
+                    else:
+                        from wild_life.data_structures import Goal, Residuation
+                        eq_defn = getattr(wl, 'eqsym', None) or wl.syntax_module.symbol_table.get('=')
+                        eq_term = PsiTerm(type_def=eq_defn)
+                        eq_term.attr_list['1'] = a_d
+                        eq_term.attr_list['2'] = b_d
+                        eq_term._resid_marker = True
+                        pending_goal = Goal(GoalType.PROVE, eq_term, None, None, pending=True)
+                        for v in vars_in_expr:
+                            _attach_arith_resid(v, wl, pending_goal, eng)
+                        if not a_d_is_free:
+                            # LHS is bound: also attach to original LHS var so tilde shows.
+                            a_orig = a
+                            if a_orig.resid is None:
+                                if eng is not None:
+                                    eng.trail.trail_psi(a_orig, 'resid')
+                                a_orig.resid = [Residuation(goal=pending_goal)]
+                            else:
+                                if not any(r.goal is pending_goal for r in a_orig.resid):
+                                    if eng is not None:
+                                        eng.trail.trail_copy(a_orig, 'resid')
+                                    a_orig.resid.append(Residuation(goal=pending_goal))
+                        else:
+                            _attach_arith_resid(a_d_final, wl, pending_goal, eng)
+                        return True
     # Try string function evaluation on RHS (psi2str, str2psi, strcon)
     b_str = _try_eval_string_func(b_d, eng)
     if b_str is not None:
@@ -1087,6 +2338,67 @@ def bi_call(goal: PsiTerm, eng) -> bool:
     return True  # will be continued in main loop
 
 
+def bi_and(goal: PsiTerm, eng) -> bool:
+    """and(A, B) — Boolean conjunction as a goal: succeed iff both A and B hold.
+
+    Wild Life uses 'and' as both a boolean function sort and as a conjunction
+    predicate.  When proved as a goal, and(A,B) tries to prove both A and B
+    (like Prolog's ','(A,B)).  It first tries to evaluate the boolean value of
+    the expression; if the result is a definite true/false atom it acts on that;
+    otherwise it falls back to proving A as a goal and then B.
+    """
+    arg1, arg2 = _get_two_args(goal)
+    if arg1 is None or arg2 is None:
+        return True  # degenerate: succeed
+    arg1d = arg1.deref()
+    arg2d = arg2.deref()
+    # Try evaluating as booleans first
+    b_result = _try_eval_bool(goal, eng)
+    if b_result is not None:
+        sym = _get_sym(b_result)
+        return sym == 'true'
+    # Fall back: prove both as goals
+    from wild_life.unification import GoalType as _GoalType
+    _GoalType = GoalType  # use the imported GoalType
+    # Push in reverse order (goal_stack is a stack, so last pushed = first proved)
+    eng.push_goal(GoalType.PROVE, arg2d, _DEFRULES_SENTINEL, None)
+    eng.push_goal(GoalType.PROVE, arg1d, _DEFRULES_SENTINEL, None)
+    return True
+
+
+def bi_or(goal: PsiTerm, eng) -> bool:
+    """or(A, B) — Boolean disjunction as a goal: succeed iff A or B holds.
+
+    Tries to evaluate as a boolean first; if definite, acts on it.
+    Otherwise creates a choice point: try A, or on failure try B.
+    """
+    arg1, arg2 = _get_two_args(goal)
+    if arg1 is None or arg2 is None:
+        return True
+    arg1d = arg1.deref()
+    arg2d = arg2.deref()
+    # Try evaluating as booleans first
+    b_result = _try_eval_bool(goal, eng)
+    if b_result is not None:
+        sym = _get_sym(b_result)
+        return sym == 'true'
+    # Fall back: choice between arg1 and arg2 (simplified: try arg1; if fails, try arg2)
+    mark = eng.trail.mark()
+    cp_save = eng.choice_stack
+    gs_save = eng.goal_stack
+    eng.push_goal(GoalType.PROVE, arg1d, _DEFRULES_SENTINEL, None)
+    _barrier = cp_save if cp_save is not None else _INNER_RUN_BARRIER
+    result1 = eng.run(cs_barrier=_barrier)
+    if result1:
+        eng.choice_stack = cp_save
+        return True
+    eng.trail.undo_to(mark)
+    eng.choice_stack = cp_save
+    eng.goal_stack = gs_save
+    eng.push_goal(GoalType.PROVE, arg2d, _DEFRULES_SENTINEL, None)
+    return True
+
+
 def bi_once(goal: PsiTerm, eng) -> bool:
     """once(P) — call P exactly once."""
     arg = _get_one_arg(goal)
@@ -1104,83 +2416,197 @@ def bi_once(goal: PsiTerm, eng) -> bool:
     return result
 
 
-def bi_cond(goal: PsiTerm, eng) -> bool:
-    """cond(Cond, Then) — if Cond succeeds then prove Then, else succeed.
+def _eval_as_bool_func(t: 'PsiTerm', eng, _depth: int = 0) -> 'Optional[bool]':
+    """Evaluate *t* as a boolean function expression.
 
-    This is the Wild Life conditional: always succeeds (like (Cond -> Then ; true)).
+    Returns True, False, or None (cannot reduce to a boolean).
+    This is the Wild Life functional-evaluation mode: only FUNCTION definitions
+    (defined with '->') and built-in comparisons are evaluated.  PREDICATE
+    definitions (defined with ':-') are *not* callable in this mode and yield
+    None (unresolvable).
+
+    Used by the 2-argument form of cond/2.
+    """
+    if t is None or _depth > 20:
+        return None
+    t = t.deref()
+    defn = t.type
+    if defn is None:
+        return None
+
+    sym = defn.keyword.symbol if defn.keyword else ''
+
+    # ── Literal boolean atoms ──
+    if sym == 'true':
+        return True
+    if sym in ('false', 'fail'):
+        return False
+
+    wl = eng.wl
+
+    # ── Conjunction (, or 'and') ──
+    if defn is wl.commasym or sym == 'and':
+        a1 = t.attr_list.get('1')
+        a2 = t.attr_list.get('2')
+        r1 = _eval_as_bool_func(a1.deref() if a1 else None, eng, _depth + 1)
+        if r1 is None:
+            return None   # can't determine → propagate failure
+        if r1 is False:
+            return False
+        # r1 is True
+        r2 = _eval_as_bool_func(a2.deref() if a2 else None, eng, _depth + 1)
+        return r2
+
+    # ── Disjunction (;) ──
+    if defn is wl.life_or or defn is wl.disjunction:
+        a1 = t.attr_list.get('1')
+        a2 = t.attr_list.get('2')
+        r1 = _eval_as_bool_func(a1.deref() if a1 else None, eng, _depth + 1)
+        if r1 is True:
+            return True
+        r2 = _eval_as_bool_func(a2.deref() if a2 else None, eng, _depth + 1)
+        if r2 is True:
+            return True
+        if r1 is False and r2 is False:
+            return False
+        return None
+
+    # ── Built-in FUNCTION: arithmetic comparisons ──
+    if defn._builtin_func is not None and defn.type == DefType.FUNCTION:
+        if sym in ('>', '<', '>=', '=<', '=:=', '=\\='):
+            a1 = t.attr_list.get('1')
+            a2 = t.attr_list.get('2')
+            if a1 and a2:
+                ok1, v1 = _eval_arith(a1, eng)
+                ok2, v2 = _eval_arith(a2, eng)
+                if ok1 and ok2:
+                    cmp_map: dict = {
+                        '>': v1 > v2, '<': v1 < v2,
+                        '>=': v1 >= v2, '=<': v1 <= v2,
+                        '=:=': v1 == v2, '=\\=': v1 != v2,
+                    }
+                    return cmp_map.get(sym)
+        # Other built-in functions cannot be evaluated without engine machinery
+        return None
+
+    # ── User-defined FUNCTION (defined with '->') ──
+    if defn.type == DefType.FUNCTION and defn.rule:
+        from wild_life.unification import copy_term as _copy_term
+        active = [(h, b) for (h, b) in defn.rule if h is not None and b is not None]
+        for (h0, b0) in active:
+            _vm: dict = {}
+            head = _copy_term(h0, _vm)
+            body = _copy_term(b0, _vm)
+            body_d = body.deref()
+            # Skip guarded rules (value | condition) — need engine machinery
+            if body_d.type is not None and body_d.type is wl.such_that:
+                continue
+            mark = eng.trail.mark()
+            ok = eng.unifier.unify(t, head)
+            if ok:
+                result = _eval_as_bool_func(body_d, eng, _depth + 1)
+                eng.trail.undo_to(mark)
+                if result is not None:
+                    return result
+            else:
+                eng.trail.undo_to(mark)
+        return None
+
+    # ── PREDICATE — cannot evaluate functionally ──
+    if defn.type == DefType.PREDICATE:
+        return None
+
+    return None
+
+
+def bi_cond(goal: PsiTerm, eng) -> bool:
+    """cond(Cond, Then[, Else]) — Wild Life conditional.
+
+    2-argument form  cond(Cond, Then):
+        Evaluate Cond and Then as *boolean functions* (Wild Life functional
+        semantics).  PREDICATE definitions cannot be called in this mode.
+        - If Cond evaluates to true and Then evaluates to true → succeed.
+        - If Cond evaluates to false or unknown → succeed silently.
+        - If Cond is true but Then evaluates to false/unknown → FAIL.
+
+    3-argument form  cond(Cond, Then, Else):
+        Prove Cond as a predicate goal (with inner run, cutting alternatives).
+        - If Cond succeeds → push Then as predicate goal.
+        - If Cond fails    → undo Cond's bindings and push Else as predicate goal.
     """
     args = list(goal.attr_list.values()) if goal.attr_list else []
     if len(args) < 2:
-        return True  # degenerate: succeed
+        return True   # degenerate: succeed
     cond_g = args[0].deref()
     then_g = args[1].deref()
+    else_g = args[2].deref() if len(args) >= 3 else None
 
+    if else_g is None:
+        # ── 2-arg form: fully functional evaluation ──
+        cond_result = _eval_as_bool_func(cond_g, eng)
+        if cond_result is not True:
+            # Cond is false or unresolvable → succeed silently (no Then)
+            return True
+        # Cond is true → evaluate Then as a boolean function
+        then_result = _eval_as_bool_func(then_g, eng)
+        return then_result is True
+
+    # ── 3-arg form: predicate if-then-else ──
     mark = eng.trail.mark()
     cp_save = eng.choice_stack
     gs_save = eng.goal_stack
+    # IMPORTANT: clear goal_stack before the inner run so only cond_g is
+    # proved — the continuation must NOT run inside the inner run.
+    eng.goal_stack = None
     eng.push_goal(GoalType.PROVE, cond_g, _DEFRULES_SENTINEL, None)
     old_main_loop_ok = eng.main_loop_ok
-    # Use _INNER_RUN_BARRIER to prevent run() from undoing the trail to position 0
-    # on failure — that would destroy outer bindings (e.g. N=1 set before this call).
     _barrier = cp_save if cp_save is not None else _INNER_RUN_BARRIER
     cond_ok = eng.run(cs_barrier=_barrier)
     eng.main_loop_ok = old_main_loop_ok
 
+    eng.choice_stack = cp_save   # discard Cond's choice points either way
+    eng.goal_stack = gs_save     # restore the outer continuation
+
     if cond_ok:
-        # Cond succeeded — cut alternatives, prove Then
-        eng.choice_stack = cp_save  # discard choice points created by cond
-        eng.goal_stack = gs_save
+        # Cond succeeded → push Then
         eng.push_goal(GoalType.PROVE, then_g, _DEFRULES_SENTINEL, None)
         return True
     else:
-        # Cond failed — undo any bindings made during Cond and succeed silently
+        # Cond failed → undo its bindings, push Else
         eng.trail.undo_to(mark)
-        eng.choice_stack = cp_save
-        eng.goal_stack = gs_save
+        eng.push_goal(GoalType.PROVE, else_g, _DEFRULES_SENTINEL, None)
         return True
 
 
-def bi_findall(goal: PsiTerm, eng) -> bool:
-    """findall(Template, Goal, Bag) — collect all solutions."""
-    arg1, rest = _get_two_args(goal)
-    if arg1 is None or rest is None:
-        return False
-    template = arg1
-    g = rest.attr_list.get('1')
-    bag_out = rest.attr_list.get('2')
-    if g is None or bag_out is None:
-        # Try 3-arg form
-        a1 = goal.attr_list.get('1')
-        a2 = goal.attr_list.get('2')
-        a3 = goal.attr_list.get('3')
-        if not (a1 and a2 and a3):
-            return False
-        template = a1.deref()
-        g = a2.deref()
-        bag_out = a3.deref()
+def _collect_solutions(template: PsiTerm, g: PsiTerm, eng) -> list:
+    """Collect all solutions of goal g, returning copies of template.
 
-    solutions = []
+    Helper shared by findall/bagof/setof.
+    Saves/restores trail, choice_stack, goal_stack.
+
+    Template and goal are copied together (shared var_map) so that variables
+    in the template are bound when the goal is solved.
+    """
     wl = eng.wl
     mark = eng.trail.mark()
     cp_save = eng.choice_stack
     gs_save = eng.goal_stack
 
-    # Run the goal, collecting template copies for each solution
-    def collect_solution():
-        sol = copy_term(template)
-        solutions.append(sol)
-        return False  # force backtracking to get all solutions
-
-    # Temporarily push collect goal — simplified: run directly
-    goal_copy = copy_term(g)
+    # Copy template and goal with shared variable mapping so they share variables.
+    shared_map: dict = {}
+    template_copy = copy_term(template, shared_map)
+    goal_copy = copy_term(g, shared_map)
+    # IMPORTANT: clear goal_stack so the inner runs only prove goal_copy;
+    # the outer continuation must NOT run inside the inner loop.
+    eng.goal_stack = None
     eng.push_goal(GoalType.PROVE, goal_copy, _DEFRULES_SENTINEL, None)
 
-    # Collect all solutions via repeated backtracking
     collected = []
     while True:
         result = eng.run()
         if result:
-            collected.append(copy_term(template))
+            # Copy template_copy with current bindings resolved
+            collected.insert(0, copy_term(template_copy))
             if not eng.choice_stack or eng.choice_stack is cp_save:
                 break
             eng.backtrack()
@@ -1190,10 +2616,33 @@ def bi_findall(goal: PsiTerm, eng) -> bool:
     eng.trail.undo_to(mark)
     eng.choice_stack = cp_save
     eng.goal_stack = gs_save
+    return collected
 
-    # Build a list of collected solutions
-    result_list = wl.make_list(collected)
-    return _unify(eng, bag_out, result_list)
+
+def bi_findall(goal: PsiTerm, eng) -> bool:
+    """findall(Template, Goal, Bag) — collect all solutions.
+
+    Supports both:
+      findall(Template, Goal, Bag)   — 3-arg predicate form
+      _A = findall(Template, Goal)   — 2-arg functional form (handled via bi_unify)
+    """
+    wl = eng.wl
+    # Try 3-arg form first
+    a1 = goal.attr_list.get('1')
+    a2 = goal.attr_list.get('2')
+    a3 = goal.attr_list.get('3')
+    if a1 and a2 and a3:
+        template = a1.deref()
+        g = a2.deref()
+        bag_out = a3.deref()
+        collected = _collect_solutions(template, g, eng)
+        result_list = wl.make_list(collected)
+        return _unify(eng, bag_out, result_list)
+
+    # 2-arg functional form: result must be provided separately
+    # This path is normally reached via bi_unify's bagof-as-function handling.
+    # Called as predicate with 2 args → fail (use = form instead)
+    return False
 
 
 def bi_assert(goal: PsiTerm, eng) -> bool:
@@ -1201,6 +2650,9 @@ def bi_assert(goal: PsiTerm, eng) -> bool:
     arg = _get_one_arg(goal)
     if arg is None:
         return False
+    # Evaluate arithmetic sub-expressions before storing so that
+    # assert(mynum(N+1)) with N=31 stores mynum(32) not mynum(31+1).
+    arg = _normalize_arith_in_term(arg, eng)
     eng.assert_first = False
     eng.assert_clause(arg)
     return True
@@ -1211,6 +2663,8 @@ def bi_asserta(goal: PsiTerm, eng) -> bool:
     arg = _get_one_arg(goal)
     if arg is None:
         return False
+    # Evaluate arithmetic sub-expressions before storing.
+    arg = _normalize_arith_in_term(arg, eng)
     eng.assert_first = True
     eng.assert_clause(arg)
     eng.assert_first = False
@@ -1253,6 +2707,113 @@ def bi_retract(goal: PsiTerm, eng) -> bool:
     # always deletes from the master list at the correct position.
     rule_list = defn.rule  # live mutable list
     eng.push_goal(_GT.DEL_CLAUSE, head, body, (rule_list, 0))
+    return True
+
+
+def bi_store_arrow(goal: PsiTerm, eng) -> bool:
+    """X <- V / X <<- V — assignment operators.
+
+    '<-'  is BACKTRACKABLE assignment (trailed, reversible on backtracking).
+    '<<-' is NON-BACKTRACKABLE (destructive, permanent) assignment.
+
+    Two modes:
+    1. Global/persistent variable (LHS has a function/predicate definition):
+       Retract all existing rules and assert LHS -> RHS (like setq).
+       Always destructive (global state is not backtracked).
+    2. Local variable / already-bound term:
+       For '<-': trail the coref pointer then rebind (backtrackable).
+       For '<<-': destructively update in-place (non-backtrackable).
+    """
+    a1 = goal.attr_list.get('1')
+    a2 = goal.attr_list.get('2')
+    if a1 is None or a2 is None:
+        return False
+
+    # Determine whether this is backtrackable (<-) or destructive (<<-)
+    _op_sym = goal.type.keyword.symbol if (goal.type and goal.type.keyword) else '<<-'
+    _backtrackable = (_op_sym == '<-')
+
+    # Deref LHS
+    lhs = a1.deref()
+    defn = lhs.type
+
+    # Mode 1: LHS is a named function/predicate symbol (global variable)
+    if (defn is not None and
+            hasattr(defn, 'rule') and
+            defn.rule is not None and
+            lhs.value is None and
+            not lhs.attr_list):
+        # Use setq-like behavior: clear all rules, assert new value
+        # Always destructive for global variables (global state is intentional)
+        from wild_life.unification import copy_term as _copy_term
+        rhs_d = a2.deref()
+        # Try arithmetic eval for numeric RHS
+        ok, val = _eval_arith(a2, eng)
+        if ok:
+            # Build a numeric psi-term as the new value
+            new_val = PsiTerm()
+            new_val.type = eng.wl.real
+            new_val.value = val
+            rhs_d = new_val
+        defn.rule = []          # clear existing rules
+        defn.type = DefType.FUNCTION
+        _vm: dict = {}
+        head_copy = _copy_term(lhs, _vm)
+        defn.rule.append((head_copy, rhs_d))
+        return True
+
+    # Mode 2: Local variable / bound term
+    # Evaluate RHS (arithmetic or term)
+    ok_arith, val = _eval_arith(a2, eng)
+    if ok_arith:
+        rhs_term = PsiTerm()
+        rhs_term.type = eng.wl.real
+        rhs_term.value = val
+    else:
+        rhs_term = a2.deref()
+
+    if _backtrackable:
+        # '<-': backtrackable in-place update of the dereferenced endpoint.
+        # We must mutate `lhs` (the end of the deref chain) so that ALL
+        # variables pointing into this chain see the new value, while trailing
+        # each changed field so backtracking restores the original state.
+        eng.trail.trail_psi(lhs, 'value')
+        eng.trail.trail_psi(lhs, 'coref')
+        eng.trail.trail_psi(lhs, 'type')
+        eng.trail.trail_psi(lhs, 'attr_list')
+        eng.trail.trail_psi(lhs, 'flags')
+        if ok_arith:
+            lhs.value = val
+            lhs.coref = None
+            lhs.attr_list = {}
+            if lhs.type is None or lhs.type is eng.wl.top:
+                lhs.type = eng.wl.real
+        else:
+            rhs = rhs_term
+            lhs.value = rhs.value
+            lhs.type = rhs.type
+            lhs.attr_list = dict(rhs.attr_list)
+            lhs.coref = rhs.coref
+            lhs.flags = rhs.flags
+        return True
+
+    # '<<-': non-backtrackable (destructive in-place update)
+    if ok_arith:
+        lhs.value = val
+        lhs.coref = None
+        lhs.attr_list = {}
+        if lhs.type is None or lhs.type is eng.wl.top:
+            lhs.type = eng.wl.real
+        return True
+
+    # Non-arithmetic RHS: destructively copy rhs structure into lhs
+    rhs = rhs_term
+    lhs.value = rhs.value
+    lhs.type = rhs.type
+    lhs.attr_list = dict(rhs.attr_list)
+    lhs.coref = None   # clear any forwarding pointer
+    lhs.flags = rhs.flags
+    lhs.resid = rhs.resid
     return True
 
 
@@ -1309,9 +2870,33 @@ def bi_clause(goal: PsiTerm, eng) -> bool:
     body = args_raw[1].deref() if len(args_raw) >= 2 else None
     wl = eng.wl
 
+    # Handle the LIFE clause form: clause(X:(Pred->Body))?
+    # When head.type is '->' (the clause arrow), the actual predicate is in attr '1'
+    # and the body variable is in attr '2'.
+    clause_container = None  # the head->body term to unify with full clause
+    if (head.type and head.type.keyword and head.type.keyword.symbol == '->'
+            and not head.value):
+        # head is a psi-term of sort '->': this is the X:(f1->Y) form
+        pred_term = head.attr_list.get('1')
+        body_from_head = head.attr_list.get('2')
+        if pred_term is not None:
+            pred_d = pred_term.deref()
+            defn = pred_d.type
+            if defn is not None and defn.rule is not None and not callable(defn.rule):
+                if body_from_head is not None and body is None:
+                    # Store the head container for unification
+                    clause_container = head
+                    # Use the body variable from inside the arrow form
+                    body = body_from_head.deref() if body_from_head else wl.make_var()
+                    head = pred_d  # The actual predicate head to match against rule heads
+    else:
+        defn = head.type
+        if defn is None or defn.rule is None or callable(defn.rule):
+            # Try treating it as a 0-arity predicate/fact
+            return False
+
     defn = head.type
     if defn is None or defn.rule is None or callable(defn.rule):
-        # Try treating it as a 0-arity predicate/fact
         return False
 
     rule_list = defn.rule
@@ -1322,7 +2907,18 @@ def bi_clause(goal: PsiTerm, eng) -> bool:
     if body is None:
         body = wl.make_var()
 
-    eng.push_goal(_GT.CLAUSE, head, body, rule_list)
+    if clause_container is not None:
+        # For the X:(Pred->Body) form, we need to unify the full clause term
+        # clause_container is the term X was bound to (Pred->Body structure).
+        # We push a special CLAUSE goal that handles this form.
+        # When a rule (h, b) matches:
+        #   - Unify head (pred term) with h
+        #   - Unify body with b
+        # The X variable is already bound to the container, and the head/body
+        # sub-terms inside it will unify through the trail.
+        eng.push_goal(_GT.CLAUSE, head, body, rule_list)
+    else:
+        eng.push_goal(_GT.CLAUSE, head, body, rule_list)
     return True
 
 
@@ -1337,13 +2933,14 @@ def bi_children(goal: PsiTerm, eng) -> bool:
     defn = sort_term.type
     if defn is None:
         return _unify(eng, a2, wl.make_atom('[]', wl.user_module))
-    # Collect subtypes
+    # Use the Definition's own children list to avoid duplicates from aliases.
+    # Each Definition has a .children list populated by _make_type_link.
     children = []
-    for mod in wl._all_modules():
-        for sym_name, child_defn in mod.symbol_table.items():
-            if child_defn.parent is defn:
-                child_atom = wl.make_atom(sym_name, mod)
-                children.append(child_atom)
+    for child_defn in getattr(defn, 'children', []):
+        if child_defn.keyword is None:
+            continue
+        child_atom = wl.make_atom(child_defn.keyword.symbol, wl.bi_module)
+        children.append(child_atom)
     result_list = wl.make_list(children)
     return _unify(eng, a2, result_list)
 
@@ -1723,11 +3320,12 @@ def bi_member(goal: PsiTerm, eng) -> bool:
     items = _list_to_python(a2, eng)
     if not items:
         return False
-    # Set up choice points for each member
+    # Set up choice points for each member.
+    # Use UNIFY choice points (not PROVE) so backtracking unifies x with the
+    # alternative item via unify_aim, not prove_aim which expects a rule list.
     x = a1
-    for i, item in enumerate(reversed(items)):
-        if i < len(items) - 1:
-            eng.push_choice_point(GoalType.PROVE, x, item, None)
+    for item in reversed(items[1:]):
+        eng.push_choice_point(GoalType.UNIFY, x, item, None)
     # Try first item
     mark = eng.trail.mark()
     ok = _unify(eng, x, items[0])
@@ -1826,8 +3424,39 @@ def bi_halt(goal: PsiTerm, eng) -> bool:
 
 
 def bi_abort(goal: PsiTerm, eng) -> bool:
-    """abort — abort current query."""
-    raise AbortException()
+    """abort — call aborthook (if set), then abort current query.
+
+    The aborthook is a predicate name stored via setq(aborthook, foo).
+    When set, we call it before raising AbortException.  The hook's output
+    appears on the same line as the already-printed prompt ('> ').
+    """
+    hook_called = False
+    wl = eng.wl
+
+    # Look up the 'aborthook' symbol — the user sets it via setq(aborthook, foo).
+    # update_symbol returns the existing Definition (creating one if new, but an
+    # unset symbol will have rule=None or an empty list).
+    try:
+        hook_defn = wl.update_symbol(None, 'aborthook')
+        if hook_defn is not None and isinstance(hook_defn.rule, list) and hook_defn.rule:
+            # rule is a list of (head_copy, v_term) tuples stored by bi_setq.
+            _, v_term = hook_defn.rule[0]
+            hook_psi = v_term.deref() if v_term is not None else None
+            if hook_psi is not None:
+                try:
+                    # Prove the hook predicate (e.g. foo, which writes "I'm outta here!")
+                    eng.prove(hook_psi)
+                except AbortException:
+                    raise  # propagate nested abort
+                except Exception:
+                    pass  # ignore hook failures
+                hook_called = True
+    except AbortException:
+        raise
+    except Exception:
+        pass
+
+    raise AbortException(hook_called=hook_called)
 
 
 def bi_nl_err(goal: PsiTerm, eng) -> bool:
@@ -1986,6 +3615,51 @@ def bi_statistics(goal: PsiTerm, eng) -> bool:
     return True
 
 
+def _bi_listing_one(defn, wl) -> None:
+    """Helper: list clauses for a single Definition."""
+    from wild_life.data_structures import DefType
+    from wild_life.print_term import term_to_string
+
+    if defn is None or defn.keyword is None:
+        return
+    active_rules = [(h, b) for h, b in (defn.rule or []) if h is not None]
+    if not active_rules:
+        return
+    func_name = defn.keyword.symbol
+    print(f"\ndynamic({func_name})?")
+    is_function = (defn.type == DefType.FUNCTION)
+    succeed_sym = wl.succeed.keyword.symbol if wl.succeed and wl.succeed.keyword else 'succeed'
+    for h, b in active_rules:
+        hs = term_to_string(h, wl=wl)
+        if is_function:
+            vs = term_to_string(b, wl=wl) if b is not None else 'true'
+            print(f"{hs} -> {vs}.")
+        else:
+            has_body = (b is not None and b.type is not None
+                        and b.type.keyword is not None
+                        and b.type.keyword.symbol != succeed_sym)
+            if has_body:
+                bs = term_to_string(b, wl=wl)
+                print(f"{hs} :-\n        {bs}.")
+            else:
+                print(f"{hs}.")
+
+
+def _bi_listing_all(eng, wl) -> None:
+    """List all user-defined predicates/functions."""
+    from wild_life.data_structures import DefType
+    if not hasattr(wl, 'user_module') or not wl.user_module:
+        return
+    # Gather all definitions that have rules
+    seen = set()
+    for sym, defn in list(wl.user_module.symbol_table.items()):
+        if defn is None or id(defn) in seen:
+            continue
+        seen.add(id(defn))
+        if defn.rule and defn.type in (DefType.PREDICATE, DefType.FUNCTION):
+            _bi_listing_one(defn, wl)
+
+
 def bi_listing(goal: PsiTerm, eng) -> bool:
     """listing(F) — list clauses for functor F.
 
@@ -1999,17 +3673,19 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
           \\ndynamic(NAME)?
           HEAD -> VALUE.
     """
-    arg = _get_one_arg(goal)
-    if arg is None:
-        return False
-    defn = arg.type if arg.type else None
-    if defn is None:
-        return False
-
     from wild_life.data_structures import DefType
     from wild_life.print_term import term_to_string
 
     wl = eng.wl
+    arg = _get_one_arg(goal)
+    if arg is None:
+        # listing with no args: list all user-defined predicates/functions
+        _bi_listing_all(eng, wl)
+        return True
+    defn = arg.type if arg.type else None
+    if defn is None:
+        return False
+
     func_name = defn.keyword.symbol if defn.keyword else '?'
 
     # Collect non-deleted rules
@@ -2284,7 +3960,10 @@ def register_all(wl) -> None:
 
     # I/O
     _reg('write', bi_write)
+    _reg('pretty_write', bi_write)     # alias: pretty_write = write
     _reg('writeq', bi_writeq)
+    _reg('pretty_writeq', bi_writeq)   # alias: pretty_writeq = writeq
+    _reg('write_canonical', bi_write_canonical)
     _reg('print', bi_print)
     _reg('nl', bi_nl)
     _reg('write_err', bi_write_err)
@@ -2314,6 +3993,8 @@ def register_all(wl) -> None:
     _reg('==', bi_identical)
     _reg('\\==', bi_not_identical)
     _reg('compare', bi_compare)
+    _reg('<-', bi_store_arrow)      # destructive assignment
+    _reg('<<-', bi_store_arrow)     # strict destructive assignment (same semantics)
 
     # Type testing
     _reg('var', bi_var)
@@ -2334,7 +4015,10 @@ def register_all(wl) -> None:
     _reg('false', bi_fail)
     _reg('not', bi_not)
     _reg('\\+', bi_not)
+    _reg('and', bi_and)
+    _reg('or', bi_or)
     _reg('call', bi_call)
+    _reg('implies', bi_call)   # implies(Goal) is an alias for call(Goal)
     _reg('once', bi_once)
     _reg('cond', bi_cond)
     _reg('findall', bi_findall)
@@ -2374,6 +4058,7 @@ def register_all(wl) -> None:
     _reg('term_to_atom', bi_term_to_atom)
     _reg('string_codes', bi_string_codes)
     _reg('string_length', bi_string_length)
+    _reg('strlen', bi_string_length)   # alias: strlen(String, Len)
     _reg('char_type', bi_char_type)
 
     # Lists
@@ -2397,10 +4082,31 @@ def register_all(wl) -> None:
     # System
     _reg('halt', bi_halt)
     _reg('abort', bi_abort)
-    # gc — garbage collection (memory management).  In Python the GC is
-    # automatic; this is a no-op that simply succeeds.  It does NOT touch
-    # the choice stack (it is not a cut operation).
+    # gc — garbage collection (memory management).  In Wild Life, heap
+    # compaction discards choice points that contain stale retract (DEL_CLAUSE)
+    # backtrack information, but leaves regular PROVE/CLAUSE choice points
+    # (which point to live clause lists) intact.  We model this by removing
+    # DEL_CLAUSE choice points from the stack while keeping all others.
     def _bi_gc(goal, eng):
+        from wild_life.data_structures import GoalType as _GoalType
+        # Walk the choice stack and filter out DEL_CLAUSE nodes.
+        # The stack is a singly-linked list (newest at head, oldest at tail).
+        # Build a new list of kept nodes, then relink them.
+        kept = []
+        cp = eng.choice_stack
+        while cp is not None:
+            gs = cp.goal_stack
+            if gs is None or gs.type != _GoalType.DEL_CLAUSE:
+                kept.append(cp)
+            cp = cp.next
+        # Relink the kept nodes
+        if kept:
+            for i in range(len(kept) - 1):
+                kept[i].next = kept[i + 1]
+            kept[-1].next = None
+            eng.choice_stack = kept[0]
+        else:
+            eng.choice_stack = None
         return True
     _reg('gc', _bi_gc)
     _reg('garbage_collect', _bi_gc)
@@ -2422,7 +4128,16 @@ def register_all(wl) -> None:
 
     # ── LIFE meta-predicates (no-ops or minimal stubs) ─────────────────────
     def _bi_non_strict(goal, eng):
-        """non_strict(P): mark P as non-strict (lazy). No-op in this impl."""
+        """non_strict(P): mark P as non-strict (lazy evaluation of arguments)."""
+        arg = goal.attr_list.get('1')
+        if arg is None:
+            return False
+        arg = arg.deref()
+        if arg.type is not None and arg.type is not eng.wl.top:
+            # Register this sort/function as non-strict
+            if not hasattr(eng, 'non_strict_set'):
+                eng.non_strict_set = set()
+            eng.non_strict_set.add(arg.type)
         return True
     _reg('non_strict', _bi_non_strict)
 
@@ -2501,22 +4216,55 @@ def register_all(wl) -> None:
         if a1 is None or a2 is None:
             return False
         a1, a2 = a1.deref(), a2.deref()
+        # Only evaluate when at least one string is concrete
+        def _is_str(x):
+            return x.value is not None and x.type is not None and x.type.is_subtype_of(eng.wl.quoted_string)
+        if not (_is_str(a1) or _is_str(a2)):
+            return False
         # Evaluate nested string funcs
         a1e = _try_eval_string_func(a1, eng)
         if a1e is not None: a1 = a1e
         a2e = _try_eval_string_func(a2, eng)
         if a2e is not None: a2 = a2e
-        s1 = _term_to_display_string(a1, eng)
-        s2 = _term_to_display_string(a2, eng)
+        s1 = str(a1.value) if a1.value is not None else ''
+        s2 = str(a2.value) if a2.value is not None else ''
         result = _make_string(eng, s1 + s2)
         if a3 is None:
             return True
         return _unify(eng, a3.deref(), result)
     _reg('strcon', _bi_strcon)
 
+    def _bi_substr(goal, eng):
+        """substr(String, Start, Length, Result): Result = substring of String."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        a3 = goal.attr_list.get('3')
+        a4 = goal.attr_list.get('4')
+        if a1 is None or a2 is None or a3 is None:
+            return False
+        s_t = a1.deref()
+        if s_t.value is None or s_t.type is None or not s_t.type.is_subtype_of(eng.wl.quoted_string):
+            return False
+        s = str(s_t.value)
+        ok2, start_f = _eval_arith(a2.deref(), eng)
+        ok3, length_f = _eval_arith(a3.deref(), eng)
+        if not ok2 or not ok3:
+            return False
+        start = int(start_f) - 1  # 1-indexed to 0-indexed
+        length = int(length_f)
+        if start < 0:
+            start = 0
+        result_s = s[start:start + length] if start < len(s) else ''
+        result = _make_string(eng, result_s)
+        if a4 is None:
+            return True
+        return _unify(eng, a4.deref(), result)
+    _reg('substr', _bi_substr)
+
     # ── LIFE type/sort built-ins ───────────────────────────────────────────────
     def _bi_root_sort(goal, eng):
-        """root_sort(T, R): R = the sort name of T as an atom."""
+        """root_sort(T, R): R = the root sort of T.
+        For numeric/string atoms the root sort is the value itself."""
         a1 = goal.attr_list.get('1')
         a2 = goal.attr_list.get('2')
         if a1 is None:
@@ -2525,7 +4273,27 @@ def register_all(wl) -> None:
         defn = t.type
         if defn is None or defn.keyword is None:
             return False
-        result = eng.wl.make_atom(defn.keyword.symbol, eng.wl.user_module)
+        # Unwrap backtick-quoted atoms: `foo → root sort is foo
+        if defn.keyword.symbol == '`':
+            inner = t.attr_list.get('1')
+            if inner is not None:
+                t = inner.deref()
+                defn = t.type
+                if defn is None or defn.keyword is None:
+                    return False
+        # For concrete numeric/string values the root sort is the value itself
+        wl = eng.wl
+        if t.value is not None:
+            if defn.is_subtype_of(wl.integer):
+                result = wl.make_integer(int(t.value))
+            elif defn.is_subtype_of(wl.real):
+                result = wl.make_number(float(t.value))
+            elif defn.is_subtype_of(wl.quoted_string):
+                result = _make_string(eng, str(t.value))
+            else:
+                result = wl.make_atom(defn.keyword.symbol, wl.user_module)
+        else:
+            result = wl.make_atom(defn.keyword.symbol, wl.user_module)
         if a2 is None:
             return True
         return _unify(eng, a2.deref(), result)

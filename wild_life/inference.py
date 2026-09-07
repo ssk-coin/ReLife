@@ -17,7 +17,7 @@ from wild_life.data_structures import (
 )
 from wild_life.unification import (
     UnificationFailure, CutException, HaltException, AbortException,
-    Trail, Unifier, copy_term, compute_lub, types_compatible
+    SortCycleException, Trail, Unifier, copy_term, compute_lub, types_compatible
 )
 
 
@@ -126,6 +126,81 @@ def _patch_cut_barriers(term: PsiTerm, wl, cut_point, seen=None) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Goal-stack based embedded-function-call lifter
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _collect_embedded_func_goals(t: 'PsiTerm', eng, visited: set) -> list:
+    """Walk t (non-recursively via an explicit work-list) and replace any
+    user-function sub-terms with fresh unbound variables.
+
+    Returns a list of (func_term, result_var, rule) tuples for EVAL goals.
+    Modifies t's attr_list in-place (safe because t is already a copy_term
+    copy).  Does NOT push goals itself — the caller pushes them in the
+    correct order:
+
+        eval_goals = _collect_embedded_func_goals(body, eng, set())
+        eng.push_goal(UNIFY, body, result, None)   # pushed first → runs last
+        for ft, rv, rl in eval_goals:              # pushed after → run first
+            eng.push_goal(EVAL, ft, rv, rl)
+
+    Unlike _eval_embedded_user_funcs, this helper does NOT recurse in Python
+    for each level of a deeply-recursive function body — instead it hands off
+    to the engine's own iterative goal-dispatch loop.
+    """
+    from wild_life.built_ins import _is_user_function
+
+    t = t.deref()
+    if not t.attr_list:
+        return []
+
+    # Work-list: (parent_term, key) pairs to examine.
+    work_queue = []
+    for key in list(t.attr_list.keys()):
+        work_queue.append((t, key))
+
+    # Nodes we've already examined (avoid revisiting shared sub-terms)
+    examined = set(visited)
+    examined.add(id(t))
+
+    eval_goals = []   # collected (func_term, result_var, rule)
+
+    i = 0
+    while i < len(work_queue):
+        parent, key = work_queue[i]
+        i += 1
+        child = parent.attr_list[key].deref()
+        child_id = id(child)
+        if child_id in examined:
+            continue
+        examined.add(child_id)
+
+        if _is_user_function(child):
+            # Replace with fresh variable; record EVAL goal.
+            v = PsiTerm(type_def=eng.wl.top)
+            parent.attr_list[key] = v
+            eval_goals.append((child, v, child.type.rule))
+            # Do NOT enqueue children of child — they belong to the EVAL goal.
+        else:
+            # Not a function call; walk its children.
+            for sub_key in list(child.attr_list.keys()):
+                work_queue.append((child, sub_key))
+
+    return eval_goals
+
+
+# Keep old name as an alias so any other callers don't break.
+def _push_embedded_func_goals(t: 'PsiTerm', eng, visited: set) -> 'PsiTerm':
+    """Deprecated alias: collects AND immediately pushes EVAL goals.
+    New code should use _collect_embedded_func_goals instead so the
+    UNIFY goal can be pushed in between (correct LIFO ordering).
+    """
+    eval_goals = _collect_embedded_func_goals(t, eng, visited)
+    for ft, rv, rl in eval_goals:
+        eng.push_goal(GoalType.EVAL, ft, rv, rl)
+    return t
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Engine
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -203,9 +278,17 @@ class Engine:
         if defn.type == DefType.UNDEF:
             defn.type = typ
         elif defn.type != typ:
-            print(f"*** Error: cannot redefine {defn.keyword.symbol} as {typ}.",
-                  file=sys.stderr)
-            return False
+            if defn._builtin_func is not None:
+                # Built-in with different type — user definition takes over.
+                # Allow type change (e.g. built-in PREDICATE → user FUNCTION).
+                defn.type = typ
+            elif defn.type == DefType.TYPE:
+                # TYPE sorts can't be redefined as PREDICATE/FUNCTION
+                return False
+            else:
+                print(f"*** Error: cannot redefine {defn.keyword.symbol} as {typ}.",
+                      file=sys.stderr)
+                return False
 
         if defn._builtin_func is not None:
             # Allow user rules to shadow builtins — clear the builtin function
@@ -266,21 +349,131 @@ class Engine:
             self.add_rule(t, None, DefType.PREDICATE)
 
     def _assert_type(self, t: PsiTerm) -> None:
-        """Handle type declarations (<| or :=)."""
-        # Simplified: mark the LHS type as a subtype of the RHS
+        """Handle type declarations (<| or :=).
+
+        <|  (sub-sort): ``A <| B`` means A is a sub-sort of B.
+            → child=A, parent=B
+
+        := (sort definition): ``A := {B;C;D}`` means B, C, D are sub-sorts
+            of A.  If RHS is a plain atom ``A := B``, treat it the same way
+            (B is the only direct sub-sort of A).
+            → child=element, parent=A (for each element in the RHS disjunction)
+
+        Raises SortCycleException if the new edge would create a cycle in the
+        sort hierarchy.
+        """
+        from wild_life.data_structures import DefType
+        from wild_life.unification import SortCycleException
         arg1 = t.attr_list.get('1')
         arg2 = t.attr_list.get('2')
-        if arg1 and arg2:
-            arg1 = arg1.deref()
-            arg2 = arg2.deref()
+        if not arg1 or not arg2:
+            return
+        arg1 = arg1.deref()
+        arg2 = arg2.deref()
+        sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
+
+        # Determine the (child, parent) pairs to add.
+        pairs = []   # list of (child_def, parent_def)
+        if sym == '<|':
+            # A <| B → child=A, parent=B
             if arg1.type and arg2.type:
-                # Add arg2.type as parent of arg1.type
-                child = arg1.type
-                parent = arg2.type
-                if parent not in child.parents:
-                    child.parents.append(parent)
-                if child not in parent.children:
-                    parent.children.append(child)
+                pairs.append((arg1.type, arg2.type))
+        else:
+            # := → for each element e in the RHS disjunction: child=e, parent=LHS
+            if not arg1.type:
+                return
+            super_def = arg1.type   # LHS is the super-sort
+            # Collect all leaf elements from the RHS (may be a disjunction or atom)
+            rhs_elems = _collect_disj_elems(arg2, self.wl) if (
+                arg2.type is not None and arg2.type is self.wl.disjunction
+            ) else [arg2]
+            for elem in rhs_elems:
+                elem_d = elem.deref()
+                if elem_d.type:
+                    pairs.append((elem_d.type, super_def))
+
+        for child, parent in pairs:
+            # Mark both as TYPE sorts (they may have been UNDEF if newly created)
+            if child.type == DefType.UNDEF:
+                child.type = DefType.TYPE
+            if parent.type == DefType.UNDEF:
+                parent.type = DefType.TYPE
+            if parent not in child.parents:
+                child.parents.append(parent)
+            if child not in parent.children:
+                parent.children.append(child)
+
+                # ---- Cycle detection ----------------------------------------
+                # The new edge (child <| parent) creates a cycle if there is
+                # already a path from `parent` UP to `child` via existing
+                # parent links.
+                #
+                # The C Wild Life interpreter reports cycles using a specific
+                # traversal order (most-recently-added parents/children first,
+                # equivalent to prepend-order in C linked lists).  In Python
+                # we append to lists, so "most recent first" = reversed().
+                #
+                # Algorithm (mirrors the C interpreter's output):
+                #  1. DFS from `parent` going UP via reversed().parents to find
+                #     `child`.  This detects the cycle and records the path.
+                #  2. Descend at most 2 levels from `parent` via
+                #     reversed().children to find a deeper "terminal" node.
+                #  3. DFS from terminal going UP via reversed().parents to
+                #     find `child`.  This builds the displayed path.
+                #  4. Emit [child <| terminal <| ... <| child].
+
+                def _dfs_up(start, target, visited):
+                    """Return path [start, …, target] via .parents (reversed),
+                    or None if target is not reachable."""
+                    if start is target:
+                        return [start]
+                    if start in visited:
+                        return None
+                    visited.add(start)
+                    for p in reversed(start.parents):
+                        result = _dfs_up(p, target, visited)
+                        if result is not None:
+                            return [start] + result
+                    return None
+
+                # Step 1: does a cycle exist?
+                if _dfs_up(parent, child, set()) is None:
+                    continue  # no cycle — proceed to next pair
+
+                # Cycle confirmed.  Remove the just-added edge so the
+                # hierarchy remains consistent.
+                child.parents.remove(parent)
+                parent.children.remove(child)
+
+                # Step 2: descend ≤2 levels from parent via children
+                # (reversed order), recording the last node at each level.
+                terminal = parent
+                lvl1_nodes = list(reversed(parent.children))
+                if lvl1_nodes:
+                    for c1 in lvl1_nodes:
+                        lvl2_nodes = list(reversed(c1.children))
+                        if lvl2_nodes:
+                            for c2 in lvl2_nodes:
+                                terminal = c2
+                        else:
+                            terminal = c1  # c1 has no children; it IS level 1
+
+                # Step 3: DFS from terminal UP to child (reversed parents).
+                path = _dfs_up(terminal, child, set())
+                if path is None:
+                    # Fallback: use parent itself as start.
+                    path = _dfs_up(parent, child, set()) or [parent, child]
+
+                # Step 4: emit error + cycle string.
+                child_name = child.keyword.symbol if child.keyword else "?"
+                elems = [child_name] + \
+                        [d.keyword.symbol if d.keyword else "?" for d in path]
+                cycle_str = "[" + " <| ".join(elems) + "]"
+                sys.stderr.write(
+                    "*** Error: there is a cycle in the sort hierarchy\n"
+                )
+                sys.stderr.write(f"*** Cycle: {cycle_str}\n")
+                raise SortCycleException(path)
 
     # ─── prove helpers ───────────────────────────────────────────────────────
 
@@ -360,8 +553,7 @@ class Engine:
                 self.cut_to(e.cut_point)
                 return True
             except AbortException:
-                self.main_loop_ok = False
-                return False
+                raise  # propagate to main.py (AbortException carries hook_called flag)
             except HaltException as e:
                 raise
 
@@ -375,7 +567,15 @@ class Engine:
             elif defn.type == DefType.FUNCTION:
                 rules = defn.rule or []
             elif defn.type == DefType.UNDEF:
-                # Dynamic predicate with no clauses → fail silently
+                if defn.rule is None:
+                    # Never declared (not via dynamic/assert) → error + abort
+                    name = defn.keyword.symbol if defn.keyword else '?'
+                    sys.stderr.write(
+                        f"*** Error: '{name}' is not a predicate or a function.\n"
+                        f"\n*** Abort\n"
+                    )
+                    raise AbortException(hook_called=True)
+                # rule == [] → declared via dynamic but no clauses → fail silently
                 self.goal_stack = aim.next
                 self.goal_count += 1
                 return False
@@ -424,8 +624,17 @@ class Engine:
             self.push_goal(GoalType.PROVE, body, _DEFRULES, None)
 
         # Bind head's coref to thegoal (= head ← thegoal)
+        # For non-strict functions, suppress eager arithmetic evaluation of arguments.
+        _non_strict = (defn is not None and
+                       hasattr(self, 'non_strict_set') and
+                       defn in self.non_strict_set)
+        _prev_no_arith = getattr(self, 'no_arith_eval', False)
+        if _non_strict:
+            self.no_arith_eval = True
         mark = self.trail.mark()
         ok = self.unifier.unify(thegoal, head)
+        if _non_strict:
+            self.no_arith_eval = _prev_no_arith
         if not ok:
             self.trail.undo_to(mark)
             # Try next clause if any
@@ -454,6 +663,14 @@ class Engine:
         if not ok:
             self.trail.undo_to(mark)
         return ok
+
+    def _push_embedded_func_goals_method(self, t: 'PsiTerm', visited: set) -> 'PsiTerm':
+        """Walk t and replace user-function sub-terms with fresh vars, pushing
+        EVAL goals for each.  Returns (possibly modified) term safe to UNIFY.
+        Uses goal-stack instead of Python recursion so that deeply-recursive
+        functions like largeterm(1000) don't blow the Python call stack.
+        """
+        return _push_embedded_func_goals(t, self, visited)
 
     def eval_aim(self) -> bool:
         """Handle an 'eval' goal (function evaluation)."""
@@ -506,12 +723,65 @@ class Engine:
                 # Push: unify result with val_part AFTER cond_part is proven
                 self.push_goal(GoalType.UNIFY, val_part, result, None)
                 self.push_goal(GoalType.PROVE, cond_part, _DEFRULES, None)
-                mark = self.trail.mark()
-                ok = self.unifier.unify(funct, head)
-                if not ok:
-                    self.trail.undo_to(mark)
-                    return False
+                # For functions with input arguments (non-nullary), unify funct
+                # with head to bind the argument variables before the body runs.
+                # For nullary function sorts (head is a bare variable with no
+                # attributes — e.g. `ran -> A | cond`), skip this step: linking
+                # the head variable back to funct (which has a function sort)
+                # would cause bi_unify to misidentify it as a function call when
+                # the body assigns `A = computed_value`, triggering spurious
+                # recursive evaluation.
+                head_d = head.deref()
+                if head_d.attr_list:
+                    mark = self.trail.mark()
+                    ok = self.unifier.unify(funct, head)
+                    if not ok:
+                        self.trail.undo_to(mark)
+                        return False
                 return True
+
+        # Pre-evaluate any function call arguments in funct.
+        # This enables patterns like f(g(x)) where g(x) needs to be evaluated
+        # before pattern matching against f's head (e.g. rev(reverse(L),[]) ).
+        from wild_life.built_ins import (
+            _eval_user_func_sync, _is_user_function,
+            _try_eval_string_func, _try_eval_arith_to_term,
+        )
+        for _key in list(funct.attr_list.keys()):
+            _attr = funct.attr_list[_key].deref()
+            if _is_user_function(_attr):
+                _evaled = _eval_user_func_sync(_attr, self)
+                if _evaled is not None and _evaled is not _attr:
+                    funct.attr_list[_key] = _evaled
+            else:
+                # Try built-in function evaluation (features, root_sort, etc.)
+                _evaled = _try_eval_string_func(_attr, self)
+                if _evaled is not None:
+                    funct.attr_list[_key] = _evaled
+                else:
+                    _evaled = _try_eval_arith_to_term(_attr, self)
+                    if _evaled is not None:
+                        funct.attr_list[_key] = _evaled
+
+        # Expand disjunctions embedded in function arguments.
+        # e.g. f(s({1;2;3})) → try f(s(1)), then f(s(2)), then f(s(3)).
+        # Push choice points for alternatives 2..N before trying alt 1.
+        from wild_life.built_ins import _term_contains_disjunction, _expand_term_disjunctions
+        if _term_contains_disjunction(funct, self):
+            _alts = _expand_term_disjunctions(funct, self)
+            if len(_alts) > 1:
+                # Push choice points for alternatives 2..N (in reverse so first
+                # alternative is tried next, then 2nd, etc.)
+                for _alt in reversed(_alts[1:]):
+                    _vm2: dict = {}
+                    _h2 = copy_term(head_orig, _vm2)
+                    _b2 = copy_term(body_orig, _vm2)
+                    self.push_choice_point(GoalType.EVAL, _alt, result, active)
+                funct = _alts[0]
+                # Recompute fresh head/body copies for the first alternative
+                _vm = {}
+                head = copy_term(head_orig, _vm)
+                body = copy_term(body_orig, _vm)
 
         # Unify head with funct first (to bind head arguments)
         mark = self.trail.mark()
@@ -519,6 +789,41 @@ class Engine:
         if not ok:
             self.trail.undo_to(mark)
             return False
+
+        # Sort-constrained computation rule fix:
+        # Rule form: X:sort -> body_expr(X, ...)
+        # The parser stores head_orig as one SORT_VAR and body's X occurrences
+        # as INDEPENDENT SORT_VAR tokens (different Python objects, different ids).
+        # copy_term with shared _vm therefore produces a DIFFERENT copy X'_body
+        # for the body than X'_head for the head — they don't share the binding.
+        # After unify(funct, head) binds X'_head → funct, X'_body remains free.
+        # Fix: walk body and bind every free SORT_VAR of the same sort to funct.
+        from wild_life.data_structures import SORT_VAR as _SORT_VAR_FLAG
+        _head_orig_d = head_orig  # head_orig is the stored (un-copied) head
+        if ((_head_orig_d.flags & _SORT_VAR_FLAG) and
+                _head_orig_d.type is not None and
+                not _head_orig_d.attr_list):
+            _sort_type = _head_orig_d.type
+            _sv_visited: set = set()
+
+            def _bind_free_sort_vars(t: 'PsiTerm') -> None:
+                """Bind free SORT_VARs of _sort_type to funct, in-place."""
+                if id(t) in _sv_visited:
+                    return
+                _sv_visited.add(id(t))
+                if ((t.flags & _SORT_VAR_FLAG) and
+                        t.type is _sort_type and
+                        t.coref is None):
+                    self.trail.trail_psi(t, 'coref')
+                    t.coref = funct
+                    return
+                td = t.deref()
+                if id(td) not in _sv_visited:
+                    _sv_visited.add(id(td))
+                    for _child in list(td.attr_list.values()):
+                        _bind_free_sort_vars(_child)
+
+            _bind_free_sort_vars(body)
 
         # Now that head args are bound, try arithmetic evaluation of body
         body_d2 = body.deref()
@@ -533,8 +838,32 @@ class Engine:
                 return False
             return True
 
-        # Body is not pure arithmetic — push as a UNIFY goal for later resolution
+        # Body is a user-defined function call — push EVAL so it gets evaluated
+        # (rather than UNIFY which would just structurally bind result to the term)
+        if _is_user_function(body_d2):
+            self.push_goal(GoalType.EVAL, body_d2, result, body_d2.type.rule)
+            return True
+
+        # Body is a compound with possible embedded user-function sub-terms
+        # (e.g. [X|app2(L1,L2)] where app2 is a recursive function).
+        # Push EVAL goals for each embedded user-function call onto the goal
+        # stack so they are evaluated *iteratively* (not via Python recursion).
+        # This avoids hitting Python's stack depth limit for deeply-recursive
+        # functions like largeterm(1000).
+        #
+        # Correct LIFO ordering:
+        #   1. Push UNIFY first  → it sits below EVAL goals on the stack
+        #   2. Push EVAL goals after → they sit on top, so they run FIRST
+        # This ensures the fresh variables are bound before UNIFY fires.
+        eval_goals = _collect_embedded_func_goals(body_d2, self, set())
+
+        # Push UNIFY first (runs LAST — body_d2 has fresh vars for embedded calls)
         self.push_goal(GoalType.UNIFY, body_d2, result, None)
+
+        # Push each EVAL goal (runs FIRST — binds the fresh vars before UNIFY)
+        for ft, rv, rl in eval_goals:
+            self.push_goal(GoalType.EVAL, ft, rv, rl)
+
         return True
 
     def match_aim(self) -> bool:
@@ -658,7 +987,14 @@ class Engine:
                 break
             if sort == FACT:
                 self.assert_first = False
-                self.assert_clause(t)
+                try:
+                    self.assert_clause(t)
+                except SortCycleException:
+                    # Cycle in .lf file: write a newline so refout matches
+                    # (the C interpreter outputs \n before halting), then exit.
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    raise HaltException(1)
             elif sort == QUERY:
                 # Execute query; push as goal
                 self.push_goal(GoalType.PROVE, t, _DEFRULES, None)
@@ -752,10 +1088,7 @@ class Engine:
             except HaltException:
                 raise
             except AbortException:
-                self.trail.undo_to(0)
-                self.goal_stack = None
-                self.choice_stack = None
-                return False
+                raise  # propagate to main.py (AbortException carries hook_called flag)
             except CutException as e:
                 self.cut_to(e.cut_point)
                 success = True
