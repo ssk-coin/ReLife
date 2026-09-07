@@ -126,6 +126,99 @@ def _patch_cut_barriers(term: PsiTerm, wl, cut_point, seen=None) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Functional cond(C, T, E) evaluator
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _is_cond_builtin(t: 'PsiTerm') -> bool:
+    """Return True if t is a built-in cond(…) call (not a user-defined one)."""
+    if t is None:
+        return False
+    t = t.deref()
+    if t.type is None or t.type.keyword is None:
+        return False
+    if t.type.keyword.symbol != 'cond':
+        return False
+    return getattr(t.type, '_builtin_func', None) is not None
+
+
+def _eval_body_to_result(branch: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
+    """Evaluate an expression branch into result.
+
+    Handles: arithmetic, user-defined functions, nested cond, and compound
+    terms with embedded user-function sub-terms.
+    Called from _eval_cond_functional and eval_aim.
+    """
+    from wild_life.built_ins import _eval_arith, _make_number, _is_user_function
+
+    branch_d = branch.deref()
+
+    # Arithmetic?
+    arith_ok, arith_val = _eval_arith(branch_d, eng)
+    if arith_ok:
+        num = _make_number(eng, arith_val)
+        return eng.unifier.unify(result, num)
+
+    # User-defined function call?
+    if _is_user_function(branch_d):
+        eng.push_goal(GoalType.EVAL, branch_d, result, branch_d.type.rule)
+        return True
+
+    # Nested built-in cond?
+    if _is_cond_builtin(branch_d):
+        return _eval_cond_functional(branch_d, result, eng)
+
+    # Compound with embedded user-function sub-terms
+    eval_goals = _collect_embedded_func_goals(branch_d, eng, set())
+    eng.push_goal(GoalType.UNIFY, branch_d, result, None)
+    for ft, rv, rl in eval_goals:
+        eng.push_goal(GoalType.EVAL, ft, rv, rl)
+    return True
+
+
+def _eval_cond_functional(cond_term: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
+    """Evaluate cond(C, T [, E]) as a functional expression, binding result.
+
+    This is called from eval_aim when cond appears as the body of a function
+    rule (or as a sub-expression being evaluated functionally), so that
+    cond acts as a value-producing conditional rather than a predicate.
+
+    Semantics:
+      - Prove C via inner run (preserving any bindings it makes).
+      - If C succeeds → evaluate T into result.
+      - If C fails   → undo C's bindings, evaluate E into result.
+        If there is no E (2-arg form), fail.
+    """
+    wl = eng.wl
+    args = list(cond_term.attr_list.values()) if cond_term.attr_list else []
+    if len(args) < 2:
+        return False
+    cond_g = args[0].deref()
+    then_g = args[1].deref()
+    else_g = args[2].deref() if len(args) >= 3 else None
+
+    # Prove the condition via inner run (same pattern as bi_cond)
+    mark = eng.trail.mark()
+    cp_save = eng.choice_stack
+    gs_save = eng.goal_stack
+    eng.goal_stack = None
+    eng.push_goal(GoalType.PROVE, cond_g, _DEFRULES, None)
+    old_ok = eng.main_loop_ok
+    barrier = cp_save if cp_save is not None else _INNER_RUN_BARRIER
+    cond_ok = eng.run(cs_barrier=barrier)
+    eng.main_loop_ok = old_ok
+    eng.choice_stack = cp_save
+    eng.goal_stack = gs_save
+
+    if cond_ok:
+        return _eval_body_to_result(then_g, result, eng)
+    else:
+        eng.trail.undo_to(mark)
+        if else_g is None:
+            return False
+        return _eval_body_to_result(else_g, result, eng)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Goal-stack based embedded-function-call lifter
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -843,6 +936,11 @@ class Engine:
         if _is_user_function(body_d2):
             self.push_goal(GoalType.EVAL, body_d2, result, body_d2.type.rule)
             return True
+
+        # Body is a built-in cond(C, T, E) — evaluate it as a functional conditional
+        # (not as a predicate). This makes cond usable in function rule bodies.
+        if _is_cond_builtin(body_d2):
+            return _eval_cond_functional(body_d2, result, self)
 
         # Body is a compound with possible embedded user-function sub-terms
         # (e.g. [X|app2(L1,L2)] where app2 is a recursive function).
