@@ -331,10 +331,43 @@ class PrintState:
 
         For each shared psi-term, register the alphabetically FIRST variable
         name so that later variables can display as aliases (e.g. 'C = B').
+
+        We skip variables that were directly bound to a concrete value (their
+        coref's value is not None) UNLESS some other query variable has its
+        coref pointing at them — in that case, the concrete-bound variable is
+        the "canonical owner" for the alias and must be registered so that the
+        aliasing variable can display e.g. "C = B".
+
+        This handles the important distinction:
+          - A=B*A? A=1? → both A and B are bound independently to the same
+            concrete node.  Neither aliases the other; both should print "1".
+          - A=B+C? B=C? A=23? → C was unified with B (C.coref = B).  B then
+            gets bound to 11.5.  C should print as "B" (alias), not "11.5".
         """
+        var_id_set = {id(pterm)
+                      for pterm in var_tree.values()
+                      if pterm is not None}
+        # Find which query-variable nodes are directly aliased-to by another
+        # query variable (i.e. some other var's coref points at them).
+        aliased_to: set = set()
+        for pterm in var_tree.values():
+            if pterm is not None:
+                coref = getattr(pterm, 'coref', None)
+                if coref is not None and id(coref) in var_id_set:
+                    aliased_to.add(id(coref))
+
         for name in sorted(var_tree.keys()):
             pterm = var_tree.get(name)
             if pterm is None:
+                continue
+            coref = getattr(pterm, 'coref', None)
+            pid = id(pterm)
+            # Skip variables directly bound to a concrete value when no other
+            # query variable aliases to them.  They will print their concrete
+            # value directly, without registering an alias entry.
+            if (coref is not None
+                    and coref.value is not None
+                    and pid not in aliased_to):
                 continue
             t = pterm.deref()
             tid = id(t)
@@ -846,16 +879,17 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
     # Sort-constrained variable: X:sort where sort ≠ @ and term is unbound.
     # In Wild Life, such a variable prints as "sortname~" (e.g. "real~", "bool~").
     # The ~ signals "there is a pending constraint":
-    #   - Pure sort annotation (X:real, no resid) → always write "~"
-    #   - Arithmetic constraint (resid present) → let _maybe_resid handle "~"
-    #     to print it only for PENDING resids; already-resolved ones get no "~"
+    #   - Pure sort annotation (X:real, resid=None) → always write "~"
+    #   - Arithmetic dissolved (resid=[] empty list) → no "~" (constraint was solved)
+    #   - Arithmetic pending (resid=[...] with pending items) → _maybe_resid writes "~"
     from wild_life.data_structures import SORT_VAR
     if (t.flags & SORT_VAR) and t.value is None and not t.attr_list:
         _print_symbol_q(ps, t.type.keyword if t.type else None)
-        if not t.resid:
-            # Pure sort annotation: no residuated goals attached; always pending
+        if t.resid is None:
+            # resid=None: pure sort annotation (no arithmetic involved) → always ~
             ps.write("~")
-        # else: has residuations — let _maybe_resid write ~ for each pending one
+        # else resid is a list (empty = arithmetic dissolved, or with pending items)
+        # _maybe_resid will write ~ only for pending resid goals
         _maybe_resid(ps, t)
         return
 
@@ -968,11 +1002,18 @@ def _pretty_attr(ps: PrintState, attr_list: dict, depth: int, wl) -> None:
 
 
 def _maybe_resid(ps: PrintState, t: 'PsiTerm') -> None:
-    """Print residuation markers if any."""
-    if t.resid:
+    """Print residuation markers if any.
+
+    The tilde '~' is only printed for FREE variables (value=None, no attrs).
+    Bound variables (concrete values) never show '~' even if they have stale
+    resid entries — this matches C Wild Life 1.02 behaviour where e.g. A=23
+    after 'A=B/C? A=23?' shows 'A = 23' (no tilde), not 'A = 23~'.
+    """
+    if t.resid and t.value is None and not t.attr_list:
         for r in t.resid:
             if getattr(r, 'goal', None) and getattr(r.goal, 'pending', False):
                 ps.write("~")
+                return  # Only write one tilde max
 
 
 # ─────────────────────────────────────────────────────────────────────────────

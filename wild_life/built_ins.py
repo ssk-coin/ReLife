@@ -89,6 +89,37 @@ _ARITH_OPS_SET = frozenset((
 ))
 
 
+def _mark_real_sort(var: 'PsiTerm', wl, eng) -> None:
+    """Mark a free variable as constrained to sort real, with no pending constraints.
+
+    Sets type=real and SORT_VAR flag.  Sets resid=[] (empty list, not None) to
+    indicate 'involved in arithmetic but constraint dissolved/solved' — this
+    suppresses the tilde in display (print_term treats resid=None as 'always ~'
+    but resid=[] as 'no pending').
+
+    Used when an arithmetic constraint was immediately solved (e.g. A=A+0 → A=A)
+    so the variable is real-constrained but has no suspended residuation.
+    """
+    from wild_life.data_structures import SORT_VAR
+    var = var.deref()
+    if var.value is not None or var.attr_list:
+        return  # Not a free variable
+    if var.type is wl.top or var.type is None:
+        if eng is not None:
+            eng.trail.trail_psi(var, 'type')
+        var.type = wl.real
+    if not (var.flags & SORT_VAR):
+        if eng is not None:
+            eng.trail.trail_psi(var, 'flags')
+        var.flags |= SORT_VAR
+    # Set resid to empty list (not None) so print_term knows: "no pending constraints"
+    # (resid=None means "pure sort annotation, always show ~").
+    if var.resid is None:
+        if eng is not None:
+            eng.trail.trail_psi(var, 'resid')
+        var.resid = []
+
+
 def _collect_arith_vars(t: 'PsiTerm', wl, result: list, seen: set) -> None:
     """Collect all unbound variables in an arithmetic expression.
 
@@ -173,25 +204,17 @@ def _var_in_expr(target: 'PsiTerm', expr: 'PsiTerm', visited: set) -> bool:
     return False
 
 
-def _simplify_arith(t: 'PsiTerm', eng,
-                    allow_identity: bool = True) -> 'Optional[PsiTerm]':
-    """Partial arithmetic simplification using identity rules.
+def _simplify_arith(t: 'PsiTerm', eng) -> 'Optional[PsiTerm]':
+    """Partial arithmetic simplification using identity/annihilator rules.
 
-    Wild Life 1.02 always applies (when one operand is a known constant):
+    Wild Life 1.02 applies all of these (when one operand is a known constant):
         0 + X  →  X        (left-zero for +)
+        X + 0  →  X        (right-zero for +)
         X - 0  →  X        (right-zero for -)
         0 * X  →  0        (left-zero / annihilator for *)
-
-    The following identity rule is applied only when allow_identity=True,
-    i.e. when the LHS variable fires the constraint (not a pure expression-var
-    wakeup):
-        X * 1  →  X        (right-identity for *)
-
-    Rules NOT applied in Wild Life 1.02:
-        X + 0  →  X        (right-zero for +)
+        X * 0  →  0        (right-zero / annihilator for *)
         1 * X  →  X        (left-identity for *)
-        X * 0  →  0        (right-zero for *)
-        X / 1  →  X        (right-identity for /)
+        X * 1  →  X        (right-identity for *)
 
     Returns a PsiTerm on success, None if no simplification applies.
     """
@@ -215,19 +238,25 @@ def _simplify_arith(t: 'PsiTerm', eng,
 
     if sym == '+':
         if ok1 and v1 == 0.0 and arg2 is not None:
-            return arg2.deref()           # 0 + X = X  (always)
-        # X + 0 = X: NOT applied in Wild Life 1.02
+            return arg2.deref()           # 0 + X = X
+        if ok2 and v2 == 0.0 and arg1 is not None:
+            return arg1.deref()           # X + 0 = X
     elif sym == '-':
         if ok2 and v2 == 0.0 and arg1 is not None:
-            return arg1.deref()           # X - 0 = X  (always)
+            return arg1.deref()           # X - 0 = X
+        # X - X = 0 when both sides dereference to the same node
+        if arg1 is not None and arg2 is not None:
+            if id(arg1.deref()) == id(arg2.deref()):
+                return wl.make_integer(0) # X - X = 0
     elif sym == '*':
         if ok1 and v1 == 0.0:
-            return wl.make_integer(0)     # 0 * X = 0  (always, left-zero)
-        # X * 1 = X: applied only when LHS fires (allow_identity=True)
-        if allow_identity and ok2 and v2 == 1.0 and arg1 is not None:
-            return arg1.deref()           # X * 1 = X  (LHS-fire only)
-        # 1 * X = X, X * 0 = 0: NOT applied in Wild Life 1.02
-    # X / 1 = X: NOT applied in Wild Life 1.02
+            return wl.make_integer(0)     # 0 * X = 0
+        if ok2 and v2 == 0.0:
+            return wl.make_integer(0)     # X * 0 = 0
+        if ok1 and v1 == 1.0 and arg2 is not None:
+            return arg2.deref()           # 1 * X = X
+        if ok2 and v2 == 1.0 and arg1 is not None:
+            return arg1.deref()           # X * 1 = X
 
     return None
 
@@ -1039,7 +1068,7 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         # Bitwise NOT
         '\\': lambda a: float(~int(a)),
     }
-    if sym in ops1 and ok1:
+    if sym in ops1 and ok1 and arg2 is None:
         try:
             return True, float(ops1[sym](v1))
         except Exception:
@@ -1075,6 +1104,241 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         return False, 0.0
 
     return False, 0.0
+
+
+def _get_linear_coeff(expr, x_var, eng):
+    """Return (a, b) such that expr = a*x_var + b, or None if not linear in x_var.
+
+    x_var is the PsiTerm node (already deref'd) for the single free variable.
+    a and b are floats.  Works recursively on +, -, *, unary -.
+    """
+    if expr is None:
+        return None
+    expr = expr.deref()
+    # Is this node the variable itself?
+    if id(expr) == id(x_var):
+        return (1.0, 0.0)
+    # Is it a concrete number?
+    ok, val = _eval_arith(expr, eng)
+    if ok:
+        return (0.0, val)
+    # Is it an arithmetic expression?
+    sym = expr.type.keyword.symbol if expr.type and expr.type.keyword else ''
+    if sym not in _ARITH_OPS_SET:
+        return None
+    arg1, arg2 = _get_two_args(expr)
+    if sym == '+':
+        if arg1 is None or arg2 is None:
+            return None
+        c1 = _get_linear_coeff(arg1, x_var, eng)
+        c2 = _get_linear_coeff(arg2, x_var, eng)
+        if c1 is None or c2 is None:
+            return None
+        return (c1[0] + c2[0], c1[1] + c2[1])
+    elif sym == '-':
+        if arg1 is None:
+            return None
+        c1 = _get_linear_coeff(arg1, x_var, eng)
+        if c1 is None:
+            return None
+        if arg2 is None:
+            # unary minus
+            return (-c1[0], -c1[1])
+        c2 = _get_linear_coeff(arg2, x_var, eng)
+        if c2 is None:
+            return None
+        return (c1[0] - c2[0], c1[1] - c2[1])
+    elif sym == '*':
+        if arg1 is None or arg2 is None:
+            return None
+        ok1, v1 = _eval_arith(arg1, eng)
+        ok2, v2 = _eval_arith(arg2, eng)
+        if ok1:
+            c2 = _get_linear_coeff(arg2, x_var, eng)
+            if c2 is None:
+                return None
+            return (v1 * c2[0], v1 * c2[1])
+        if ok2:
+            c1 = _get_linear_coeff(arg1, x_var, eng)
+            if c1 is None:
+                return None
+            return (c1[0] * v2, c1[1] * v2)
+        return None
+    elif sym == '/':
+        if arg1 is None or arg2 is None:
+            return None
+        ok2, v2 = _eval_arith(arg2, eng)
+        if ok2 and v2 != 0.0:
+            c1 = _get_linear_coeff(arg1, x_var, eng)
+            if c1 is None:
+                return None
+            return (c1[0] / v2, c1[1] / v2)
+        return None
+    return None
+
+
+def _try_solve_nonlinear(expr, x_var, v_lhs, eng):
+    """Try to solve expr = v_lhs for x_var when the expression is not linear.
+
+    Handles simple inversion patterns:
+      a / x = v  →  x = a / v    (denominator is the unknown)
+      x ^ n = v  →  x = v^(1/n)  (x to an integer power, v ≥ 0)
+
+    Returns the solution as a float, or None if no pattern matched.
+    """
+    if expr is None:
+        return None
+    expr = expr.deref()
+    sym = expr.type.keyword.symbol if expr.type and expr.type.keyword else ''
+    if sym not in _ARITH_OPS_SET:
+        return None
+    arg1, arg2 = _get_two_args(expr)
+    if arg1 is None or arg2 is None:
+        return None
+
+    if sym == '/':
+        arg1_d = arg1.deref()
+        arg2_d = arg2.deref()
+        # x / x = v → (v-1)*x = 0. If v≠1: x=0
+        if id(arg1_d) == id(x_var) and id(arg2_d) == id(x_var):
+            if abs(v_lhs - 1.0) > 1e-12:
+                return 0.0  # x=0
+        # a / x = v  →  x = a / v  (only when arg2 contains x_var and is x_var itself)
+        if id(arg2_d) == id(x_var):
+            ok1, v1 = _eval_arith(arg1, eng)
+            if ok1 and v_lhs != 0.0:
+                return v1 / v_lhs
+    # x * x = 0 → x = 0
+    if sym == '*':
+        arg1_d = arg1.deref()
+        arg2_d = arg2.deref()
+        if id(arg1_d) == id(x_var) and id(arg2_d) == id(x_var):
+            if abs(v_lhs) < 1e-12:
+                return 0.0
+    # Could extend with x^n etc., but division covers the main arith cases
+    return None
+
+
+def _linear_decompose_psi(expr, x_var, eng, wl):
+    """Decompose expr into (a_coeff, b_psi) where expr = a_coeff * x_var + b_psi.
+
+    a_coeff is a float (coefficient of x_var in expr).
+    b_psi is a PsiTerm for the remainder (may not be evaluable to a concrete number).
+    Returns None if expr is not linear in x_var.
+
+    This extends _get_linear_coeff to return a symbolic remainder PsiTerm
+    so we can solve cases like A = A+C → 0 = C even when C is free.
+    """
+    if expr is None:
+        return None
+    expr = expr.deref()
+    zero_term = wl.make_integer(0)
+    # Is this the variable itself?
+    if id(expr) == id(x_var):
+        return (1.0, zero_term)
+    # Is it a concrete number?
+    ok, val = _eval_arith(expr, eng)
+    if ok:
+        return (0.0, _make_number(eng, val))
+    # Is it an arithmetic expression?
+    sym = expr.type.keyword.symbol if expr.type and expr.type.keyword else ''
+    if sym not in _ARITH_OPS_SET:
+        # Another free variable (not x_var) — treat as constant remainder.
+        return (0.0, expr)
+    arg1, arg2 = _get_two_args(expr)
+    if sym == '+':
+        if arg1 is None or arg2 is None:
+            return None
+        r1 = _linear_decompose_psi(arg1, x_var, eng, wl)
+        r2 = _linear_decompose_psi(arg2, x_var, eng, wl)
+        if r1 is None or r2 is None:
+            return None
+        # b_psi = r1[1] + r2[1]
+        a_coeff = r1[0] + r2[0]
+        b1, b2 = r1[1], r2[1]
+        ok1, v1 = _eval_arith(b1, eng)
+        ok2, v2 = _eval_arith(b2, eng)
+        if ok1 and v1 == 0.0:
+            b_psi = b2
+        elif ok2 and v2 == 0.0:
+            b_psi = b1
+        else:
+            # Build b1 + b2 PsiTerm
+            plus_sym = expr.type  # reuse the same + type
+            b_psi = PsiTerm(type_def=plus_sym)
+            b_psi.attr_list['1'] = b1
+            b_psi.attr_list['2'] = b2
+        return (a_coeff, b_psi)
+    elif sym == '-':
+        if arg1 is None:
+            return None
+        r1 = _linear_decompose_psi(arg1, x_var, eng, wl)
+        if r1 is None:
+            return None
+        if arg2 is None:
+            # Unary minus
+            ok_b, v_b = _eval_arith(r1[1], eng)
+            if ok_b:
+                return (-r1[0], _make_number(eng, -v_b))
+            # Negate b_psi symbolically
+            minus_sym = expr.type
+            neg_b = PsiTerm(type_def=minus_sym)
+            neg_b.attr_list['1'] = r1[1]
+            return (-r1[0], neg_b)
+        r2 = _linear_decompose_psi(arg2, x_var, eng, wl)
+        if r2 is None:
+            return None
+        a_coeff = r1[0] - r2[0]
+        b1, b2 = r1[1], r2[1]
+        ok1, v1 = _eval_arith(b1, eng)
+        ok2, v2 = _eval_arith(b2, eng)
+        if ok2 and v2 == 0.0:
+            b_psi = b1
+        elif ok1 and v1 == 0.0:
+            # 0 - b2
+            minus_sym = expr.type
+            b_psi = PsiTerm(type_def=minus_sym)
+            b_psi.attr_list['1'] = zero_term
+            b_psi.attr_list['2'] = b2
+        else:
+            minus_sym = expr.type
+            b_psi = PsiTerm(type_def=minus_sym)
+            b_psi.attr_list['1'] = b1
+            b_psi.attr_list['2'] = b2
+        return (a_coeff, b_psi)
+    elif sym == '*':
+        if arg1 is None or arg2 is None:
+            return None
+        ok1, v1 = _eval_arith(arg1, eng)
+        ok2, v2 = _eval_arith(arg2, eng)
+        if ok1:
+            r2 = _linear_decompose_psi(arg2, x_var, eng, wl)
+            if r2 is None:
+                return None
+            ok_b, v_b = _eval_arith(r2[1], eng)
+            b_psi = _make_number(eng, v1 * v_b) if ok_b else r2[1]
+            return (v1 * r2[0], b_psi)
+        if ok2:
+            r1 = _linear_decompose_psi(arg1, x_var, eng, wl)
+            if r1 is None:
+                return None
+            ok_b, v_b = _eval_arith(r1[1], eng)
+            b_psi = _make_number(eng, r1[1] * v2) if ok_b else r1[1]
+            return (r1[0] * v2, b_psi)
+        return None
+    elif sym == '/':
+        if arg1 is None or arg2 is None:
+            return None
+        ok2, v2 = _eval_arith(arg2, eng)
+        if ok2 and v2 != 0.0:
+            r1 = _linear_decompose_psi(arg1, x_var, eng, wl)
+            if r1 is None:
+                return None
+            ok_b, v_b = _eval_arith(r1[1], eng)
+            b_psi = _make_number(eng, v_b / v2) if ok_b else r1[1]
+            return (r1[0] / v2, b_psi)
+        return None
+    return None
 
 
 def bi_is(goal: PsiTerm, eng) -> bool:
@@ -1557,48 +1821,30 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     b_arith = _try_eval_arith_to_term(b_d, eng)
     if b_arith is not None:
         # Expression fully evaluated — proceed to unify LHS with result.
-        # DROP rule: if this is a re-fire and LHS is still free AND both
-        # operands were independently evaluable (standard binary path, not
-        # a unary-minus fallthrough), Wild Life does NOT propagate the
-        # result back to LHS.  We detect this by checking if both args of
-        # the original b_d were independently evaluable (standard binary).
-        # Unary-minus fallthrough (A-B with A known, B free → -A) is
-        # identified by NOT both args being ok, and should PROCEED.
-        if is_resid_refiring:
-            a_d_check = a_d.deref()
-            a_d_is_free_check = (a_d_check.value is None and not a_d_check.attr_list)
-            if a_d_is_free_check:
-                # Check if standard binary evaluation (both args ok) → DROP.
-                # (Unary fallthrough: only one arg ok → PROCEED with result.)
-                arg1_bd, arg2_bd = _get_two_args(b_d)
-                if arg1_bd is not None and arg2_bd is not None:
-                    ok1_bd, _ = _eval_arith(arg1_bd, eng)
-                    ok2_bd, _ = _eval_arith(arg2_bd, eng)
-                    if ok1_bd and ok2_bd:
-                        return True  # DROP: both args known → standard binary, not unary
         b_d = b_arith
     else:
         # Arithmetic expression that couldn't be fully evaluated (has variables).
         wl = eng.wl
         b_sym = b_d.type.keyword.symbol if b_d.type and b_d.type.keyword else ''
         if b_sym in _ARITH_OPS_SET:
+            # Mark all free variables in the arithmetic expression (and the LHS
+            # if free) as constrained to sort real.  This ensures that even when
+            # the constraint is solved immediately (e.g. A=A+0 → trivial) the
+            # variable still displays as 'real' rather than '@'.
+            _arith_mark_vars: list = []
+            _collect_arith_vars(b_d, eng.wl, _arith_mark_vars, set())
+            for _amv in _arith_mark_vars:
+                _mark_real_sort(_amv, eng.wl, eng)
+            _lhs_chk = a_d.deref()
+            if _lhs_chk.value is None and not _lhs_chk.attr_list:
+                _mark_real_sort(_lhs_chk, eng.wl, eng)
+
             # Check whether LHS is currently free (determines which rules apply).
             a_d_cur = a_d.deref()
             a_d_cur_is_free = (a_d_cur.value is None and not a_d_cur.attr_list)
 
-            # When an expression-variable fires the constraint (is_resid_refiring=True
-            # and LHS still free) and the LHS variable itself appears in the expression
-            # (self-referential), Wild Life drops the constraint immediately.
-            if is_resid_refiring and a_d_cur_is_free:
-                if _var_in_expr(a_d_cur, b_d, set()):
-                    return True  # DROP: self-referential when expression-var fires
-
-            # Identity simplification rules (e.g. X*1=X) are only applied when the
-            # LHS fires the constraint or during initial setup, NOT when a pure
-            # expression-variable fires.  Always-rules (0+X=X, X-0=X, 0*X=0) apply
-            # regardless of which variable triggered the wakeup.
-            allow_id = not (is_resid_refiring and a_d_cur_is_free)
-            b_simplified = _simplify_arith(b_d, eng, allow_identity=allow_id)
+            # Try simplification first (before self-ref check).
+            b_simplified = _simplify_arith(b_d, eng)
             if b_simplified is not None:
                 # Simplification succeeded — recurse to handle the simplified form.
                 b_d = b_simplified
@@ -1606,65 +1852,249 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                 if b_arith2 is not None:
                     b_d = b_arith2
             else:
-                # No algebraic simplification — propagate real-sort constraints
-                # to all unbound variables in the expression and to a_d.
+                # Gather free variables in the expression.
                 vars_in_expr: list = []
                 _collect_arith_vars(b_d, wl, vars_in_expr, set())
+
+                a_d_final = a_d.deref()
+                a_d_is_free = (a_d_final.value is None and not a_d_final.attr_list)
+
+                # --- Algebraic solving ---
+                # Case 1: LHS (a_d_final) is BOUND and expression has exactly
+                #         one free variable → solve  a_d_val = a*x + b  for x.
+                # Case 2: LHS is FREE and x_var appears in expression (self-ref):
+                #         a = a_coeff*a + b_psi  →  if a_coeff=1: unify b_psi with 0;
+                #         else: a = b_psi / (1 - a_coeff).
+                solved = False
                 if vars_in_expr:
-                    a_d_final = a_d.deref()
-                    a_d_is_free = (a_d_final.value is None and not a_d_final.attr_list)
-
-                    if is_resid_refiring and a_d_is_free:
-                        # Expression-var fired, simplification failed → DROP.
-                        return True
-
-                    if not a_d_is_free:
-                        if not is_resid_refiring:
-                            # Initial setup with LHS already bound: just accept.
-                            return True
-                        # LHS fires: check whether the LHS var (via its bound value)
-                        # appears in the expression via coref chains.  This detects
-                        # self-referential constraints like B=A-B where the constraint
-                        # fires when B is bound (B appears in its own expression).
-                        if _var_in_expr(a_d_final, b_d, set()):
-                            return True  # DROP: self-referential (LHS var in expr)
-                        # is_resid_refiring, LHS bound, not self-ref: re-suspension
-                        # (G2) only when expression has exactly ONE unique free var.
-                        # With two or more free vars Wild Life drops the constraint.
-                        if len(vars_in_expr) > 1:
-                            return True  # DROP: too many free vars for LHS-fire G2
-
-                    from wild_life.data_structures import Goal, Residuation
-                    # Create one pending goal that represents the suspended constraint.
-                    # Store as PROVE of '=(a_d, b_d)' so that on wakeup it goes
-                    # through bi_unify (with arithmetic evaluation).
-                    eq_defn = getattr(wl, 'eqsym', None) or wl.syntax_module.symbol_table.get('=')
-                    eq_term = PsiTerm(type_def=eq_defn)
-                    eq_term.attr_list['1'] = a_d
-                    eq_term.attr_list['2'] = b_d
-                    # Tag as a residuated goal so future re-fires are identified.
-                    eq_term._resid_marker = True
-                    pending_goal = Goal(GoalType.PROVE, eq_term, None, None, pending=True)
-                    for v in vars_in_expr:
-                        _attach_arith_resid(v, wl, pending_goal, eng)
-                    if is_resid_refiring and not a_d_is_free:
-                        # G2 re-suspension: attach to the ORIGINAL LHS variable node
-                        # (not the bound value) so the tilde shows on the LHS variable.
-                        a_orig = a  # original arg from _get_two_args(goal), pre-deref
-                        if a_orig.resid is None:
-                            if eng is not None:
-                                eng.trail.trail_psi(a_orig, 'resid')
-                            a_orig.resid = [Residuation(goal=pending_goal)]
+                    ok_lhs, v_lhs = _eval_arith(a_d_final, eng)
+                    if ok_lhs and len(vars_in_expr) == 1:
+                        x_var = vars_in_expr[0].deref()
+                        coeffs = _get_linear_coeff(b_d, x_var, eng)
+                        if coeffs is not None:
+                            a_coeff, b_const = coeffs
+                            # v_lhs = a_coeff * x + b_const  →  x = (v_lhs - b_const) / a_coeff
+                            if a_coeff != 0.0:
+                                x_val = (v_lhs - b_const) / a_coeff
+                                x_term = _make_number(eng, x_val)
+                                solved = True
+                                result = _unify(eng, x_var, x_term)
+                                if not result:
+                                    return False
+                                return True
                         else:
-                            if not any(r.goal is pending_goal for r in a_orig.resid):
-                                if eng is not None:
-                                    eng.trail.trail_copy(a_orig, 'resid')
-                                a_orig.resid.append(Residuation(goal=pending_goal))
+                            # Special pre-check: 0 = k/x  (numerator is concrete k)
+                            _tsnl_sym = b_d.type.keyword.symbol if b_d.type and b_d.type.keyword else ''
+                            if _tsnl_sym == '/' and ok_lhs and abs(v_lhs) < 1e-12:
+                                _tsnl_a1, _tsnl_a2 = _get_two_args(b_d)
+                                if _tsnl_a1 is not None and _tsnl_a2 is not None:
+                                    _tsnl_a2_d = _tsnl_a2.deref()
+                                    if id(_tsnl_a2_d) == id(x_var):
+                                        ok_ka, v_ka = _eval_arith(_tsnl_a1, eng)
+                                        if ok_ka:
+                                            if abs(v_ka) < 1e-12:
+                                                # 0 = 0/x: trivially satisfied → mark x as real (no tilde)
+                                                solved = True
+                                                _mark_real_sort(x_var, wl, eng)
+                                                return True
+                                            else:
+                                                # 0 = k/x where k≠0: impossible → fail
+                                                return False
+                            # Try non-linear inversion (e.g. a/x = v → x = a/v)
+                            x_val = _try_solve_nonlinear(b_d, x_var, v_lhs, eng)
+                            if x_val is not None:
+                                x_term = _make_number(eng, x_val)
+                                solved = True
+                                result = _unify(eng, x_var, x_term)
+                                if not result:
+                                    return False
+                                return True
+                    # Case 1b: LHS=0 and expression is X-Y with two free vars →
+                    #           0 = X - Y  →  X = Y  (unify both vars).
+                    if ok_lhs and v_lhs == 0.0 and len(vars_in_expr) == 2:
+                        b_d_sym = b_d.type.keyword.symbol if b_d.type and b_d.type.keyword else ''
+                        if b_d_sym == '-':
+                            ba1, ba2 = _get_two_args(b_d)
+                            if ba1 is not None and ba2 is not None:
+                                ok_ba1, _ = _eval_arith(ba1, eng)
+                                ok_ba2, _ = _eval_arith(ba2, eng)
+                                if not ok_ba1 and not ok_ba2:
+                                    solved = True
+                                    result = _unify(eng, ba1, ba2)
+                                    if not result:
+                                        return False
+                                    return True
+                    # Case 1c: v = A/B with both A,B free vars
+                    if ok_lhs and len(vars_in_expr) == 2:
+                        b_d_sym2 = b_d.type.keyword.symbol if b_d.type and b_d.type.keyword else ''
+                        if b_d_sym2 == '/':
+                            ba1, ba2 = _get_two_args(b_d)
+                            if ba1 is not None and ba2 is not None:
+                                ba1_d = ba1.deref()
+                                ba2_d = ba2.deref()
+                                ba1_free = (ba1_d.value is None and not ba1_d.attr_list)
+                                ba2_free = (ba2_d.value is None and not ba2_d.attr_list)
+                                if ba1_free and ba2_free:
+                                    same_var = (id(ba1_d) == id(ba2_d))
+                                    if same_var:
+                                        # v = A/A → (v-1)*A=0. If v≠1: A=0
+                                        if abs(v_lhs - 1.0) > 1e-12:
+                                            solved = True
+                                            x_term = _make_number(eng, 0.0)
+                                            result = _unify(eng, ba1_d, x_term)
+                                            if not result:
+                                                return False
+                                            return True
+                                        else:  # v=1: A/A=1 trivially true for any A≠0, mark real
+                                            solved = True
+                                            _mark_real_sort(ba1_d, wl, eng)
+                                            return True
+                                    elif v_lhs == 0.0:
+                                        # 0 = A/B → A=0, B=real
+                                        solved = True
+                                        _mark_real_sort(ba2_d, wl, eng)
+                                        x_term = _make_number(eng, 0.0)
+                                        result = _unify(eng, ba1_d, x_term)
+                                        if not result:
+                                            return False
+                                        return True
+                                    elif v_lhs == 1.0:
+                                        # 1 = A/B → A=B (unify)
+                                        solved = True
+                                        _mark_real_sort(ba1_d, wl, eng)
+                                        _mark_real_sort(ba2_d, wl, eng)
+                                        result = _unify(eng, ba1_d, ba2_d)
+                                        if not result:
+                                            return False
+                                        return True
+                                    # else v≠0,1 and different vars → suspend (fall through)
+
+                    if a_d_is_free and _var_in_expr(a_d_final, b_d, set()):
+                        # Self-referential: LHS appears in RHS.
+                        # a = a_coeff * a + b_psi
+                        decomp = _linear_decompose_psi(b_d, a_d_final, eng, wl)
+                        if decomp is not None:
+                            a_coeff, b_psi = decomp
+                            if abs(a_coeff - 1.0) < 1e-12:
+                                # a = a + b_psi → 0 = b_psi
+                                # b_psi may itself be an arithmetic expression
+                                # (e.g. 0-C_var), so push a new prove goal
+                                # "0 = b_psi" for the engine to solve rather
+                                # than attempting direct structural unification.
+                                zero_t = wl.make_integer(0)
+                                solved = True
+                                ok_bpsi, _ = _eval_arith(b_psi, eng)
+                                if ok_bpsi:
+                                    # b_psi is already concrete — just check it's 0
+                                    result = _unify(eng, b_psi, zero_t)
+                                    if not result:
+                                        return False
+                                    return True
+                                elif (b_psi.value is None and
+                                        not b_psi.attr_list and
+                                        (b_psi.type is wl.top or
+                                         getattr(b_psi, 'flags', 0) & __import__('wild_life.data_structures', fromlist=['SORT_VAR']).SORT_VAR)):
+                                    # b_psi is a free variable — unify directly with 0
+                                    result = _unify(eng, b_psi, zero_t)
+                                    if not result:
+                                        return False
+                                    return True
+                                else:
+                                    # b_psi is a compound expression — push 0 = b_psi
+                                    # as a new prove goal for the engine to handle
+                                    eq_defn = getattr(wl, 'eqsym', None) or (
+                                        wl.syntax_module.symbol_table.get('=')
+                                        if hasattr(wl, 'syntax_module') else None)
+                                    if eq_defn is not None:
+                                        new_eq = PsiTerm(type_def=eq_defn)
+                                        new_eq.attr_list['1'] = zero_t
+                                        new_eq.attr_list['2'] = b_psi
+                                        eng.push_goal(GoalType.PROVE, new_eq, None, None)
+                                    return True
+                            else:
+                                # a = a_coeff * a + b_psi → a = b_psi/(1-a_coeff)
+                                ok_b, v_b = _eval_arith(b_psi, eng)
+                                if ok_b:
+                                    x_val = v_b / (1.0 - a_coeff)
+                                    x_term = _make_number(eng, x_val)
+                                    solved = True
+                                    result = _unify(eng, a_d_final, x_term)
+                                    if not result:
+                                        return False
+                                    return True
+                        else:
+                            # decomp is None: try non-linear self-referential patterns
+                            _b_sym_nl = b_d.type.keyword.symbol if b_d.type and b_d.type.keyword else ''
+                            if _b_sym_nl == '/':
+                                _nls_a1, _nls_a2 = _get_two_args(b_d)
+                                if _nls_a1 is not None and _nls_a2 is not None:
+                                    _nls_a2_d = _nls_a2.deref()
+                                    if id(_nls_a2_d) == id(a_d_final):
+                                        # A = k/A → A² = k. If k=0: A=0.
+                                        ok_k, v_k = _eval_arith(_nls_a1, eng)
+                                        if ok_k and abs(v_k) < 1e-12:
+                                            solved = True
+                                            x_term = _make_number(eng, 0.0)
+                                            result = _unify(eng, a_d_final, x_term)
+                                            if not result:
+                                                return False
+                                            return True
+
+                    # Case 3: LHS is free, RHS has exactly one free var, expr = 1*B+0 → unify
+                    if (not solved and a_d_is_free
+                            and not _var_in_expr(a_d_final, b_d, set())
+                            and len(vars_in_expr) == 1):
+                        x_b = vars_in_expr[0].deref()
+                        coeffs_b = _get_linear_coeff(b_d, x_b, eng)
+                        if coeffs_b is not None:
+                            a_coeff_b, b_const_b = coeffs_b
+                            if a_coeff_b == 1.0 and abs(b_const_b) < 1e-12:
+                                # A = 1*B + 0 = B → unify A and B
+                                solved = True
+                                _mark_real_sort(a_d_final, wl, eng)
+                                _mark_real_sort(x_b, wl, eng)
+                                result = _unify(eng, a_d_final, x_b)
+                                if not result:
+                                    return False
+                                return True
+
+                if not solved:
+                    # Can't solve now — suspend (re-suspend with tildes).
+                    # Re-suspension is correct even for is_resid_refiring cases:
+                    # drop only when truly cyclic (a_coeff==1 with no const solution).
+                    if not vars_in_expr:
+                        # No free vars in expression — evaluate it and unify.
+                        ok_eval, v_eval = _eval_arith(b_d, eng)
+                        if ok_eval:
+                            b_d = _make_number(eng, v_eval)
+                        else:
+                            # Concrete but unevaluable (e.g. division by zero). Fail.
+                            return False
                     else:
-                        # Initial setup: constrain a_d (free) to real and attach.
-                        _attach_arith_resid(a_d_final, wl, pending_goal, eng)
-                    # The goal is now suspended — return True (constraint stored).
-                    return True
+                        from wild_life.data_structures import Goal, Residuation
+                        eq_defn = getattr(wl, 'eqsym', None) or wl.syntax_module.symbol_table.get('=')
+                        eq_term = PsiTerm(type_def=eq_defn)
+                        eq_term.attr_list['1'] = a_d
+                        eq_term.attr_list['2'] = b_d
+                        eq_term._resid_marker = True
+                        pending_goal = Goal(GoalType.PROVE, eq_term, None, None, pending=True)
+                        for v in vars_in_expr:
+                            _attach_arith_resid(v, wl, pending_goal, eng)
+                        if not a_d_is_free:
+                            # LHS is bound: also attach to original LHS var so tilde shows.
+                            a_orig = a
+                            if a_orig.resid is None:
+                                if eng is not None:
+                                    eng.trail.trail_psi(a_orig, 'resid')
+                                a_orig.resid = [Residuation(goal=pending_goal)]
+                            else:
+                                if not any(r.goal is pending_goal for r in a_orig.resid):
+                                    if eng is not None:
+                                        eng.trail.trail_copy(a_orig, 'resid')
+                                    a_orig.resid.append(Residuation(goal=pending_goal))
+                        else:
+                            _attach_arith_resid(a_d_final, wl, pending_goal, eng)
+                        return True
     # Try string function evaluation on RHS (psi2str, str2psi, strcon)
     b_str = _try_eval_string_func(b_d, eng)
     if b_str is not None:
