@@ -721,6 +721,10 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
             raise _WriteFailure("conjunction failed")
         t = evaluated
 
+    # ── copy_term(X) functional use at top level ────────────────────────────
+    if _is_copy_term_func(t):
+        t = _eval_copy_term_func(t)
+
     # ── bottom type ({} / disj_nil): cannot be written ──────────────────────
     sym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
     if sym == '{}':
@@ -1677,6 +1681,22 @@ def _is_cond_builtin_local(t: 'PsiTerm') -> bool:
     return getattr(t.type, '_builtin_func', None) is not None
 
 
+def _is_copy_term_func(t: 'PsiTerm') -> bool:
+    """Return True if t is copy_term(X) with exactly 1 argument (functional use)."""
+    if t is None or t.type is None or t.type.keyword is None:
+        return False
+    if t.type.keyword.symbol != 'copy_term':
+        return False
+    # 1-arg form only (2-arg is the predicate form copy_term(X, Y))
+    return '1' in t.attr_list and '2' not in t.attr_list
+
+
+def _eval_copy_term_func(t: 'PsiTerm') -> 'PsiTerm':
+    """Evaluate copy_term(X) → fresh copy of X."""
+    arg = t.attr_list['1'].deref()
+    return copy_term(arg)
+
+
 def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
     """Synchronously evaluate a function body expression.
 
@@ -1695,6 +1715,10 @@ def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
     # User-defined function call?
     if _is_user_function(body_d):
         return _eval_user_func_sync(body_d, eng, _depth)
+
+    # Built-in copy_term(X) functional use — return a fresh copy
+    if _is_copy_term_func(body_d):
+        return _eval_copy_term_func(body_d)
 
     # Built-in cond(C, T, E) — evaluate functionally
     if _is_cond_builtin_local(body_d):
@@ -1755,6 +1779,11 @@ def _eval_embedded_user_funcs(
                 _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited)
             else:
                 _eval_embedded_user_funcs(child, eng, _depth + 1, visited)
+        elif _is_copy_term_func(child):
+            # Evaluate built-in copy_term(X) sub-terms in-place
+            evaled = _eval_copy_term_func(child)
+            td.attr_list[key] = evaled
+            _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited)
         elif _is_cond_builtin_local(child):
             # Evaluate built-in cond(C, T, E) sub-terms in-place
             evaled = _eval_body_sync(child, eng, _depth + 1)
@@ -1788,6 +1817,14 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         eng.push_goal(GoalType.UNIFY, result, b_d, None)
         eng.push_goal(GoalType.EVAL, a_d, result, a_d.type.rule)
         return True
+
+    # Handle copy_term(X) functional use: Y = copy_term(X) → Y = fresh copy of X
+    if _is_copy_term_func(b_d):
+        c = _eval_copy_term_func(b_d)
+        return _unify(eng, a_d, c)
+    if _is_copy_term_func(a_d):
+        c = _eval_copy_term_func(a_d)
+        return _unify(eng, b_d, c)
 
     # Handle bagof/findall/setof in functional position:
     #   L = bagof(Template, Goal)  →  collect all solutions and unify with L

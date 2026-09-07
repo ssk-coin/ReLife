@@ -823,6 +823,14 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
             _print_value(ps, _pt, wl)
             return
 
+    # Evaluate copy_term(X) functional use during printing
+    if (_psym == 'copy_term' and t.value is None and
+            '1' in t.attr_list and '2' not in t.attr_list):
+        from wild_life.unification import copy_term as _ct_print
+        t = _ct_print(t.attr_list['1'].deref())
+        _pretty_psi_term(ps, t, sprec, depth, wl)
+        return
+
     # Evaluate ground string function calls during printing
     # (strcon, substr, strlen when all args are concrete strings/numbers)
     _str_funcs_print = frozenset(('strcon', 'substr', 'strlen'))
