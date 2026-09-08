@@ -1720,6 +1720,11 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
                 if not ok_h:
                     eng.trail.undo_to(mark)
                     continue
+            # Evaluate built-in / user-defined functional sub-terms inside
+            # the guard goal (e.g. genChildren(children(X), A) → the
+            # children(X) arg must be reduced before the predicate is called).
+            _cond_d = cond_part.deref()
+            _eval_embedded_user_funcs(_cond_d, eng, _depth + 1, set())
             # Run the guard in an inner proof loop.
             # IMPORTANT: clear goal_stack so only the guard is proved;
             # the outer continuation must not run inside this inner loop.
@@ -1727,7 +1732,7 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
             cp_save = eng.choice_stack
             gs_save = eng.goal_stack
             eng.goal_stack = None
-            eng.push_goal(_GoalType.PROVE, cond_part, _DR, None)
+            eng.push_goal(_GoalType.PROVE, _cond_d, _DR, None)
             old_ok = eng.main_loop_ok
             _barrier = cp_save if cp_save is not None else _IRB
             cond_ok = eng.run(cs_barrier=_barrier)
@@ -2054,9 +2059,75 @@ def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
     return body_d
 
 
+def _try_eval_any_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
+    """Try to evaluate t as any functional form (user-defined or built-in).
+
+    Returns the evaluated PsiTerm, or None if t is not a functional form
+    (or evaluation fails).  Used to eagerly reduce function sub-terms that
+    appear in predicate-argument position inside function bodies.
+    """
+    if t is None or eng is None:
+        return None
+    td = t.deref()
+    if td.type is None:
+        return None
+
+    # User-defined function
+    if _is_user_function(td):
+        return _eval_user_func_sync(td, eng, 0)
+
+    # Built-in copy_term
+    if _is_copy_term_func(td):
+        return _eval_copy_term_func(td)
+
+    # Built-in cond(C,T,E)
+    if _is_cond_builtin_local(td):
+        return _eval_body_sync(td, eng, 0)
+
+    # children(X) — returns list of direct sub-sorts
+    if _is_children_func(td):
+        return _eval_children_func(td, eng)
+
+    # chr(N) — returns character string for ASCII code N
+    if _is_chr_func(td):
+        return _try_eval_string_func(td, eng)
+
+    # asc(C) — returns ASCII code of character C
+    if _is_asc_func(td):
+        ok, v = _eval_arith(td, eng)
+        return _make_number(eng, v) if ok else None
+
+    # glb(X, Y) — greatest lower bound in sort hierarchy
+    if _is_glb_func(td):
+        return _eval_glb_func(td, eng)
+
+    # lub(X, Y) — least upper bound in sort hierarchy
+    if _is_lub_func(td):
+        return _eval_lub_func(td, eng)
+
+    # General string function (strcon, substr, strlen, int2str, …)
+    r = _try_eval_string_func(td, eng)
+    if r is not None:
+        return r
+
+    # Arithmetic expression (+, -, *, /, abs, sqrt, …)
+    # _eval_arith returns (False, 0.0) quickly for non-arithmetic terms,
+    # so calling it unconditionally is safe.
+    ok, v = _eval_arith(td, eng)
+    if ok:
+        return _make_number(eng, v)
+
+    return None
+
+
 def _eval_embedded_user_funcs(
         t: PsiTerm, eng, _depth: int, visited: set) -> None:
     """Walk t's attribute tree and evaluate any user-function sub-terms.
+
+    Also evaluates built-in functional sub-terms (children, chr, asc,
+    glb, lub, arithmetic, string functions) so that predicate arguments
+    that contain functional calls are fully reduced before the predicate
+    is called.
 
     Modifies t's attr_list in-place (replacing function calls with their
     evaluated results).  t must be a fresh copy (not a stored rule term).
@@ -2069,24 +2140,10 @@ def _eval_embedded_user_funcs(
     visited.add(id(td))
     for key in list(td.attr_list.keys()):
         child = td.attr_list[key].deref()
-        if _is_user_function(child):
-            evaled = _eval_user_func_sync(child, eng, _depth + 1)
-            if evaled is not None and evaled is not child:
-                td.attr_list[key] = evaled
-                _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited)
-            else:
-                _eval_embedded_user_funcs(child, eng, _depth + 1, visited)
-        elif _is_copy_term_func(child):
-            # Evaluate built-in copy_term(X) sub-terms in-place
-            evaled = _eval_copy_term_func(child)
+        evaled = _try_eval_any_func(child, eng)
+        if evaled is not None and evaled is not child:
             td.attr_list[key] = evaled
             _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited)
-        elif _is_cond_builtin_local(child):
-            # Evaluate built-in cond(C, T, E) sub-terms in-place
-            evaled = _eval_body_sync(child, eng, _depth + 1)
-            if evaled is not None and evaled is not child:
-                td.attr_list[key] = evaled
-                _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited)
         elif child.attr_list:
             _eval_embedded_user_funcs(child, eng, _depth + 1, visited)
 

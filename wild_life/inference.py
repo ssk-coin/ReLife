@@ -813,11 +813,10 @@ class Engine:
             val_part  = body_d.attr_list.get('1')  # return value
             cond_part = body_d.attr_list.get('2')  # condition to prove
             if val_part is not None and cond_part is not None:
-                # Push: unify result with val_part AFTER cond_part is proven
-                self.push_goal(GoalType.UNIFY, val_part, result, None)
-                self.push_goal(GoalType.PROVE, cond_part, _DEFRULES, None)
                 # For functions with input arguments (non-nullary), unify funct
-                # with head to bind the argument variables before the body runs.
+                # with head FIRST to bind the argument variables.  This must
+                # happen before we evaluate functional sub-terms in cond_part
+                # (e.g. children(X) can only be reduced once X is bound to s1).
                 # For nullary function sorts (head is a bare variable with no
                 # attributes — e.g. `ran -> A | cond`), skip this step: linking
                 # the head variable back to funct (which has a function sort)
@@ -831,6 +830,15 @@ class Engine:
                     if not ok:
                         self.trail.undo_to(mark)
                         return False
+                # Now that argument variables are bound, eagerly evaluate any
+                # built-in or user-defined functional sub-terms in cond_part
+                # (e.g. genChildren(children(X), A) → children(X) → [a,b,c,d]).
+                from wild_life.built_ins import _eval_embedded_user_funcs
+                _cond_d = cond_part.deref()
+                _eval_embedded_user_funcs(_cond_d, self, 0, set())
+                # Push: unify result with val_part AFTER cond_part is proven
+                self.push_goal(GoalType.UNIFY, val_part, result, None)
+                self.push_goal(GoalType.PROVE, _cond_d, _DEFRULES, None)
                 return True
 
         # Pre-evaluate any function call arguments in funct.
