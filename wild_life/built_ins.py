@@ -574,6 +574,30 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             return None
         return val.deref()
 
+    elif sym == 'chr':
+        # chr(N) → character string for ASCII code N (uses N mod 256)
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return None
+        a1d = a1.deref()
+        ok, v = _eval_arith(a1d, eng)
+        if not ok:
+            return None
+        code = int(v) % 256
+        return _make_string(eng, chr(code))
+
+    elif sym == 'int2str':
+        # int2str(N) → string representation of number N
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return None
+        a1d = a1.deref()
+        ok, v = _eval_arith(a1d, eng)
+        if not ok:
+            return None
+        iv = int(v)
+        return _make_string(eng, str(iv) if float(iv) == v else str(v))
+
     return None
 
 
@@ -747,6 +771,16 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
             t_str = _try_eval_string_func(t, eng)
             if t_str is not None:
                 t = t_str
+            elif _is_user_function(t) and eng is not None:
+                # User-defined function call: evaluate synchronously for display.
+                # Use a trail mark so pattern-matching bindings don't leak.
+                _mark = eng.trail.mark()
+                try:
+                    _evaled = _eval_user_func_sync(t, eng, 0)
+                finally:
+                    eng.trail.undo_to(_mark)
+                if _evaled is not None:
+                    t = _evaled
             elif wl and sym in (_arith_binary_ops | _arith_unary_ops):
                 # The top-level operator is arithmetic but evaluation failed.
                 # If any immediate arg is a concrete non-numeric atom, this is
@@ -1110,6 +1144,55 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
             if a1d.type and a1d.type.is_subtype_of(wl.quoted_string):
                 return True, float(len(str(a1d.value)))
         # Fall through: cannot evaluate (unbound variable etc.)
+        return False, 0.0
+
+    # asc(C) — ASCII code of character C (first character, mod 256)
+    if sym == 'asc':
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return False, 0.0
+        a1d = a1.deref()
+        # First try to evaluate as chr(N) or another string function
+        char_term = _try_eval_string_func(a1d, eng)
+        if char_term is not None:
+            if char_term.value is not None:
+                s = str(char_term.value)
+                if s:
+                    return True, float(ord(s[0]) % 256)
+            return False, 0.0
+        # Try as a direct string value
+        if a1d.value is not None and eng is not None:
+            wl = eng.wl
+            if a1d.type and a1d.type.is_subtype_of(wl.quoted_string):
+                s = str(a1d.value)
+                return (True, float(ord(s[0]) % 256)) if s else (False, 0.0)
+        # Try as atom (symbol name like 'a', 'b', etc.)
+        if a1d.type is not None and a1d.type.keyword is not None:
+            s = a1d.type.keyword.symbol
+            if len(s) == 1:
+                return True, float(ord(s[0]) % 256)
+        return False, 0.0
+
+    # int(X) — integer part of X (truncate towards zero)
+    if sym == 'int':
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return False, 0.0
+        a1d = a1.deref()
+        ok, v = _eval_arith(a1d, eng)
+        if ok:
+            return True, float(int(v))
+        return False, 0.0
+
+    # real(X) / float(X) — convert X to floating-point
+    if sym == 'real':
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return False, 0.0
+        a1d = a1.deref()
+        ok, v = _eval_arith(a1d, eng)
+        if ok:
+            return True, float(v)
         return False, 0.0
 
     return False, 0.0
@@ -1745,6 +1828,22 @@ def _is_lub_func(t: 'PsiTerm') -> bool:
             '1' in t.attr_list and '2' in t.attr_list and '3' not in t.attr_list)
 
 
+def _is_chr_func(t: 'PsiTerm') -> bool:
+    """Return True if t is chr(N) with exactly 1 argument (functional use)."""
+    if t is None or t.type is None or t.type.keyword is None:
+        return False
+    return (t.type.keyword.symbol == 'chr' and
+            '1' in t.attr_list and '2' not in t.attr_list)
+
+
+def _is_asc_func(t: 'PsiTerm') -> bool:
+    """Return True if t is asc(C) with exactly 1 argument (functional use)."""
+    if t is None or t.type is None or t.type.keyword is None:
+        return False
+    return (t.type.keyword.symbol == 'asc' and
+            '1' in t.attr_list and '2' not in t.attr_list)
+
+
 def _eval_glb_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
     """Evaluate glb(X, Y) → GLB (unification) of X and Y, or None on failure.
 
@@ -2042,6 +2141,22 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         return _unify(eng, a_d, _eval_children_func(b_d, eng))
     if _is_children_func(a_d):
         return _unify(eng, b_d, _eval_children_func(a_d, eng))
+
+    # Handle chr(N) functional use: C = chr(N) → character string for ASCII code N
+    if _is_chr_func(b_d):
+        r = _try_eval_string_func(b_d, eng)
+        return _unify(eng, a_d, r) if r is not None else False
+    if _is_chr_func(a_d):
+        r = _try_eval_string_func(a_d, eng)
+        return _unify(eng, b_d, r) if r is not None else False
+
+    # Handle asc(C) functional use: N = asc(C) → ASCII code of character C
+    if _is_asc_func(b_d):
+        ok, v = _eval_arith(b_d, eng)
+        return _unify(eng, a_d, _make_number(eng, v)) if ok else False
+    if _is_asc_func(a_d):
+        ok, v = _eval_arith(a_d, eng)
+        return _unify(eng, b_d, _make_number(eng, v)) if ok else False
 
     # Handle bagof/findall/setof in functional position:
     #   L = bagof(Template, Goal)  →  collect all solutions and unify with L
@@ -4733,4 +4848,227 @@ def register_all(wl) -> None:
             return True
         return _unify(eng, a2.deref(), lst)
     _reg('children', _bi_children)
+
+    # ── succeed ──────────────────────────────────────────────────────────────
+    def _bi_succeed(goal, eng):
+        """succeed — always succeeds (like true/0)."""
+        return True
+    _reg('succeed', _bi_succeed)
+
+    # ── genint(N) — generate integers 0, 1, 2, … on backtracking ──────────
+    def _bi_genint(goal, eng):
+        """genint(N) — non-deterministically bind N to 0, 1, 2, ..."""
+        from wild_life.data_structures import GoalType as _GT
+        a1 = goal.attr_list.get('1')
+        if a1 is None:
+            return False
+        a1d = a1.deref()
+        # If N is already bound to an integer, just succeed.
+        if a1d.value is not None:
+            return True
+        # Start generating from 0; push choice point for next integer.
+        start = 0
+
+        def _push_next(n: int) -> None:
+            # Build genint(n+1) as a goal term for the choice point
+            next_goal = PsiTerm()
+            next_goal.type = goal.type
+            next_goal.attr_list = {'1': wl.make_integer(n + 1)}
+            # We push a special PROVE choice point that calls _bi_genint again
+            eng.push_choice_point(_GT.PROVE, next_goal, _DEFRULES, None)
+
+        from wild_life.inference import _DEFRULES
+        _push_next(start)
+        return _unify(eng, a1d, wl.make_integer(start))
+    _reg('genint', _bi_genint)
+
+    # ── is_number(X) — true if X is a numeric value ──────────────────────
+    def _bi_is_number(goal, eng):
+        """is_number(X) — succeeds if X is a number (integer or real)."""
+        a1 = goal.attr_list.get('1')
+        if a1 is None:
+            return False
+        a1d = a1.deref()
+        if a1d.value is None:
+            return False
+        return (a1d.type is not None and
+                wl.real is not None and
+                a1d.type.is_subtype_of(wl.real))
+    _reg('is_number', _bi_is_number)
+
+    # ── is_value(X) — true if X is a concrete (ground) value ─────────────
+    def _bi_is_value(goal, eng):
+        """is_value(X) — succeeds if X is a concrete value (number or string)."""
+        a1 = goal.attr_list.get('1')
+        if a1 is None:
+            return False
+        a1d = a1.deref()
+        if a1d.value is None:
+            return False
+        return (a1d.type is not None and (
+            (wl.real is not None and a1d.type.is_subtype_of(wl.real)) or
+            (wl.quoted_string is not None and a1d.type.is_subtype_of(wl.quoted_string))
+        ))
+    _reg('is_value', _bi_is_value)
+
+    # ── has_feature(F, T) — true if term T has feature named F ───────────
+    def _bi_has_feature(goal, eng):
+        """has_feature(F, T) — succeeds if T has a feature named F."""
+        a1 = goal.attr_list.get('1')  # feature name
+        a2 = goal.attr_list.get('2')  # term
+        if a1 is None or a2 is None:
+            return False
+        feat = a1.deref()
+        term = a2.deref()
+        # Determine feature name
+        if feat.type is not None and feat.type.keyword is not None:
+            fname = feat.type.keyword.symbol
+        elif feat.value is not None:
+            fname = str(feat.value)
+        else:
+            return False
+        return fname in term.attr_list
+    _reg('has_feature', _bi_has_feature)
+
+    # ── parents(X, L) — L is list of direct parent sorts of X ─────────────
+    def _bi_parents(goal, eng):
+        """parents(X, L) — L is the list of direct parent sorts of X.
+        parents(X) is the functional 1-arg form (handled via bi_unify)."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None:
+            return False
+        a1d = a1.deref()
+        defn = a1d.type
+        if defn is None:
+            if a2 is None:
+                return True
+            return _unify(eng, a2.deref(), wl.make_list([]))
+        parent_defs = getattr(defn, 'parents', [])
+        parent_terms = []
+        for pd in parent_defs:
+            if pd is not None and pd.keyword is not None:
+                parent_terms.append(wl.make_atom(pd.keyword.symbol, wl.bi_module))
+        lst = wl.make_list(parent_terms)
+        if a2 is None:
+            # 1-arg functional form (via bi_unify interception)
+            return True
+        return _unify(eng, a2.deref(), lst)
+    _reg('parents', _bi_parents)
+
+    # ── least_sorts(X, L) — L is the list of most-specific sorts of X ─────
+    def _bi_least_sorts(goal, eng):
+        """least_sorts(X, L) — L is the list of minimal (most-specific) sorts of X."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None or a2 is None:
+            return False
+        a1d = a1.deref()
+        defn = a1d.type
+        if defn is None:
+            return _unify(eng, a2.deref(), wl.make_list([]))
+        # The most-specific sort of a term is the term's own type (leaf in hierarchy).
+        # For atoms with children, the type itself is the sort; for values, use the type.
+        least = [wl.make_atom(defn.keyword.symbol, wl.bi_module)] if defn.keyword else []
+        return _unify(eng, a2.deref(), wl.make_list(least))
+    _reg('least_sorts', _bi_least_sorts)
+
+    # ── chr(N, C) / chr(N) — ASCII code N → character C ──────────────────
+    def _bi_chr(goal, eng):
+        """chr(N, C) — C is the character for ASCII code N (mod 256).
+        chr(N) in functional position is handled via bi_unify."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None:
+            return False
+        a1d = a1.deref()
+        ok, v = _eval_arith(a1d, eng)
+        if not ok:
+            return False
+        c = chr(int(v) % 256)
+        char_term = _make_string(eng, c)
+        if a2 is None:
+            return True  # 1-arg predicate form just succeeds
+        return _unify(eng, a2.deref(), char_term)
+    _reg('chr', _bi_chr)
+
+    # ── asc(C, N) / asc(C) — character C → ASCII code N ─────────────────
+    def _bi_asc(goal, eng):
+        """asc(C, N) — N is the ASCII code of character C.
+        asc(C) in functional position is handled via bi_unify."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None:
+            return False
+        a1d = a1.deref()
+        ok, v = _eval_arith(a1d, eng)  # handles asc(chr(N)) too
+        if ok:
+            n = int(v) % 256
+        else:
+            # Direct character argument: string or atom
+            if a1d.value is not None and a1d.type and a1d.type.is_subtype_of(wl.quoted_string):
+                s = str(a1d.value)
+                n = ord(s[0]) % 256 if s else 0
+            elif a1d.type and a1d.type.keyword:
+                s = a1d.type.keyword.symbol
+                n = ord(s[0]) % 256 if len(s) == 1 else -1
+                if n < 0:
+                    return False
+            else:
+                return False
+        if a2 is None:
+            return True  # 1-arg just succeeds
+        return _unify(eng, a2.deref(), wl.make_integer(n))
+    _reg('asc', _bi_asc)
+
+    # ── int2str(N, S) — integer N → string S ─────────────────────────────
+    def _bi_int2str(goal, eng):
+        """int2str(N, S) — S is the string representation of integer N."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None or a2 is None:
+            return False
+        a1d = a1.deref()
+        ok, v = _eval_arith(a1d, eng)
+        if not ok:
+            return False
+        iv = int(v)
+        s = str(iv) if float(iv) == v else str(v)
+        return _unify(eng, a2.deref(), _make_string(eng, s))
+    _reg('int2str', _bi_int2str)
+
+    # ── int(X, N) — coerce X to integer N ────────────────────────────────
+    def _bi_int_coerce(goal, eng):
+        """int(X, N) — N is the integer part of X (truncate towards zero)."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None or a2 is None:
+            return False
+        a1d = a1.deref()
+        ok, v = _eval_arith(a1d, eng)
+        if not ok:
+            return False
+        return _unify(eng, a2.deref(), wl.make_integer(int(v)))
+    _reg('int', _bi_int_coerce)
+
+    # ── real(X, R) — coerce X to real R ──────────────────────────────────
+    def _bi_real_coerce(goal, eng):
+        """real(X, R) — R is the floating-point value of X."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None or a2 is None:
+            return False
+        a1d = a1.deref()
+        ok, v = _eval_arith(a1d, eng)
+        if not ok:
+            return False
+        from wild_life.runtime import WildLifeRuntime
+        real_t = PsiTerm()
+        real_t.type = wl.real
+        real_t.value = float(v)
+        real_t.status = 4
+        from wild_life.data_structures import QUOTED_TRUE
+        real_t.flags = QUOTED_TRUE
+        return _unify(eng, a2.deref(), real_t)
+    _reg('real', _bi_real_coerce)
 
