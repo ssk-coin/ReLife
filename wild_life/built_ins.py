@@ -1702,6 +1702,67 @@ def _eval_copy_term_func(t: 'PsiTerm') -> 'PsiTerm':
     return copy_term(arg)
 
 
+def _is_glb_func(t: 'PsiTerm') -> bool:
+    """Return True if t is glb(X, Y) with exactly 2 arguments (functional use)."""
+    if t is None or t.type is None or t.type.keyword is None:
+        return False
+    return (t.type.keyword.symbol == 'glb' and
+            '1' in t.attr_list and '2' in t.attr_list and '3' not in t.attr_list)
+
+
+def _is_lub_func(t: 'PsiTerm') -> bool:
+    """Return True if t is lub(X, Y) with exactly 2 arguments (functional use)."""
+    if t is None or t.type is None or t.type.keyword is None:
+        return False
+    return (t.type.keyword.symbol == 'lub' and
+            '1' in t.attr_list and '2' in t.attr_list and '3' not in t.attr_list)
+
+
+def _eval_glb_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
+    """Evaluate glb(X, Y) → GLB (unification) of X and Y, or None on failure."""
+    t1 = t.attr_list['1'].deref()
+    t2 = t.attr_list['2'].deref()
+    # Compute GLB non-destructively via copy + unify + copy-result
+    c1 = copy_term(t1)
+    c2 = copy_term(t2)
+    mark = eng.trail.mark()
+    ok = eng.unifier.unify(c1, c2)
+    if not ok:
+        eng.trail.undo_to(mark)
+        return None
+    result = copy_term(c1.deref())
+    eng.trail.undo_to(mark)
+    return result
+
+
+def _eval_lub_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
+    """Evaluate lub(X, Y) → LUB (least upper bound) of types X and Y, or None."""
+    from wild_life.unification import compute_glb as _cg
+    t1 = t.attr_list['1'].deref()
+    t2 = t.attr_list['2'].deref()
+    d1 = t1.type
+    d2 = t2.type
+    wl = eng.wl
+    if d1 is None and d2 is None:
+        return PsiTerm(type_def=wl.top)
+    if d1 is None:
+        return PsiTerm(type_def=wl.top)
+    if d2 is None:
+        return PsiTerm(type_def=wl.top)
+    # Walk up parent chain to find common ancestor
+    ancestors1: set = set()
+    d = d1
+    while d is not None:
+        ancestors1.add(d)
+        d = d.parent if hasattr(d, 'parent') else None
+    d = d2
+    while d is not None:
+        if d in ancestors1:
+            return PsiTerm(type_def=d)
+        d = d.parent if hasattr(d, 'parent') else None
+    return PsiTerm(type_def=wl.top)
+
+
 def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
     """Synchronously evaluate a function body expression.
 
@@ -1830,6 +1891,22 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     if _is_copy_term_func(a_d):
         c = _eval_copy_term_func(a_d)
         return _unify(eng, b_d, c)
+
+    # Handle glb(X,Y) functional use: B = glb(X,Y) → B = GLB of X and Y
+    if _is_glb_func(b_d):
+        r = _eval_glb_func(b_d, eng)
+        return _unify(eng, a_d, r) if r is not None else False
+    if _is_glb_func(a_d):
+        r = _eval_glb_func(a_d, eng)
+        return _unify(eng, b_d, r) if r is not None else False
+
+    # Handle lub(X,Y) functional use: B = lub(X,Y) → B = LUB of X and Y
+    if _is_lub_func(b_d):
+        r = _eval_lub_func(b_d, eng)
+        return _unify(eng, a_d, r) if r is not None else False
+    if _is_lub_func(a_d):
+        r = _eval_lub_func(a_d, eng)
+        return _unify(eng, b_d, r) if r is not None else False
 
     # Handle bagof/findall/setof in functional position:
     #   L = bagof(Template, Goal)  →  collect all solutions and unify with L
@@ -4476,3 +4553,39 @@ def register_all(wl) -> None:
         defn = t.type
         return defn is not None and defn.type == _DT.PREDICATE
     _reg('is_predicate', _bi_is_predicate)
+
+    def _bi_glb(goal, eng):
+        """glb(X, Y, Z) — Z is the GLB (unification) of X and Y.
+        Also handles functional 2-arg form via bi_unify interception."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        a3 = goal.attr_list.get('3')
+        if a1 is None or a2 is None:
+            return False
+        t = goal
+        if a3 is None:
+            # 2-arg functional form called directly (e.g. as a goal)
+            # just unify the two args
+            return _unify(eng, a1.deref(), a2.deref())
+        r = _eval_glb_func(t, eng)
+        if r is None:
+            return False
+        return _unify(eng, a3.deref(), r)
+    _reg('glb', _bi_glb)
+
+    def _bi_lub(goal, eng):
+        """lub(X, Y, Z) — Z is the LUB of types X and Y.
+        Also handles functional 2-arg form via bi_unify interception."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        a3 = goal.attr_list.get('3')
+        if a1 is None or a2 is None:
+            return False
+        t = goal
+        if a3 is None:
+            return True  # 2-arg with no result: trivially succeed
+        r = _eval_lub_func(t, eng)
+        if r is None:
+            return False
+        return _unify(eng, a3.deref(), r)
+    _reg('lub', _bi_lub)
