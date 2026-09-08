@@ -1811,6 +1811,108 @@ def bi_arith_ge(goal: PsiTerm, eng) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# String comparison operators:  A$>B  A$>=B  A$<B  A$=<B  A$==B  A$\==B
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_str_val(t: PsiTerm, eng) -> Optional[str]:
+    """Return the string comparison key for a psi-term, or None on failure.
+
+    Wild Life string comparisons ($>, $<, etc.) compare the *print name*
+    of atoms and strings.
+
+    Rules:
+      - Quoted string (backtick literal): return t.value (the raw string)
+      - Atom:                             return t.type.keyword.symbol
+      - Number (int/float):               return str(int(v)) or str(v)
+      - Anything else (variable, compound): return None → predicate fails
+    """
+    if t is None:
+        return None
+    t = t.deref()
+    wl = eng.wl
+    # Quoted string — value holds the raw string content
+    if t.type is not None and t.type.is_subtype_of(wl.quoted_string):
+        return str(t.value) if t.value is not None else ''
+    # Number
+    if t.value is not None:
+        v = t.value
+        if isinstance(v, float) and v == int(v):
+            return str(int(v))
+        return str(v)
+    # Atom: a plain atom has a keyword symbol and no children/value
+    if t.type is not None and t.type.keyword is not None and not t.attr_list:
+        return t.type.keyword.symbol
+    # Anything else (variable, compound term): cannot compare
+    return None
+
+
+def bi_str_gt(goal: PsiTerm, eng) -> bool:
+    """A $> B — string greater-than."""
+    a, b = _get_two_args(goal)
+    if a is None or b is None:
+        return False
+    sa, sb = _get_str_val(a, eng), _get_str_val(b, eng)
+    if sa is None or sb is None:
+        return False
+    return sa > sb
+
+
+def bi_str_ge(goal: PsiTerm, eng) -> bool:
+    """A $>= B — string greater-than-or-equal."""
+    a, b = _get_two_args(goal)
+    if a is None or b is None:
+        return False
+    sa, sb = _get_str_val(a, eng), _get_str_val(b, eng)
+    if sa is None or sb is None:
+        return False
+    return sa >= sb
+
+
+def bi_str_lt(goal: PsiTerm, eng) -> bool:
+    """A $< B — string less-than."""
+    a, b = _get_two_args(goal)
+    if a is None or b is None:
+        return False
+    sa, sb = _get_str_val(a, eng), _get_str_val(b, eng)
+    if sa is None or sb is None:
+        return False
+    return sa < sb
+
+
+def bi_str_le(goal: PsiTerm, eng) -> bool:
+    """A $=< B — string less-than-or-equal."""
+    a, b = _get_two_args(goal)
+    if a is None or b is None:
+        return False
+    sa, sb = _get_str_val(a, eng), _get_str_val(b, eng)
+    if sa is None or sb is None:
+        return False
+    return sa <= sb
+
+
+def bi_str_eq(goal: PsiTerm, eng) -> bool:
+    """A $== B — string equality."""
+    a, b = _get_two_args(goal)
+    if a is None or b is None:
+        return False
+    sa, sb = _get_str_val(a, eng), _get_str_val(b, eng)
+    if sa is None or sb is None:
+        return False
+    return sa == sb
+
+
+def bi_str_ne(goal: PsiTerm, eng) -> bool:
+    r"""A $\== B — string inequality."""
+    a, b = _get_two_args(goal)
+    if a is None or b is None:
+        return False
+    sa, sb = _get_str_val(a, eng), _get_str_val(b, eng)
+    if sa is None or sb is None:
+        return False
+    return sa != sb
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Unification / comparison
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -5132,6 +5234,14 @@ def register_all(wl) -> None:
     _reg('=<', bi_arith_le)
     _reg('>', bi_arith_gt)
     _reg('>=', bi_arith_ge)
+
+    # String comparison  (A$>B  A$>=B  A$<B  A$=<B  A$==B  A$\==B)
+    _reg('$>', bi_str_gt)
+    _reg('$>=', bi_str_ge)
+    _reg('$<', bi_str_lt)
+    _reg('$=<', bi_str_le)
+    _reg('$==', bi_str_eq)
+    _reg('$\\==', bi_str_ne)
 
     # Unification
     _reg('=', bi_unify)
