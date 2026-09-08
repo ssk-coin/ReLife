@@ -86,6 +86,14 @@ _ARITH_OPS_SET = frozenset((
     '+', '-', '*', '/', '//', 'mod', '**', '^',
     'max', 'min', 'abs', 'sqrt', 'sin', 'cos', 'tan',
     'exp', 'log', 'floor', 'ceiling', 'truncate', 'round',
+    # Bitwise operators (also produce numeric results)
+    '/\\', '\\/', 'xor', '>>', '<<',
+    # Bitwise NOT (unary)
+    '\\',
+    # Time functions (0-ary arithmetic; always return a number)
+    'cpu_time', 'real_time',
+    # Global integer counter (0-ary; increments each evaluation)
+    'genint',
 ))
 
 
@@ -1459,6 +1467,23 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
             return True, float(v)
         return False, 0.0
 
+    # cpu_time — 0-ary function returning process CPU time in seconds
+    if sym == 'cpu_time' and not t.attr_list:
+        return True, float(time.process_time())
+
+    # real_time — 0-ary function returning wall-clock time in seconds
+    if sym == 'real_time' and not t.attr_list:
+        return True, float(time.time())
+
+    # genint — 0-ary global integer counter; increments on each evaluation
+    if sym == 'genint' and not t.attr_list:
+        wl = getattr(eng, 'wl', None) if eng is not None else None
+        if wl is not None:
+            current = getattr(wl, '_genint_counter', 0) + 1
+            wl._genint_counter = current
+            return True, float(current)
+        return False, 0.0
+
     return False, 0.0
 
 
@@ -1539,6 +1564,7 @@ def _try_solve_nonlinear(expr, x_var, v_lhs, eng):
     Handles simple inversion patterns:
       a / x = v  →  x = a / v    (denominator is the unknown)
       x ^ n = v  →  x = v^(1/n)  (x to an integer power, v ≥ 0)
+      \(x) = v   →  x = ~v = -(v+1)  (bitwise NOT inversion)
 
     Returns the solution as a float, or None if no pattern matched.
     """
@@ -1549,6 +1575,15 @@ def _try_solve_nonlinear(expr, x_var, v_lhs, eng):
     if sym not in _ARITH_OPS_SET:
         return None
     arg1, arg2 = _get_two_args(expr)
+
+    # ── Unary operators (arg2 is None) ────────────────────────────────────────
+    if sym == '\\' and arg1 is not None and arg2 is None:
+        # \ (bitwise NOT): \(x) = v  →  x = ~v = -(v+1)
+        arg1_d = arg1.deref()
+        if id(arg1_d) == id(x_var):
+            return float(~int(round(v_lhs)))
+        return None
+
     if arg1 is None or arg2 is None:
         return None
 
@@ -3555,6 +3590,20 @@ def bi_fail(goal: PsiTerm, eng) -> bool:
     return False
 
 
+def bi_repeat(goal: PsiTerm, eng) -> bool:
+    """repeat — always succeeds, creates an infinite choice point on backtrack.
+
+    Equivalent to the Prolog definition:
+        repeat.
+        repeat :- repeat.
+    """
+    # Push a choice point that re-enters repeat on backtracking.
+    # goal is the repeat term itself; proving it again creates another choice
+    # point, giving infinite backtracking.
+    eng.push_choice_point(GoalType.PROVE, goal, _DEFRULES_SENTINEL, None)
+    return True
+
+
 def bi_not(goal: PsiTerm, eng) -> bool:
     r"""not(P) / \+(P) — negation as failure."""
     arg = _get_one_arg(goal)
@@ -5192,6 +5241,363 @@ def bi_alias(goal: PsiTerm, eng) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# trace / notrace / spy / nospy
+# ─────────────────────────────────────────────────────────────────────────────
+
+def bi_trace(goal: PsiTerm, eng) -> bool:
+    """trace — enable execution tracing."""
+    if not eng.trace:
+        eng.trace = True
+        print("*** Tracing is turned on.", file=sys.stderr)
+    return True
+
+
+def bi_notrace(goal: PsiTerm, eng) -> bool:
+    """notrace — disable execution tracing."""
+    eng.trace = False
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# open_in / open_out / close  (stream-based I/O redirection)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def bi_open_in(goal: PsiTerm, eng) -> bool:
+    """open_in(File) or open_in(File, Stream) — open file for reading,
+    redirect stdin (or bind Stream to the file object).
+    """
+    a1 = goal.attr_list.get('1')
+    a2 = goal.attr_list.get('2')
+    if a1 is None:
+        return False
+    a1d = a1.deref()
+    # Get filename string
+    if a1d.value is not None:
+        filename = str(a1d.value)
+    elif a1d.type and a1d.type.keyword:
+        filename = a1d.type.keyword.symbol
+    else:
+        return False
+    try:
+        f = open(filename, 'r')
+    except OSError:
+        return False
+    if a2 is not None:
+        # 2-arg form: bind stream token to a2
+        stream_term = PsiTerm()
+        stream_term.value = f          # store file object as value
+        stream_term.type = eng.wl.top  # generic type
+        if not hasattr(eng, '_open_streams'):
+            eng._open_streams = {}
+        eng._open_streams[id(stream_term)] = f
+        # Push the old stdin
+        if not hasattr(eng, '_stdin_stack'):
+            eng._stdin_stack = []
+        eng._stdin_stack.append(sys.stdin)
+        sys.stdin = f
+        return _unify(eng, a2.deref(), stream_term)
+    else:
+        # 1-arg form: redirect global stdin
+        if not hasattr(eng, '_stdin_stack'):
+            eng._stdin_stack = []
+        eng._stdin_stack.append(sys.stdin)
+        sys.stdin = f
+        return True
+
+
+def bi_open_out(goal: PsiTerm, eng) -> bool:
+    """open_out(File) or open_out(File, Stream) — open file for writing."""
+    a1 = goal.attr_list.get('1')
+    a2 = goal.attr_list.get('2')
+    if a1 is None:
+        return False
+    a1d = a1.deref()
+    if a1d.value is not None:
+        filename = str(a1d.value)
+    elif a1d.type and a1d.type.keyword:
+        filename = a1d.type.keyword.symbol
+    else:
+        return False
+    try:
+        f = open(filename, 'w')
+    except OSError:
+        return False
+    if a2 is not None:
+        stream_term = PsiTerm()
+        stream_term.value = f
+        stream_term.type = eng.wl.top
+        if not hasattr(eng, '_open_streams'):
+            eng._open_streams = {}
+        eng._open_streams[id(stream_term)] = f
+        if not hasattr(eng, '_stdout_stack'):
+            eng._stdout_stack = []
+        eng._stdout_stack.append(sys.stdout)
+        sys.stdout = f
+        return _unify(eng, a2.deref(), stream_term)
+    else:
+        if not hasattr(eng, '_stdout_stack'):
+            eng._stdout_stack = []
+        eng._stdout_stack.append(sys.stdout)
+        sys.stdout = f
+        return True
+
+
+def bi_close(goal: PsiTerm, eng) -> bool:
+    """close(Stream) — close an open stream and restore stdin/stdout."""
+    a1 = goal.attr_list.get('1')
+    if a1 is None:
+        return False
+    a1d = a1.deref()
+    f = None
+    if a1d.value is not None and hasattr(a1d.value, 'close'):
+        f = a1d.value
+    elif hasattr(eng, '_open_streams') and id(a1d) in eng._open_streams:
+        f = eng._open_streams.pop(id(a1d))
+    if f is None:
+        return True  # nothing to close
+    try:
+        f.close()
+    except Exception:
+        pass
+    # Restore stdin if this was the current stdin
+    if sys.stdin is f:
+        if hasattr(eng, '_stdin_stack') and eng._stdin_stack:
+            sys.stdin = eng._stdin_stack.pop()
+        else:
+            sys.stdin = sys.__stdin__
+    # Restore stdout if this was the current stdout
+    if sys.stdout is f:
+        if hasattr(eng, '_stdout_stack') and eng._stdout_stack:
+            sys.stdout = eng._stdout_stack.pop()
+        else:
+            sys.stdout = sys.__stdout__
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# map(F, List) → ResultList  (functional built-in)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _apply_func(f_term: PsiTerm, arg: PsiTerm, eng) -> Optional[PsiTerm]:
+    """Apply functor f_term to one argument, returning the result term.
+
+    In Wild Life, F(X) is written as a psi-term whose type is F and whose
+    '1' attribute is X.  For partial applications like *(2=>4), F already
+    carries some attributes — we merge the new positional arg into position
+    '1' (or the next free position).
+    """
+    from wild_life.unification import copy_term as _copy
+    # Build a copy of f_term with arg placed into the first available
+    # positional slot: if f_term has no '1', use '1'; otherwise use '2', etc.
+    f_copy = _copy(f_term)
+    f_copy = f_copy.deref()
+    if '1' not in f_copy.attr_list:
+        f_copy.attr_list['1'] = arg
+    elif '2' not in f_copy.attr_list:
+        f_copy.attr_list['2'] = arg
+    else:
+        # Fallback: create a new application term
+        app = PsiTerm(type=f_copy.type)
+        app.attr_list = dict(f_copy.attr_list)
+        app.attr_list['1'] = arg
+        f_copy = app
+    return f_copy
+
+
+def bi_map(goal: PsiTerm, eng) -> bool:
+    """map(F, List) → MappedList  — apply function F to each element.
+
+    Supports:
+      map(F, List, Result)  — 3-arg predicate form
+      X = map(F, List)      — 2-arg functional form (via bi_unify)
+    """
+    wl = eng.wl
+    a1 = goal.attr_list.get('1')  # F
+    a2 = goal.attr_list.get('2')  # List
+    a3 = goal.attr_list.get('3')  # Result (optional)
+    if a1 is None or a2 is None:
+        return False
+    f_term = a1.deref()
+    list_term = a2.deref()
+
+    # Walk the list
+    results = []
+    node = list_term
+    while True:
+        node = node.deref()
+        sym = node.type.keyword.symbol if (node.type and node.type.keyword) else ''
+        if sym in ('nil', '[]') or (node.value is None and not node.attr_list and node.type is wl.nil):
+            break
+        if sym in ('cons', '.', '|') or node.type is wl.alist:
+            head_ref = node.attr_list.get('1')
+            tail_ref = node.attr_list.get('2')
+            if head_ref is None:
+                break
+            head = head_ref.deref()
+            applied = _apply_func(f_term, head, eng)
+            if applied is None:
+                return False
+            # Evaluate the applied function
+            ok, val = _eval_arith(applied, eng)
+            if ok:
+                results.append(_make_number(eng, val))
+            else:
+                # Try string evaluation
+                str_result = _try_eval_string_func(applied, eng)
+                if str_result is not None:
+                    results.append(str_result)
+                else:
+                    # Leave as unevaluated application term
+                    results.append(applied)
+            node = tail_ref if tail_ref is not None else wl.make_atom('nil', wl.bi_module)
+        else:
+            # Not a list — apply to the single element
+            applied = _apply_func(f_term, node, eng)
+            if applied is None:
+                return False
+            ok, val = _eval_arith(applied, eng)
+            results.append(_make_number(eng, val) if ok else applied)
+            break
+
+    result_list = wl.make_list(results)
+    if a3 is not None:
+        return _unify(eng, a3.deref(), result_list)
+    # 2-arg form used as function — the call site (bi_unify) handles unification
+    # by calling bi_map and using the return value; since we can't return a term
+    # from a bool function, we need the goal's result to be accessible.
+    # Workaround: unify '0' attribute (return slot) if present, else fail.
+    ret_slot = goal.attr_list.get('0')
+    if ret_slot is not None:
+        return _unify(eng, ret_slot.deref(), result_list)
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# residuate(X) — force X to display as X~ (pending residuation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def bi_residuate(goal: PsiTerm, eng) -> bool:
+    """residuate(X) — mark X as having a pending residuation (show X~)."""
+    from wild_life.unification import Residuation
+    a1 = goal.attr_list.get('1')
+    if a1 is None:
+        return True
+    v = a1.deref()
+    if v.resid is None:
+        eng.trail.trail_psi(v, 'resid')
+        v.resid = [Residuation(pending=True)]
+    elif not any(getattr(r, 'pending', False) for r in v.resid):
+        eng.trail.trail_psi(v, 'resid')
+        v.resid = list(v.resid) + [Residuation(pending=True)]
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# global(X1, X2, ...) — declare mutable global variables
+# ─────────────────────────────────────────────────────────────────────────────
+
+def bi_global(goal: PsiTerm, eng) -> bool:
+    """global(X1, X2, ...) — declare and optionally initialise global variables.
+
+    Each argument is either:
+      - An atom name: declare it as a global (0-ary predicate returning its value)
+      - A term  X <- Value: declare X and set its initial value to Value
+      - A term  <-(X):     declare X as a global reference
+    """
+    wl = eng.wl
+
+    def _do_global_arg(a):
+        a = a.deref()
+        sym = a.type.keyword.symbol if (a.type and a.type.keyword) else ''
+
+        # Form: X <- Value
+        if sym == '<-':
+            lhs_ref = a.attr_list.get('1')
+            rhs_ref = a.attr_list.get('2')
+            if lhs_ref is None:
+                return True
+            lhs = lhs_ref.deref()
+            lhs_sym = lhs.type.keyword.symbol if (lhs.type and lhs.type.keyword) else ''
+            if not lhs_sym:
+                return True
+            # Evaluate rhs as arithmetic if possible
+            rhs = None
+            if rhs_ref is not None:
+                rhs_d = rhs_ref.deref()
+                ok, val = _eval_arith(rhs_d, eng)
+                if ok:
+                    rhs = _make_number(eng, val)
+                else:
+                    rhs = rhs_d
+            # Register as a 0-ary function in current module
+            defn = wl.update_symbol(wl.current_module, lhs_sym)
+            from wild_life.data_structures import DefType as _DT
+            defn.type = _DT.FUNCTION
+            result_term = rhs if rhs is not None else PsiTerm(type=wl.top)
+            defn.rule = [(PsiTerm(type=defn), result_term)]
+            return True
+
+        # Form: <-(X) — declare X as global reference
+        if sym == '<-' and not a.attr_list.get('2'):
+            inner = a.attr_list.get('1')
+            if inner is not None:
+                return _do_global_arg(inner)
+            return True
+
+        # Bare atom: declare as global (no initial value — evaluates to itself)
+        if sym:
+            defn = wl.update_symbol(wl.current_module, sym)
+            from wild_life.data_structures import DefType as _DT
+            if defn.type == _DT.UNDEF:
+                defn.type = _DT.FUNCTION
+                head = PsiTerm(type=defn)
+                defn.rule = [(head, head)]  # f -> f (returns itself)
+            return True
+
+        return True
+
+    # Iterate over positional arguments 1, 2, 3, ...
+    i = 1
+    while True:
+        arg_ref = goal.attr_list.get(str(i))
+        if arg_ref is None:
+            break
+        _do_global_arg(arg_ref)
+        i += 1
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# writeq_err / put_err — write to stderr
+# ─────────────────────────────────────────────────────────────────────────────
+
+def bi_writeq_err(goal: PsiTerm, eng) -> bool:
+    """writeq_err(T) — write T in quoted form to stderr."""
+    return _write_all_args(goal, eng, quoted=True, stream=sys.stderr)
+
+
+def bi_put_err(goal: PsiTerm, eng) -> bool:
+    """put_err(C) — write character C to stderr."""
+    a1 = goal.attr_list.get('1')
+    if a1 is None:
+        return False
+    a1d = a1.deref()
+    c = None
+    if a1d.value is not None:
+        v = a1d.value
+        if isinstance(v, (int, float)):
+            c = chr(int(v))
+        else:
+            c = str(v)[0] if str(v) else ''
+    elif a1d.type and a1d.type.keyword:
+        s = a1d.type.keyword.symbol
+        c = s[0] if s else ''
+    if c is not None:
+        sys.stderr.write(c)
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Sentinel used inside inference.py
 # ─────────────────────────────────────────────────────────────────────────────
 from wild_life.inference import _DEFRULES, _INNER_RUN_BARRIER
@@ -5225,6 +5631,12 @@ def register_all(wl) -> None:
     _reg('format', bi_format)
     _reg('nl_err', bi_nl_err)
     _reg('with_output_to', bi_with_output_to)
+    _reg('writeq_err', bi_writeq_err)
+    _reg('put_err', bi_put_err)
+    # File stream I/O
+    _reg('open_in', bi_open_in)
+    _reg('open_out', bi_open_out)
+    _reg('close', bi_close)
 
     # Arithmetic
     _reg('is', bi_is)
@@ -5269,6 +5681,7 @@ def register_all(wl) -> None:
     _reg('true', bi_true)
     _reg('fail', bi_fail)
     _reg('false', bi_fail)
+    _reg('repeat', bi_repeat)
     _reg('not', bi_not)
     _reg('\\+', bi_not)
     _reg('and', bi_and)
@@ -5281,6 +5694,17 @@ def register_all(wl) -> None:
     _reg('bagof', bi_findall)   # simplified
     _reg('setof', bi_findall)   # simplified
     _reg('aggregate_all', bi_aggregate_all)
+    # Tracing / debugging
+    _reg('trace', bi_trace)
+    _reg('notrace', bi_notrace)
+    _reg('spy', bi_trace)       # simplified: spy = trace
+    _reg('nospy', bi_notrace)   # simplified: nospy = notrace
+    # Higher-order
+    _reg('map', bi_map)
+    # Residuation
+    _reg('residuate', bi_residuate)
+    # Globals
+    _reg('global', bi_global)
 
     # Assert / retract
     _reg('assert', bi_assert)
@@ -5685,31 +6109,21 @@ def register_all(wl) -> None:
         return True
     _reg('succeed', _bi_succeed)
 
-    # ── genint(N) — generate integers 0, 1, 2, … on backtracking ──────────
+    # ── genint — global counter; 0-ary increments on each call ────────────
     def _bi_genint(goal, eng):
-        """genint(N) — non-deterministically bind N to 0, 1, 2, ..."""
-        from wild_life.data_structures import GoalType as _GT
+        """genint — 0-ary: increment and return the global integer counter.
+        genint(N) — 1-arg: non-deterministically bind N to next counter value.
+        """
         a1 = goal.attr_list.get('1')
         if a1 is None:
-            return False
-        a1d = a1.deref()
-        # If N is already bound to an integer, just succeed.
-        if a1d.value is not None:
+            # 0-ary form used as a predicate — just succeed (evaluation happens
+            # via _eval_arith when genint appears in arithmetic context)
             return True
-        # Start generating from 0; push choice point for next integer.
-        start = 0
-
-        def _push_next(n: int) -> None:
-            # Build genint(n+1) as a goal term for the choice point
-            next_goal = PsiTerm()
-            next_goal.type = goal.type
-            next_goal.attr_list = {'1': wl.make_integer(n + 1)}
-            # We push a special PROVE choice point that calls _bi_genint again
-            eng.push_choice_point(_GT.PROVE, next_goal, _DEFRULES, None)
-
-        from wild_life.inference import _DEFRULES
-        _push_next(start)
-        return _unify(eng, a1d, wl.make_integer(start))
+        a1d = a1.deref()
+        # 1-arg form: bind N to the next counter value
+        current = getattr(wl, '_genint_counter', 0) + 1
+        wl._genint_counter = current
+        return _unify(eng, a1d, wl.make_integer(current))
     _reg('genint', _bi_genint)
 
     # ── is_number(X) — true if X is a numeric value ──────────────────────
