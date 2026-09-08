@@ -785,6 +785,10 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
                 finally:
                     eng.trail.undo_to(_mark)
                 if _evaled is not None:
+                    # Fully evaluate the result: walk disjunction elements and
+                    # compute any arithmetic ops that involve disjunction operands
+                    # (e.g. {1; 1+posint_stream_to(N-1)} → {1;2;3}).
+                    _evaled = _evaluate_result_for_display(_evaled, eng, 1)
                     t = _evaled
             elif wl and sym in (_arith_binary_ops | _arith_unary_ops):
                 # The top-level operator is arithmetic but evaluation failed.
@@ -2165,6 +2169,227 @@ def _eval_embedded_user_funcs(
             _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited)
         elif child.attr_list:
             _eval_embedded_user_funcs(child, eng, _depth + 1, visited)
+
+
+def _make_disjunction_psi(elems: list, wl) -> PsiTerm:
+    """Build {e1;e2;...} from a list of PsiTerms.  Empty list → disj_nil ({})."""
+    tail = PsiTerm()
+    tail.type = wl.disj_nil
+    for e in reversed(elems):
+        node = PsiTerm()
+        node.type = wl.disjunction
+        node.attr_list = {'1': e, '2': tail}
+        tail = node
+    return tail
+
+
+def _eval_arith_psi(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
+    """Evaluate an arithmetic expression that may contain disjunctions.
+
+    Returns a PsiTerm (a concrete number *or* a disjunction of numbers) when
+    evaluation succeeds, or None on failure.
+
+    Binary/unary ops distribute over disjunction operands:
+        1 + {a; b}  →  {1+a; 1+b}
+    User-defined function calls are evaluated synchronously; if they return
+    a disjunction the distribution continues recursively.
+    """
+    if t is None or _depth > 40:
+        return None
+    t = t.deref()
+    wl = eng.wl
+    sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
+
+    # ── concrete number ──────────────────────────────────────────────────────
+    if t.value is not None and t.type and t.type.is_subtype_of(wl.real):
+        return t
+
+    # ── disjunction / disj_nil leaf ─────────────────────────────────────────
+    if t.type is not None and (t.type is wl.disjunction or t.type is wl.disj_nil):
+        return t
+
+    # ── user-defined function ────────────────────────────────────────────────
+    if _is_user_function(t):
+        _mark = eng.trail.mark()
+        try:
+            result = _eval_user_func_sync(t, eng, _depth)
+            if result is not None:
+                result = copy_term(result.deref(), {})
+        finally:
+            eng.trail.undo_to(_mark)
+        if result is not None:
+            return _eval_arith_psi(result, eng, _depth + 1)
+        return None
+
+    # ── binary operators ─────────────────────────────────────────────────────
+    _ops2 = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+                       'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
+    _ops1 = frozenset(('-', 'abs', 'sqrt', 'sin', 'cos', 'tan',
+                       'asin', 'acos', 'atan', 'exp', 'log',
+                       'floor', 'ceiling', 'round', 'truncate',
+                       'float', 'integer', '\\'))
+    arg1_r = t.attr_list.get('1')
+    arg2_r = t.attr_list.get('2')
+
+    if sym in _ops2 and arg1_r is not None and arg2_r is not None:
+        r1 = _eval_arith_psi(arg1_r.deref(), eng, _depth + 1)
+        r2 = _eval_arith_psi(arg2_r.deref(), eng, _depth + 1)
+        if r1 is None or r2 is None:
+            return None
+        is_d1 = r1.type is not None and (r1.type is wl.disjunction or r1.type is wl.disj_nil)
+        is_d2 = r2.type is not None and (r2.type is wl.disjunction or r2.type is wl.disj_nil)
+        if is_d1 or is_d2:
+            elems1 = _collect_disjunction(r1, eng) if is_d1 else [r1]
+            elems2 = _collect_disjunction(r2, eng) if is_d2 else [r2]
+            result_elems: list = []
+            for e1 in elems1:
+                for e2 in elems2:
+                    op_t = PsiTerm()
+                    op_t.type = t.type
+                    op_t.attr_list = {'1': e1, '2': e2}
+                    elem_r = _eval_arith_psi(op_t, eng, _depth + 1)
+                    if elem_r is not None:
+                        elem_r = elem_r.deref()
+                        if elem_r.type is wl.disj_nil:
+                            pass  # empty branch → drop
+                        elif elem_r.type is not None and elem_r.type is wl.disjunction:
+                            result_elems.extend(_collect_disjunction(elem_r, eng))
+                        else:
+                            result_elems.append(elem_r)
+            if not result_elems:
+                nil = PsiTerm(); nil.type = wl.disj_nil; return nil
+            return _make_disjunction_psi(result_elems, wl)
+        # Both concrete — scalar arithmetic
+        ok1, v1 = _eval_arith(r1, eng, _depth + 1)
+        ok2, v2 = _eval_arith(r2, eng, _depth + 1)
+        if ok1 and ok2:
+            _op_f = {
+                '+': lambda a, b: a + b, '-': lambda a, b: a - b,
+                '*': lambda a, b: a * b,
+                '/': lambda a, b: a / b if b != 0 else float('inf'),
+                '//': lambda a, b: float(int(a) // int(b)) if b != 0 else 0.0,
+                'mod': lambda a, b: float(int(a) % int(b)) if b != 0 else 0.0,
+                '**': lambda a, b: a ** b, '^': lambda a, b: a ** b,
+                'max': lambda a, b: max(a, b), 'min': lambda a, b: min(a, b),
+                '/\\': lambda a, b: float(int(a) & int(b)),
+                '\\/': lambda a, b: float(int(a) | int(b)),
+                'xor': lambda a, b: float(int(a) ^ int(b)),
+                '>>': lambda a, b: float(int(a) >> int(b)),
+                '<<': lambda a, b: float(int(a) << int(b)),
+            }
+            if sym in _op_f:
+                try:
+                    return _make_number(eng, float(_op_f[sym](v1, v2)))
+                except Exception:
+                    return None
+        return None
+
+    # ── unary operators ──────────────────────────────────────────────────────
+    if sym in _ops1 and arg1_r is not None and arg2_r is None:
+        r1 = _eval_arith_psi(arg1_r.deref(), eng, _depth + 1)
+        if r1 is None:
+            return None
+        is_d1 = r1.type is not None and (r1.type is wl.disjunction or r1.type is wl.disj_nil)
+        if is_d1:
+            elems = _collect_disjunction(r1, eng)
+            result_elems = []
+            for e in elems:
+                op_t = PsiTerm()
+                op_t.type = t.type
+                op_t.attr_list = {'1': e}
+                elem_r = _eval_arith_psi(op_t, eng, _depth + 1)
+                if elem_r is not None:
+                    elem_r = elem_r.deref()
+                    if elem_r.type is wl.disj_nil:
+                        pass
+                    elif elem_r.type is not None and elem_r.type is wl.disjunction:
+                        result_elems.extend(_collect_disjunction(elem_r, eng))
+                    else:
+                        result_elems.append(elem_r)
+            if not result_elems:
+                nil = PsiTerm(); nil.type = wl.disj_nil; return nil
+            return _make_disjunction_psi(result_elems, wl)
+        ok1, v1 = _eval_arith(r1, eng, _depth + 1)
+        if ok1:
+            _op_f = {
+                '-': lambda a: -a, 'abs': lambda a: abs(a),
+                'sqrt': lambda a: math.sqrt(a), 'sin': lambda a: math.sin(a),
+                'cos': lambda a: math.cos(a), 'tan': lambda a: math.tan(a),
+                'asin': lambda a: math.asin(a), 'acos': lambda a: math.acos(a),
+                'atan': lambda a: math.atan(a), 'exp': lambda a: math.exp(a),
+                'log': lambda a: math.log(a), 'floor': lambda a: math.floor(a),
+                'ceiling': lambda a: math.ceil(a), 'round': lambda a: round(a),
+                'truncate': lambda a: math.trunc(a),
+                'float': lambda a: float(a), 'integer': lambda a: float(int(a)),
+                '\\': lambda a: float(~int(a)),
+            }
+            if sym in _op_f:
+                try:
+                    return _make_number(eng, float(_op_f[sym](v1)))
+                except Exception:
+                    return None
+        return None
+
+    # ── fallback: standard scalar arithmetic ─────────────────────────────────
+    ok, v = _eval_arith(t, eng, _depth)
+    if ok:
+        return _make_number(eng, v)
+    return None
+
+
+def _evaluate_result_for_display(t: PsiTerm, eng, _depth: int = 0) -> PsiTerm:
+    """Fully evaluate a function result for display (used by _write_term).
+
+    Walks disjunction elements and recursively evaluates arithmetic ops and
+    user-function calls within them, distributing ops over disjunctions so
+    that e.g. {1; 1+posint_stream_to(2)} becomes {1;2;3}.
+    """
+    if t is None or _depth > 40:
+        return t
+    t = t.deref()
+    wl = eng.wl
+
+    # ── disjunction: evaluate each element, then flatten ────────────────────
+    if t.type is not None and t.type is wl.disjunction:
+        elems = _collect_disjunction(t, eng)
+        new_elems: list = []
+        for e in elems:
+            ev = _evaluate_result_for_display(e, eng, _depth + 1)
+            ev = ev.deref()
+            if ev.type is not None and ev.type is wl.disjunction:
+                new_elems.extend(_collect_disjunction(ev, eng))
+            elif ev.type is None or ev.type is not wl.disj_nil:
+                new_elems.append(ev)
+            # disj_nil branches are empty — drop them
+        if not new_elems:
+            nil = PsiTerm(); nil.type = wl.disj_nil; return nil
+        return _make_disjunction_psi(new_elems, wl)
+
+    # ── arithmetic op (possibly with disjunction operands) ───────────────────
+    sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
+    _ops = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+                      'max', 'min', '/\\', '\\/', 'xor', '>>', '<<',
+                      'abs', 'sqrt', 'sin', 'cos', 'tan',
+                      'asin', 'acos', 'atan', 'exp', 'log',
+                      'floor', 'ceiling', 'round', 'truncate', 'float', 'integer'))
+    if sym in _ops:
+        r = _eval_arith_psi(t, eng, _depth)
+        if r is not None:
+            return _evaluate_result_for_display(r, eng, _depth + 1)
+
+    # ── user-defined function call ───────────────────────────────────────────
+    if _is_user_function(t):
+        _mark = eng.trail.mark()
+        try:
+            evaled = _eval_user_func_sync(t, eng, _depth)
+            if evaled is not None:
+                evaled = copy_term(evaled.deref(), {})
+        finally:
+            eng.trail.undo_to(_mark)
+        if evaled is not None:
+            return _evaluate_result_for_display(evaled, eng, _depth + 1)
+
+    return t
 
 
 def bi_unify(goal: PsiTerm, eng) -> bool:
