@@ -790,6 +790,14 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
                     # (e.g. {1; 1+posint_stream_to(N-1)} → {1;2;3}).
                     _evaled = _evaluate_result_for_display(_evaled, eng, 1)
                     t = _evaled
+            elif _is_cond_builtin_local(t) and eng is not None:
+                # Built-in cond(C, T, E) as a functional expression: evaluate
+                # synchronously so write(cond(3<2,{},f(3))) prints the result,
+                # not the unevaluated cond term.
+                _evaled = _eval_body_sync(t, eng, 0)
+                if _evaled is not None:
+                    _evaled = _evaluate_result_for_display(_evaled.deref(), eng, 1)
+                    t = _evaled
             elif wl and sym in (_arith_binary_ops | _arith_unary_ops):
                 # The top-level operator is arithmetic but evaluation failed.
                 # If any immediate arg is a concrete non-numeric atom, this is
