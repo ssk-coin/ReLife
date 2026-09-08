@@ -1719,7 +1719,11 @@ def _is_lub_func(t: 'PsiTerm') -> bool:
 
 
 def _eval_glb_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
-    """Evaluate glb(X, Y) → GLB (unification) of X and Y, or None on failure."""
+    """Evaluate glb(X, Y) → GLB (unification) of X and Y, or None on failure.
+
+    Returns only the FIRST GLB; multiple-GLB non-determinism is handled by
+    _apply_glb_to_var (called from bi_unify) which pushes choice points.
+    """
     t1 = t.attr_list['1'].deref()
     t2 = t.attr_list['2'].deref()
     # Compute GLB non-destructively via copy + unify + copy-result
@@ -1733,6 +1737,43 @@ def _eval_glb_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
     result = copy_term(c1.deref())
     eng.trail.undo_to(mark)
     return result
+
+
+def _apply_glb_to_var(t: 'PsiTerm', target: 'PsiTerm', eng) -> bool:
+    """Unify target with glb(X,Y), creating choice points when multiple GLBs exist.
+
+    When `glb(k,l)` has minimal common subtypes a and b (both are GLBs),
+    this pushes a choice point for b and returns target=a first; backtracking
+    yields target=b.
+
+    When either arg carries a concrete value (integer, float, string), we use
+    the copy+unify approach so that glb(1, int) → 1 (not int).
+    """
+    from wild_life.unification import compute_all_glbs as _all_glbs
+    t1 = t.attr_list['1'].deref()
+    t2 = t.attr_list['2'].deref()
+    d1 = t1.type
+    d2 = t2.type
+
+    # If either arg has a concrete value or no type, use copy+unify approach
+    # (handles glb(1, int) → 1, glb(3.14, real) → 3.14, etc.)
+    if d1 is None or d2 is None or t1.value is not None or t2.value is not None:
+        r = _eval_glb_func(t, eng)
+        return _unify(eng, target, r) if r is not None else False
+
+    glbs = _all_glbs(d1, d2)
+    if not glbs:
+        return False
+
+    # Push choice points for alternatives (last to first so first fires next)
+    from wild_life.data_structures import GoalType as _GT
+    for alt_def in reversed(glbs[1:]):
+        alt_psi = PsiTerm(type_def=alt_def)
+        eng.push_choice_point(_GT.UNIFY, target, alt_psi, None)
+
+    # Unify target with first GLB
+    first_psi = PsiTerm(type_def=glbs[0])
+    return _unify(eng, target, first_psi)
 
 
 def _eval_lub_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
@@ -1922,12 +1963,11 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         return _unify(eng, b_d, c)
 
     # Handle glb(X,Y) functional use: B = glb(X,Y) → B = GLB of X and Y
+    # Uses _apply_glb_to_var to create choice points for multiple GLBs.
     if _is_glb_func(b_d):
-        r = _eval_glb_func(b_d, eng)
-        return _unify(eng, a_d, r) if r is not None else False
+        return _apply_glb_to_var(b_d, a_d, eng)
     if _is_glb_func(a_d):
-        r = _eval_glb_func(a_d, eng)
-        return _unify(eng, b_d, r) if r is not None else False
+        return _apply_glb_to_var(a_d, b_d, eng)
 
     # Handle lub(X,Y) functional use: B = lub(X,Y) → B = LUB of X and Y
     if _is_lub_func(b_d):
@@ -4593,13 +4633,10 @@ def register_all(wl) -> None:
             return False
         t = goal
         if a3 is None:
-            # 2-arg functional form called directly (e.g. as a goal)
-            # just unify the two args
+            # 2-arg predicate form called directly: just unify the two args
             return _unify(eng, a1.deref(), a2.deref())
-        r = _eval_glb_func(t, eng)
-        if r is None:
-            return False
-        return _unify(eng, a3.deref(), r)
+        # 3-arg form: use _apply_glb_to_var so multiple GLBs create choice points
+        return _apply_glb_to_var(goal, a3.deref(), eng)
     _reg('glb', _bi_glb)
 
     def _bi_lub(goal, eng):
