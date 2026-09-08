@@ -167,6 +167,19 @@ def _eval_body_to_result(branch: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
     if _is_cond_builtin(branch_d):
         return _eval_cond_functional(branch_d, result, eng)
 
+    # Disjunction branch: evaluate each element (including arithmetic like
+    # 1 + posint_stream_to(N)) via _eval_body_sync, then unify result with
+    # the produced disjunction.  The generic _collect_embedded_func_goals path
+    # below cannot evaluate 1 + {disjunction} because the arithmetic wrapping
+    # the embedded function call is not reduced after the EVAL goal fires.
+    wl = eng.wl
+    if branch_d.type is not None and branch_d.type is wl.disjunction:
+        from wild_life.built_ins import _eval_body_sync
+        evaled = _eval_body_sync(branch_d, eng, 0)
+        if evaled is not None:
+            return eng.unifier.unify(result, evaled)
+        # fall through on sync failure
+
     # Compound with embedded user-function sub-terms
     eval_goals = _collect_embedded_func_goals(branch_d, eng, set())
     eng.push_goal(GoalType.UNIFY, branch_d, result, None)

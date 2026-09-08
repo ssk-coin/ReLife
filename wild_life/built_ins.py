@@ -2077,6 +2077,31 @@ def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
 
         return _eval_body_sync(branch, eng, _depth + 1)
 
+    # Disjunction body {a; b; ...}: evaluate each element recursively.
+    # This handles function bodies like {1; 1+posint_stream_to(N-1)} where
+    # arithmetic ops inside the disjunction need to be fully evaluated.
+    wl = eng.wl
+    if body_d.type is not None and body_d.type is wl.disjunction:
+        elems = _collect_disjunction(body_d, eng)
+        new_elems: list = []
+        for e in elems:
+            ev_r = _eval_body_sync(e.deref(), eng, _depth + 1)
+            ev = (ev_r if ev_r is not None else e).deref()
+            if ev.type is not None and ev.type is wl.disjunction:
+                new_elems.extend(_collect_disjunction(ev, eng))
+            elif ev.type is None or ev.type is not wl.disj_nil:
+                new_elems.append(ev)
+            # disj_nil (empty branch) → drop
+        if not new_elems:
+            nil = PsiTerm(); nil.type = wl.disj_nil; return nil
+        return _make_disjunction_psi(new_elems, wl)
+
+    # Arithmetic op that may have disjunction operands (e.g. 1 + f(N) where
+    # f(N) returns a disjunction): use _eval_arith_psi for distribution.
+    psi_r = _eval_arith_psi(body_d, eng, _depth)
+    if psi_r is not None:
+        return psi_r
+
     # Compound term: evaluate embedded user-function and cond sub-terms in-place
     _eval_embedded_user_funcs(body_d, eng, _depth, set())
     return body_d
