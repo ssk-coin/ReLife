@@ -2449,6 +2449,21 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         eng.push_goal(GoalType.EVAL, a_d, result, a_d.type.rule)
         return True
 
+    # Handle cond(C, T, E) in functional position:
+    #   X = cond(3 < 2, {}, f(N))  →  evaluate cond, unify result with X
+    if _is_cond_builtin_local(b_d):
+        evaled = _eval_body_sync(b_d, eng, 0)
+        if evaled is None:
+            return False
+        evaled = _evaluate_result_for_display(evaled.deref(), eng, 1)
+        return _unify(eng, a_d, evaled)
+    if _is_cond_builtin_local(a_d):
+        evaled = _eval_body_sync(a_d, eng, 0)
+        if evaled is None:
+            return False
+        evaled = _evaluate_result_for_display(evaled.deref(), eng, 1)
+        return _unify(eng, b_d, evaled)
+
     # Handle copy_term(X) functional use: Y = copy_term(X) → Y = fresh copy of X
     if _is_copy_term_func(b_d):
         c = _eval_copy_term_func(b_d)
