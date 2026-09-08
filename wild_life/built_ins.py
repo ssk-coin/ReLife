@@ -120,6 +120,50 @@ def _mark_real_sort(var: 'PsiTerm', wl, eng) -> None:
         var.resid = []
 
 
+def _mark_bool_sort(var: 'PsiTerm', wl, eng) -> None:
+    """Mark a free variable as constrained to sort bool, with no pending constraints.
+
+    Sets type=boolean and SORT_VAR flag.  Sets resid=[] (empty list, not None) to
+    indicate 'constrained to bool but no pending residuation' — this suppresses
+    the tilde in display (print_term treats resid=None as 'always ~' but resid=[]
+    as 'no pending').
+
+    Used when a boolean constraint was immediately solved (e.g. B and false → false
+    short-circuits B) so the variable is bool-constrained but has no suspended goal.
+
+    Concrete atoms (like false/true) are silently skipped — they are not variables.
+    Atoms have a specific subtype (wl.false, wl.true) without the SORT_VAR flag,
+    which distinguishes them from free variables constrained to sort bool.
+    """
+    from wild_life.data_structures import SORT_VAR
+    var = var.deref()
+    if var.value is not None or var.attr_list:
+        return  # Not a free variable (has a numeric value or children)
+    # Distinguish free variables from concrete atoms:
+    # - Free untyped variable:      type=wl.top or type=None
+    # - Free bool-sort variable:    type=wl.boolean AND SORT_VAR flag set
+    # - Concrete atom (e.g. false): type=wl.false (subtype of bool), NO SORT_VAR
+    # Only process actual free variables.
+    is_free_var = (var.type is wl.top or var.type is None or
+                   (var.type is wl.boolean and bool(var.flags & SORT_VAR)))
+    if not is_free_var:
+        return  # Concrete atom (true/false/other) — leave it unchanged
+    if var.type is wl.top or var.type is None:
+        if eng is not None:
+            eng.trail.trail_psi(var, 'type')
+        var.type = wl.boolean
+    if not (var.flags & SORT_VAR):
+        if eng is not None:
+            eng.trail.trail_psi(var, 'flags')
+        var.flags |= SORT_VAR
+    # Set resid to empty list (not None) so print_term knows: "no pending constraints"
+    # (resid=None means "pure sort annotation, always show ~").
+    if var.resid is None:
+        if eng is not None:
+            eng.trail.trail_psi(var, 'resid')
+        var.resid = []
+
+
 def _collect_arith_vars(t: 'PsiTerm', wl, result: list, seen: set) -> None:
     """Collect all unbound variables in an arithmetic expression.
 
@@ -180,6 +224,86 @@ def _attach_arith_resid(var: 'PsiTerm', wl, pending_goal, eng=None) -> None:
                 return
         if eng is not None:
             eng.trail.trail_copy(var, 'resid')  # trail: save copy of list
+        var.resid.append(Residuation(goal=pending_goal))
+
+
+def _is_proper_bool_expr(t: 'PsiTerm') -> bool:
+    """Return True if *t* is a well-formed boolean expression.
+
+    Binary operators (and, or, xor) require BOTH positional attributes '1' and '2'.
+    Unary operator (not) requires attribute '1'.
+    Psi-terms that happen to use 'and'/'or' as a functor name but have the wrong
+    arity (e.g. and(B) with only attribute '1') are NOT boolean expressions.
+    """
+    sym = _get_sym(t)
+    if sym in ('and', 'or', 'xor'):
+        return '1' in t.attr_list and '2' in t.attr_list
+    if sym == 'not':
+        return '1' in t.attr_list
+    return False
+
+
+def _collect_bool_free_vars(t: 'PsiTerm', wl, result: list, seen: set) -> None:
+    """Collect unbound variables in a boolean expression (and, or, not, xor).
+
+    Traverses the boolean expression tree; any free variable found is added to
+    *result*.  Stops at ground terms (atoms, concrete values) and at variables
+    that are already bound.
+
+    Only recurses into 'and'/'or' sub-terms that have the correct arity for a
+    boolean expression (both '1' and '2' args present).  A unary 'and(B)' is a
+    psi-term constructor and is treated as a ground compound, not a bool expr.
+    """
+    from wild_life.data_structures import SORT_VAR
+    if t is None:
+        return
+    t = t.deref()
+    tid = id(t)
+    if tid in seen:
+        return
+    seen.add(tid)
+    is_free = not t.attr_list and t.value is None and t.coref is None
+    if is_free and (t.type is wl.top or t.type is None or t.type is wl.boolean
+                    or bool(t.flags & SORT_VAR)):
+        if t not in result:
+            result.append(t)
+        return
+    if t.value is not None:
+        return  # ground numeric/string value
+    # Only recurse into properly-formed boolean operator applications.
+    if _is_proper_bool_expr(t):
+        for val in t.attr_list.values():
+            _collect_bool_free_vars(val, wl, result, seen)
+
+
+def _attach_bool_resid(var: 'PsiTerm', wl, pending_goal, eng=None) -> None:
+    """Constrain *var* to sort bool and attach a pending residuated goal.
+
+    Mirrors _attach_arith_resid but uses wl.boolean instead of wl.real.
+    When *var* is later bound, _wakeup_resid fires *pending_goal*.
+    """
+    from wild_life.data_structures import Residuation, SORT_VAR
+    var = var.deref()
+    if var.value is not None or var.attr_list:
+        return  # not a free variable — skip
+    if var.type is wl.top or var.type is None:
+        if eng is not None:
+            eng.trail.trail_psi(var, 'type')
+        var.type = wl.boolean
+    if not (var.flags & SORT_VAR):
+        if eng is not None:
+            eng.trail.trail_psi(var, 'flags')
+        var.flags |= SORT_VAR
+    if var.resid is None:
+        if eng is not None:
+            eng.trail.trail_psi(var, 'resid')
+        var.resid = [Residuation(goal=pending_goal)]
+    else:
+        for r in var.resid:
+            if r.goal is pending_goal:
+                return
+        if eng is not None:
+            eng.trail.trail_copy(var, 'resid')
         var.resid.append(Residuation(goal=pending_goal))
 
 
@@ -284,6 +408,14 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
             return _make_atom(eng, 'false')
         if s1 == 'true' and s2 == 'true':
             return _make_atom(eng, 'true')
+        # Partial evaluation: one concrete arg
+        if s1 == 'true':
+            return a2   # true and X = X
+        if s2 == 'true':
+            return a1   # X and true = X
+        # Idempotent: X and X = X (same variable by identity)
+        if id(a1.deref()) == id(a2.deref()):
+            return a1
         return None
 
     elif sym == 'or':
@@ -297,6 +429,14 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
             return _make_atom(eng, 'true')
         if s1 == 'false' and s2 == 'false':
             return _make_atom(eng, 'false')
+        # Partial evaluation: one concrete arg
+        if s1 == 'false':
+            return a2   # false or X = X
+        if s2 == 'false':
+            return a1   # X or false = X
+        # Idempotent: X or X = X
+        if id(a1.deref()) == id(a2.deref()):
+            return a1
         return None
 
     elif sym == 'not':
@@ -2690,13 +2830,132 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
             return _unify(eng, a_d, alts[0])
 
     # Try to evaluate functional terms before unifying (boolean ops)
+    _b_orig_for_bool = b_d   # save original so we can collect vars to mark after eval
     b_evaled = _try_eval_bool(b_d, eng)
     if b_evaled is not None:
+        # Boolean expression was fully or partially evaluated.
+        # Mark all free variables that appeared in the original expression as
+        # bool-constrained with resid=[] (no pending constraint — tilde suppressed).
+        # This handles short-circuit cases (e.g. B and false → false consumes B)
+        # and idempotent cases (e.g. B and B → B keeps sort bool, resid=[]).
+        _bool_free_evaled: list = []
+        _collect_bool_free_vars(_b_orig_for_bool, eng.wl, _bool_free_evaled, set())
+        for _bv_evaled in _bool_free_evaled:
+            _mark_bool_sort(_bv_evaled, eng.wl, eng)
+        # Also mark the result itself if it is a free variable
+        # (e.g. and(B,B)→B or and(true,X)→X; A = result gives A bool sort)
+        _result_evaled = b_evaled.deref()
+        _mark_bool_sort(_result_evaled, eng.wl, eng)
+        # Also mark a_d (LHS) if it is a free variable: when we are about to
+        # unify it with b_evaled, a_d should have resid=[] too so it does not
+        # display as bool~ if it ends up as the canonical representative.
+        _a_d_cur_for_mark = a_d.deref()
+        _mark_bool_sort(_a_d_cur_for_mark, eng.wl, eng)
         b_d = b_evaled
     else:
+        _a_orig_for_bool = a_d
         a_evaled = _try_eval_bool(a_d, eng)
         if a_evaled is not None:
+            _bool_free_evaled_a: list = []
+            _collect_bool_free_vars(_a_orig_for_bool, eng.wl, _bool_free_evaled_a, set())
+            for _bv_evaled_a in _bool_free_evaled_a:
+                _mark_bool_sort(_bv_evaled_a, eng.wl, eng)
+            _result_evaled_a = a_evaled.deref()
+            _mark_bool_sort(_result_evaled_a, eng.wl, eng)
+            # Also mark b_d (other side) if it's a free variable.
+            _b_d_cur_for_mark = b_d.deref()
+            _mark_bool_sort(_b_d_cur_for_mark, eng.wl, eng)
             a_d = a_evaled
+
+    # Boolean residuation: if one side is an unevaluated boolean expression
+    # with free variables, propagate bool-sort constraints and set up a
+    # suspended goal that re-fires when any free variable is bound.
+    #
+    # Design mirrors arithmetic residuation:
+    #  - true = and(B,C)  → force B=true, C=true  (unique back-propagation)
+    #  - false = or(B,C)  → force B=false, C=false (unique)
+    #  - true = not(B)    → force B=false
+    #  - false = not(B)   → force B=true
+    #  - other cases      → suspend (non-deterministic or no-op if LHS is free)
+    # Use _is_proper_bool_expr to distinguish genuine boolean operator applications
+    # (and(X,Y), or(X,Y), not(X), xor(X,Y)) from psi-terms that happen to use
+    # 'and'/'or' as a constructor name with the wrong arity (e.g. and(B) with
+    # only 1 argument, which should be treated as a regular psi-term).
+    _b_bool_unevaluated = (b_evaled is None) and _is_proper_bool_expr(b_d)
+    # Also handle: bool expr on the LHS (e.g. and(B,C) = true)
+    # We check a_d only if b_d is not already a bool expr (to avoid double-handling).
+    _a_bool_unevaluated = (not _b_bool_unevaluated) and _is_proper_bool_expr(a_d)
+
+    if _b_bool_unevaluated or _a_bool_unevaluated:
+        # Normalise: bool_expr is the expression side, other_side is the other side.
+        if _b_bool_unevaluated:
+            _bool_expr_br, _other_br = b_d, a_d
+        else:
+            _bool_expr_br, _other_br = a_d, b_d
+        _bool_sym_br = _get_sym(_bool_expr_br)
+
+        # Collect free variables inside the boolean expression.
+        _bool_vars_br: list = []
+        _collect_bool_free_vars(_bool_expr_br, eng.wl, _bool_vars_br, set())
+
+        if _bool_vars_br:
+            # --- Deterministic backward propagation ---
+            _other_sym_br = _get_sym(_other_br)
+            if _other_sym_br == 'true' and _bool_sym_br == 'and':
+                # true = and(B, C)  →  B = true, C = true
+                for _bv_br in _bool_vars_br:
+                    if not _unify(eng, _bv_br, _make_atom(eng, 'true')):
+                        return False
+                return True
+            elif _other_sym_br == 'false' and _bool_sym_br == 'or':
+                # false = or(B, C)  →  B = false, C = false
+                for _bv_br in _bool_vars_br:
+                    if not _unify(eng, _bv_br, _make_atom(eng, 'false')):
+                        return False
+                return True
+            elif _other_sym_br == 'false' and _bool_sym_br == 'not':
+                # false = not(B)  →  B = true
+                for _bv_br in _bool_vars_br:
+                    if not _unify(eng, _bv_br, _make_atom(eng, 'true')):
+                        return False
+                return True
+            elif _other_sym_br == 'true' and _bool_sym_br == 'not':
+                # true = not(B)  →  B = false
+                for _bv_br in _bool_vars_br:
+                    if not _unify(eng, _bv_br, _make_atom(eng, 'false')):
+                        return False
+                return True
+
+            # --- Non-deterministic or free-LHS case: suspend ---
+            from wild_life.data_structures import Goal as _BoolGoal
+            _wl_br = eng.wl
+            _eq_defn_br = (getattr(_wl_br, 'eqsym', None) or
+                           _wl_br.syntax_module.symbol_table.get('='))
+            _bool_eq_br = PsiTerm(type_def=_eq_defn_br)
+            # Store as (other = bool_expr) so re-firing reads the right
+            # sides as a and b respectively.
+            _bool_eq_br.attr_list['1'] = _other_br
+            _bool_eq_br.attr_list['2'] = _bool_expr_br
+            _bool_eq_br._resid_marker = True
+            _bool_pend_br = _BoolGoal(GoalType.PROVE, _bool_eq_br,
+                                      None, None, pending=True)
+            for _bv_br in _bool_vars_br:
+                _attach_bool_resid(_bv_br, _wl_br, _bool_pend_br, eng)
+            # Also attach to _other_br if it is a genuine free variable
+            # (not a concrete atom like 'false'), so it displays as bool~
+            # and wakes the goal when it gets a value.
+            from wild_life.data_structures import SORT_VAR as _SORT_VAR_BR
+            _other_cur_br = _other_br.deref()
+            _other_is_free_br = (
+                _other_cur_br.value is None and not _other_cur_br.attr_list
+                and (_other_cur_br.type is _wl_br.top
+                     or _other_cur_br.type is None
+                     or bool(_other_cur_br.flags & _SORT_VAR_BR))
+            )
+            if _other_is_free_br:
+                _attach_bool_resid(_other_cur_br, _wl_br, _bool_pend_br, eng)
+            return True
+
     # Detect whether this call is a re-fire of a suspended residuated goal
     # (as opposed to the initial constraint setup).  The eq_term created during
     # residuation is tagged with _resid_marker=True; when _wakeup_resid fires
