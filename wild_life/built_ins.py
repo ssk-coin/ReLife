@@ -1710,6 +1710,33 @@ def _is_glb_func(t: 'PsiTerm') -> bool:
             '1' in t.attr_list and '2' in t.attr_list and '3' not in t.attr_list)
 
 
+def _is_children_func(t: 'PsiTerm') -> bool:
+    """Return True if t is children(X) with exactly 1 argument (functional use)."""
+    if t is None or t.type is None or t.type.keyword is None:
+        return False
+    return (t.type.keyword.symbol == 'children' and
+            '1' in t.attr_list and '2' not in t.attr_list)
+
+
+def _eval_children_func(t: 'PsiTerm', eng) -> 'PsiTerm':
+    """Evaluate children(X) → WL list of direct subsorts of X's sort."""
+    arg = t.attr_list['1'].deref()
+    defn = arg.type
+    wl = eng.wl
+    nil_term = PsiTerm(type_def=wl.nil)
+    if defn is None:
+        return nil_term
+    child_defs = getattr(defn, 'children', [])
+    lst = nil_term
+    for cd in reversed(child_defs):
+        child_term = PsiTerm(type_def=cd)
+        pair = PsiTerm()
+        pair.type = wl.alist
+        pair.attr_list = {'1': child_term, '2': lst}
+        lst = pair
+    return lst
+
+
 def _is_lub_func(t: 'PsiTerm') -> bool:
     """Return True if t is lub(X, Y) with exactly 2 arguments (functional use)."""
     if t is None or t.type is None or t.type.keyword is None:
@@ -2009,6 +2036,12 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         return _apply_lub_to_var(b_d, a_d, eng)
     if _is_lub_func(a_d):
         return _apply_lub_to_var(a_d, b_d, eng)
+
+    # Handle children(X) functional use: L = children(X) → list of direct subsorts
+    if _is_children_func(b_d):
+        return _unify(eng, a_d, _eval_children_func(b_d, eng))
+    if _is_children_func(a_d):
+        return _unify(eng, b_d, _eval_children_func(a_d, eng))
 
     # Handle bagof/findall/setof in functional position:
     #   L = bagof(Template, Goal)  →  collect all solutions and unify with L
@@ -4686,3 +4719,18 @@ def register_all(wl) -> None:
             return True  # 2-arg with no result: trivially succeed
         return _apply_lub_to_var(goal, a3.deref(), eng)
     _reg('lub', _bi_lub)
+
+    def _bi_children(goal, eng):
+        """children(X) → list of direct subsorts of X (1-arg functional form).
+        children(X, L) → L is the list of direct subsorts of X (2-arg predicate)."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None:
+            return False
+        lst = _eval_children_func(goal, eng)
+        if a2 is None:
+            # 1-arg: used as a goal (e.g. listloop(children(@))) — succeeds
+            return True
+        return _unify(eng, a2.deref(), lst)
+    _reg('children', _bi_children)
+
