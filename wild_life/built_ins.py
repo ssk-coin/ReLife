@@ -777,6 +777,11 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
                 _mark = eng.trail.mark()
                 try:
                     _evaled = _eval_user_func_sync(t, eng, 0)
+                    if _evaled is not None:
+                        # Deep-copy while trail bindings are still active so that
+                        # trail-bound variables (e.g. H' → d) are resolved into
+                        # concrete values before we roll back the trail.
+                        _evaled = copy_term(_evaled.deref(), {})
                 finally:
                     eng.trail.undo_to(_mark)
                 if _evaled is not None:
@@ -5256,42 +5261,109 @@ def register_all(wl) -> None:
 
     def _bi_import_clauses(goal, eng):
         """import_clauses(for => Module#Pred, replacing => [(Module#Old, New), ...])
-        Import clauses from another module's predicate, optionally renaming calls."""
-        # Minimal implementation: copy rules from source defn to local defn
+
+        Copies all clauses (rules) of Module#Pred into the homonymous predicate /
+        function in the current module.  The optional 'replacing' list maps old
+        Definition references (Module#Name) inside the copied clause bodies to new
+        local ones so that recursive calls target the local copy.
+
+        Syntax note: import_clauses uses NAMED features, not positional args.
+        The goal term itself carries 'for' and 'replacing' as attribute keys.
+        """
         from wild_life.data_structures import DefType as _DT
-        a1 = goal.attr_list.get('1')
-        if a1 is None:
-            return True  # no-op
-        a1d = a1.deref()
-        # Expect a1d to have feature 'for' and optionally 'replacing'
-        for_part = a1d.attr_list.get('for')
+        from wild_life.unification import copy_term
+
+        # ── 1. Locate the 'for' feature directly on the goal term ─────────────
+        # (import_clauses(for => X, replacing => Y) uses named features, not
+        #  positional '1'/'2' args)
+        for_part = goal.attr_list.get('for')
+        repl_part = goal.attr_list.get('replacing')
+
         if for_part is None:
-            return True
+            # fall back: try positional arg wrapping a compound with 'for' feature
+            a1 = goal.attr_list.get('1')
+            if a1 is None:
+                return True
+            a1d = a1.deref()
+            for_part = a1d.attr_list.get('for')
+            repl_part = a1d.attr_list.get('replacing')
+            if for_part is None:
+                return True
+
         for_d = for_part.deref()
-        # for_d should be a module-qualified symbol: Module#Pred
-        # In the psi-term representation, '#' is an attribute separator.
-        # The symbol for_d might have type with keyword Module#Pred.
-        if for_d.type and for_d.type.keyword:
-            sym = for_d.type.keyword.symbol
-            src_mod_name = for_d.type.keyword.module.module_name if for_d.type.keyword.module else None
-        else:
+
+        # ── 2. Extract source module name and predicate/function name ──────────
+        if for_d.type is None or for_d.type.keyword is None:
             return True
-        if src_mod_name is None:
-            return True
-        src_mod = wl.find_module(src_mod_name)
+        sym = for_d.type.keyword.symbol
+        src_mod_obj = for_d.type.keyword.module
+        if src_mod_obj is None:
+            # Unqualified name: try current module
+            src_mod_obj = wl.current_module
+        src_mod = wl.find_module(src_mod_obj.module_name) if src_mod_obj else None
         if src_mod is None:
             return True
         src_defn = src_mod.symbol_table.get(sym)
-        if src_defn is None or src_defn.rule is None:
+        if src_defn is None or not src_defn.rule:
             return True
-        # Copy rules to local module under the same name
+
+        # ── 3. Parse the 'replacing' list: [(OldDef, NewDef), ...] ────────────
+        # Build a mapping {old_Definition_id → new_Definition} for substitution.
+        replacements: dict = {}   # id(old_defn) → new_defn
+        if repl_part is not None:
+            node = repl_part.deref()
+            while node.type is not None and node.type is wl.alist:
+                head_ref = node.attr_list.get('1')
+                node = node.attr_list.get('2').deref() if node.attr_list.get('2') else wl.make_atom('nil', wl.bi_module).deref()
+                if head_ref is None:
+                    continue
+                pair = head_ref.deref()
+                # Pair: (OldQName, NewName) as a tuple-like term with '1' and '2'
+                p1 = pair.attr_list.get('1')
+                p2 = pair.attr_list.get('2')
+                if p1 is None or p2 is None:
+                    continue
+                old_t = p1.deref()
+                new_t = p2.deref()
+                # old_t: module-qualified (e.g. lists#app) or bare atom
+                if old_t.type and old_t.type.keyword:
+                    old_defn = old_t.type
+                    # new_t: bare atom → resolve in current module
+                    if new_t.type and new_t.type.keyword:
+                        new_name = new_t.type.keyword.symbol
+                        new_defn = wl.update_symbol(wl.current_module, new_name)
+                        replacements[id(old_defn)] = new_defn
+
+        # ── 4. Ensure the local definition exists with correct type ─────────────
         local_defn = wl.update_symbol(wl.current_module, sym)
         if local_defn.rule is None:
             local_defn.rule = []
         if local_defn.type == _DT.UNDEF:
             local_defn.type = src_defn.type
-        for (h, b) in src_defn.rule:
-            local_defn.rule.append((h, b))
+
+        # ── 5. Copy each source clause and apply replacements ─────────────────
+        def _replace_defns(t, visited=None):
+            """Walk PsiTerm t and replace Definition references per 'replacements'."""
+            if visited is None:
+                visited = set()
+            if id(t) in visited:
+                return
+            visited.add(id(t))
+            if t.type is not None and id(t.type) in replacements:
+                t.type = replacements[id(t.type)]
+            for child in t.attr_list.values():
+                cd = child.deref()
+                _replace_defns(cd, visited)
+
+        for (h0, b0) in src_defn.rule:
+            _vm: dict = {}
+            h_copy = copy_term(h0, _vm)
+            b_copy = copy_term(b0, _vm)
+            if replacements:
+                _replace_defns(h_copy)
+                _replace_defns(b_copy)
+            local_defn.rule.append((h_copy, b_copy))
+
         return True
     _reg('import_clauses', _bi_import_clauses)
 
