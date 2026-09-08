@@ -4396,6 +4396,7 @@ def register_all(wl) -> None:
 
     # Type hierarchy
     _reg('sub_type', bi_sub_type)
+    _reg('subsort', bi_sub_type)   # alias: subsort(A,B) ↔ sub_type(A,B)
     _reg('get_attribute', bi_get_attribute)
     _reg('set_attribute', bi_set_attribute)
     _reg('type_of', bi_type_of)
