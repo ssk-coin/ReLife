@@ -489,6 +489,37 @@ class Engine:
             if not arg1.type:
                 return
             super_def = arg1.type   # LHS is the super-sort
+
+            # Conditional sort definition:  S := P:T | Condition
+            # The RHS is a such_that(pattern, condition) node.
+            # Store the (pattern, condition) pair as a sort-membership rule on
+            # super_def; also add the pattern's sort as a parent of super_def so
+            # that type-compatibility checks work.
+            if arg2.type is not None and arg2.type is self.wl.such_that:
+                pat  = arg2.attr_list.get('1')  # e.g. P:posint
+                cond = arg2.attr_list.get('2')  # e.g. number_of_factors(P) = one
+                if pat is not None:
+                    _ct2 = copy_term  # copy_term imported at module level
+                    pat_d = pat.deref()
+                    # Add the pattern's sort as a parent of the conditional sort
+                    if pat_d.type is not None and pat_d.type is not super_def:
+                        parent_def = pat_d.type
+                        if parent_def.type == DefType.UNDEF:
+                            parent_def.type = DefType.TYPE
+                        if super_def.type == DefType.UNDEF:
+                            super_def.type = DefType.TYPE
+                        if parent_def not in super_def.parents:
+                            super_def.parents.append(parent_def)
+                        if super_def not in parent_def.children:
+                            parent_def.children.append(super_def)
+                    # Store sort-membership rule: (head_pattern, condition)
+                    rule_entry = (pat, cond)
+                    if super_def.rule is None:
+                        super_def.rule = [rule_entry]
+                    else:
+                        super_def.rule.append(rule_entry)
+                return  # Don't fall through to the generic pairs logic
+
             # Collect all leaf elements from the RHS (may be a disjunction or atom)
             rhs_elems = _collect_disj_elems(arg2, self.wl) if (
                 arg2.type is not None and arg2.type is self.wl.disjunction
