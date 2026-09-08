@@ -1736,31 +1736,60 @@ def _eval_glb_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
 
 
 def _eval_lub_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
-    """Evaluate lub(X, Y) → LUB (least upper bound) of types X and Y, or None."""
-    from wild_life.unification import compute_glb as _cg
+    """Evaluate lub(X, Y) → LUB (least upper bound) of types X and Y.
+
+    The LUB is the most specific common supertype of d1 and d2.
+    We BFS up the parents lists from d1 to collect all ancestors,
+    then BFS up from d2 to find the first ancestor also in d1's set.
+    Ancestors are ordered by specificity (closer = more specific).
+    """
     t1 = t.attr_list['1'].deref()
     t2 = t.attr_list['2'].deref()
     d1 = t1.type
     d2 = t2.type
     wl = eng.wl
+
+    # Collect ordered ancestor list from d (BFS up parents, level by level)
+    def _ancestors_ordered(start):
+        """Return all ancestors of start (BFS), closest first."""
+        seen = set()
+        result = []
+        queue = [start]
+        while queue:
+            d = queue.pop(0)
+            if d is None or d in seen:
+                continue
+            seen.add(d)
+            result.append(d)
+            for p in getattr(d, 'parents', []):
+                if p not in seen:
+                    queue.append(p)
+        return result
+
     if d1 is None and d2 is None:
         return PsiTerm(type_def=wl.top)
     if d1 is None:
         return PsiTerm(type_def=wl.top)
     if d2 is None:
         return PsiTerm(type_def=wl.top)
-    # Walk up parent chain to find common ancestor
-    ancestors1: set = set()
-    d = d1
-    while d is not None:
-        ancestors1.add(d)
-        d = d.parent if hasattr(d, 'parent') else None
-    d = d2
-    while d is not None:
-        if d in ancestors1:
-            return PsiTerm(type_def=d)
-        d = d.parent if hasattr(d, 'parent') else None
-    return PsiTerm(type_def=wl.top)
+
+    # If one is a subtype of the other, the LUB is the more general one
+    if d1.is_subtype_of(d2):
+        result_def = d2
+    elif d2.is_subtype_of(d1):
+        result_def = d1
+    else:
+        # Find the most specific common ancestor
+        ancestors1 = set(_ancestors_ordered(d1))
+        # Walk d2's ancestors to find first one in ancestors1
+        result_def = wl.top
+        for a in _ancestors_ordered(d2):
+            if a in ancestors1:
+                result_def = a
+                break
+
+    result = PsiTerm(type_def=result_def)
+    return result
 
 
 def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
