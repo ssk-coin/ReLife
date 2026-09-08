@@ -1749,9 +1749,23 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
                 eng.trail.undo_to(mark)
                 continue
 
+        # Pre-evaluate any user-defined or built-in functional sub-terms in
+        # the input term's arguments before trying to unify with the head.
+        # This mirrors the EVAL goal handler in inference.py (lines ~843-857)
+        # and is necessary so that e.g. app([1], rev([2,3])) can match
+        # app(L, [H|T]) after rev([2,3]) is reduced to [3,2].
+        t_copy_attrs = dict(t.attr_list)
+        for _key in list(t.attr_list.keys()):
+            _attr = t.attr_list[_key].deref()
+            _ev = _try_eval_any_func(_attr, eng)
+            if _ev is not None and _ev is not _attr:
+                t.attr_list[_key] = _ev
+
         mark = eng.trail.mark()
         ok = eng.unifier.unify(t, head)
         if not ok:
+            # Restore original attrs in case we modified them
+            t.attr_list = t_copy_attrs
             eng.trail.undo_to(mark)
             continue
 
@@ -5129,3 +5143,164 @@ def register_all(wl) -> None:
         return _unify(eng, a2.deref(), real_t)
     _reg('real', _bi_real_coerce)
 
+
+    # ── Module system predicates ──────────────────────────────────────────────
+
+    def _get_string_or_atom(t: PsiTerm, eng) -> Optional[str]:
+        """Extract a name from a string PsiTerm or atom PsiTerm, or None."""
+        td = t.deref()
+        if td.value is not None and td.type and td.type.is_subtype_of(eng.wl.quoted_string):
+            return str(td.value)
+        if td.type and td.type.keyword:
+            return td.type.keyword.symbol
+        return None
+
+    def _bi_module(goal, eng):
+        """module("Name") — switch the current module to Name, creating if needed."""
+        a1 = goal.attr_list.get('1')
+        if a1 is None:
+            return False
+        name = _get_string_or_atom(a1, eng)
+        if name is None:
+            return False
+        mod = wl.create_module(name)
+        # New user-created modules open bi and syntax automatically
+        if wl.bi_module not in mod.open_modules:
+            mod.open_modules.append(wl.bi_module)
+        if wl.syntax_module not in mod.open_modules:
+            mod.open_modules.append(wl.syntax_module)
+        wl.set_current_module(mod)
+        return True
+    _reg('module', _bi_module)
+
+    def _bi_public(goal, eng):
+        """public(P, Q, ...) — declare symbols as public in the current module."""
+        mod = wl.current_module
+        if mod is None:
+            return True
+        i = 1
+        while True:
+            a = goal.attr_list.get(str(i))
+            if a is None:
+                break
+            ad = a.deref()
+            name = _get_string_or_atom(ad, eng)
+            if name is None and ad.type and ad.type.keyword:
+                name = ad.type.keyword.symbol
+            if name:
+                defn = wl.update_symbol(mod, name)
+                if defn.keyword:
+                    defn.keyword.public = True
+            i += 1
+        return True
+    _reg('public', _bi_public)
+
+    def _bi_private_feature(goal, eng):
+        """private_feature(F, ...) — mark features as private to current module."""
+        mod = wl.current_module
+        if mod is None:
+            return True
+        i = 1
+        while True:
+            a = goal.attr_list.get(str(i))
+            if a is None:
+                break
+            ad = a.deref()
+            name = _get_string_or_atom(ad, eng)
+            if name is None and ad.type and ad.type.keyword:
+                name = ad.type.keyword.symbol
+            if name:
+                defn = wl.update_symbol(mod, name)
+                if defn.keyword:
+                    defn.keyword.private_feature = True
+            i += 1
+        return True
+    _reg('private_feature', _bi_private_feature)
+
+    def _bi_open(goal, eng):
+        """open("Mod", ...) — add named module(s) to current module's open list."""
+        mod = wl.current_module
+        if mod is None:
+            return True
+        i = 1
+        while True:
+            a = goal.attr_list.get(str(i))
+            if a is None:
+                break
+            name = _get_string_or_atom(a, eng)
+            if name:
+                target = wl.create_module(name)
+                # Ensure target itself opens bi/syntax
+                if wl.bi_module not in target.open_modules:
+                    target.open_modules.append(wl.bi_module)
+                if wl.syntax_module not in target.open_modules:
+                    target.open_modules.append(wl.syntax_module)
+                if target not in mod.open_modules:
+                    mod.open_modules.append(target)
+            i += 1
+        return True
+    _reg('open', _bi_open)
+
+    def _bi_display_modules(goal, eng):
+        """display_modules — print info about all known modules."""
+        for name, mod in sorted(wl.module_table.items()):
+            opens = [m.module_name for m in mod.open_modules
+                     if m.module_name not in ('bi', 'syntax')]
+            sym_count = len(mod.symbol_table)
+            if opens:
+                print(f"Module '{name}': {sym_count} symbols, opens {opens}")
+            else:
+                print(f"Module '{name}': {sym_count} symbols")
+        return True
+    _reg('display_modules', _bi_display_modules)
+
+    def _bi_import_clauses(goal, eng):
+        """import_clauses(for => Module#Pred, replacing => [(Module#Old, New), ...])
+        Import clauses from another module's predicate, optionally renaming calls."""
+        # Minimal implementation: copy rules from source defn to local defn
+        from wild_life.data_structures import DefType as _DT
+        a1 = goal.attr_list.get('1')
+        if a1 is None:
+            return True  # no-op
+        a1d = a1.deref()
+        # Expect a1d to have feature 'for' and optionally 'replacing'
+        for_part = a1d.attr_list.get('for')
+        if for_part is None:
+            return True
+        for_d = for_part.deref()
+        # for_d should be a module-qualified symbol: Module#Pred
+        # In the psi-term representation, '#' is an attribute separator.
+        # The symbol for_d might have type with keyword Module#Pred.
+        if for_d.type and for_d.type.keyword:
+            sym = for_d.type.keyword.symbol
+            src_mod_name = for_d.type.keyword.module.module_name if for_d.type.keyword.module else None
+        else:
+            return True
+        if src_mod_name is None:
+            return True
+        src_mod = wl.find_module(src_mod_name)
+        if src_mod is None:
+            return True
+        src_defn = src_mod.symbol_table.get(sym)
+        if src_defn is None or src_defn.rule is None:
+            return True
+        # Copy rules to local module under the same name
+        local_defn = wl.update_symbol(wl.current_module, sym)
+        if local_defn.rule is None:
+            local_defn.rule = []
+        if local_defn.type == _DT.UNDEF:
+            local_defn.type = src_defn.type
+        for (h, b) in src_defn.rule:
+            local_defn.rule.append((h, b))
+        return True
+    _reg('import_clauses', _bi_import_clauses)
+
+    def _bi_use_module(goal, eng):
+        """use_module("Name") — alias for open (compatibility)."""
+        return _bi_open(goal, eng)
+    _reg('use_module', _bi_use_module)
+
+    def _bi_module_info(goal, eng):
+        """module_info(M, Info) — basic module info (stub)."""
+        return True
+    _reg('module_info', _bi_module_info)
