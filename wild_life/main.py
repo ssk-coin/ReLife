@@ -442,6 +442,18 @@ def run_repl(
                     engine.choice_stack = cs_before
                     engine.goal_stack = None
                     sys.stdout.write("\n*** No\n")
+                    # Show parent frame's bindings when a query fails at depth > 0
+                    # (mirrors Wild Life C's behavior: "No\nParentBindings\n--1>")
+                    if depth > 0 and frame_stack:
+                        # Use the stored bindings string from the innermost parent frame.
+                        # Re-computing with _format_bindings after undo_to(pre_mark)
+                        # can show "@" for variables that had residuations (since undo
+                        # resets trailed 'resid' fields but the type/flags tracking may
+                        # not be reliable across undo). The stored string was correct
+                        # when the parent query succeeded.
+                        parent_bindings = frame_stack[-1].bindings_str
+                        if parent_bindings:
+                            sys.stdout.write(parent_bindings + "\n")
                     # Do NOT pop the frame on fresh-query failure at depth > 0:
                     # the outer query's frame (and its choice points) remain active.
                     # The user can type ';' or '.' to navigate, or another query.
