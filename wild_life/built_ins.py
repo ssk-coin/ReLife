@@ -1776,23 +1776,28 @@ def _apply_glb_to_var(t: 'PsiTerm', target: 'PsiTerm', eng) -> bool:
     return _unify(eng, target, first_psi)
 
 
-def _eval_lub_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
-    """Evaluate lub(X, Y) → LUB (least upper bound) of types X and Y.
+def _compute_all_lubs(d1, d2, wl):
+    """Compute all minimal common supertypes (LUBs) of d1 and d2.
 
-    The LUB is the most specific common supertype of d1 and d2.
-    We BFS up the parents lists from d1 to collect all ancestors,
-    then BFS up from d2 to find the first ancestor also in d1's set.
-    Ancestors are ordered by specificity (closer = more specific).
+    Returns a list of Definition objects. When multiple incomparable minimal
+    common supertypes exist (e.g. k and l both supertype of a and b),
+    all are returned so that lub(a,b) can non-deterministically yield each.
     """
-    t1 = t.attr_list['1'].deref()
-    t2 = t.attr_list['2'].deref()
-    d1 = t1.type
-    d2 = t2.type
-    wl = eng.wl
+    if d1 is d2:
+        return [d1]
+    if d1 is wl.top:
+        return [wl.top]
+    if d2 is wl.top:
+        return [wl.top]
 
-    # Collect ordered ancestor list from d (BFS up parents, level by level)
-    def _ancestors_ordered(start):
-        """Return all ancestors of start (BFS), closest first."""
+    # Fast paths: subtype relationship
+    if d1.is_subtype_of(d2):
+        return [d2]   # d2 is more general; LUB = d2
+    if d2.is_subtype_of(d1):
+        return [d1]
+
+    # BFS upward from d to collect all ancestors (self included), closest first
+    def _ancestors(start):
         seen = set()
         result = []
         queue = [start]
@@ -1807,30 +1812,60 @@ def _eval_lub_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
                     queue.append(p)
         return result
 
-    if d1 is None and d2 is None:
-        return PsiTerm(type_def=wl.top)
-    if d1 is None:
-        return PsiTerm(type_def=wl.top)
-    if d2 is None:
-        return PsiTerm(type_def=wl.top)
+    anc1 = _ancestors(d1)
+    set1 = set(anc1)
+    anc2 = _ancestors(d2)
+    set2 = set(anc2)
 
-    # If one is a subtype of the other, the LUB is the more general one
-    if d1.is_subtype_of(d2):
-        result_def = d2
-    elif d2.is_subtype_of(d1):
-        result_def = d1
-    else:
-        # Find the most specific common ancestor
-        ancestors1 = set(_ancestors_ordered(d1))
-        # Walk d2's ancestors to find first one in ancestors1
-        result_def = wl.top
-        for a in _ancestors_ordered(d2):
-            if a in ancestors1:
-                result_def = a
-                break
+    # Common ancestors (excluding self)
+    common = [a for a in anc1 if a in set2 and a is not d1]
+    # Also include ancestors of d2 that are in set1
+    for a in anc2:
+        if a in set1 and a is not d2 and a not in common:
+            common.append(a)
 
-    result = PsiTerm(type_def=result_def)
-    return result
+    if not common:
+        return [wl.top]
+
+    # Keep only minimal common ancestors (those not subsumed by a more specific one)
+    minimal = []
+    for a in common:
+        if not any(b is not a and b.is_subtype_of(a) and b in common for b in common):
+            if a not in minimal:
+                minimal.append(a)
+
+    return minimal if minimal else [wl.top]
+
+
+def _eval_lub_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
+    """Evaluate lub(X, Y) → first LUB; non-determinism handled by _apply_lub_to_var."""
+    lubs = _compute_all_lubs_from_t(t, eng)
+    return PsiTerm(type_def=lubs[0]) if lubs else None
+
+
+def _compute_all_lubs_from_t(t: 'PsiTerm', eng):
+    t1 = t.attr_list['1'].deref()
+    t2 = t.attr_list['2'].deref()
+    d1 = t1.type
+    d2 = t2.type
+    wl = eng.wl
+    if d1 is None or d2 is None:
+        return [wl.top]
+    return _compute_all_lubs(d1, d2, wl)
+
+
+def _apply_lub_to_var(t: 'PsiTerm', target: 'PsiTerm', eng) -> bool:
+    """Unify target with lub(X,Y), creating choice points for multiple LUBs."""
+    from wild_life.data_structures import GoalType as _GT
+    lubs = _compute_all_lubs_from_t(t, eng)
+    if not lubs:
+        return False
+    # Push choice points for alternatives (reversed so first fires next)
+    for alt_def in reversed(lubs[1:]):
+        alt_psi = PsiTerm(type_def=alt_def)
+        eng.push_choice_point(_GT.UNIFY, target, alt_psi, None)
+    first_psi = PsiTerm(type_def=lubs[0])
+    return _unify(eng, target, first_psi)
 
 
 def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
@@ -1971,11 +2006,9 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
 
     # Handle lub(X,Y) functional use: B = lub(X,Y) → B = LUB of X and Y
     if _is_lub_func(b_d):
-        r = _eval_lub_func(b_d, eng)
-        return _unify(eng, a_d, r) if r is not None else False
+        return _apply_lub_to_var(b_d, a_d, eng)
     if _is_lub_func(a_d):
-        r = _eval_lub_func(a_d, eng)
-        return _unify(eng, b_d, r) if r is not None else False
+        return _apply_lub_to_var(a_d, b_d, eng)
 
     # Handle bagof/findall/setof in functional position:
     #   L = bagof(Template, Goal)  →  collect all solutions and unify with L
@@ -4650,8 +4683,5 @@ def register_all(wl) -> None:
         t = goal
         if a3 is None:
             return True  # 2-arg with no result: trivially succeed
-        r = _eval_lub_func(t, eng)
-        if r is None:
-            return False
-        return _unify(eng, a3.deref(), r)
+        return _apply_lub_to_var(goal, a3.deref(), eng)
     _reg('lub', _bi_lub)
