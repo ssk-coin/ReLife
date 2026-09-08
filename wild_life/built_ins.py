@@ -641,20 +641,127 @@ def _eval_and_conjunction(t: PsiTerm, eng) -> Optional[PsiTerm]:
     t1 = t1_ref.deref()
     t2 = t2_ref.deref()
 
-    # Recursively evaluate nested conjunctions
-    if t1.type is not None and t1.type is wl.and_sym:
-        t1 = _eval_and_conjunction(t1, eng)
-        if t1 is None:
+    def _eval_side(s: PsiTerm) -> Optional[PsiTerm]:
+        """Evaluate one side of & before conjunction: user func, cond, nested &."""
+        s = s.deref()
+        if s.type is not None and s.type is wl.and_sym:
+            return _eval_and_conjunction(s, eng)
+        s = _strip_bq(s)
+        # Evaluate user-defined function calls (e.g. posint_stream_to(5))
+        if _is_user_function(s):
+            _mark = eng.trail.mark()
+            try:
+                ev = _eval_user_func_sync(s, eng, 0)
+                if ev is not None:
+                    ev = copy_term(ev.deref(), {})
+            finally:
+                eng.trail.undo_to(_mark)
+            if ev is not None:
+                return _evaluate_result_for_display(ev, eng, 1)
             return None
-    else:
-        t1 = _strip_bq(t1)
+        # Evaluate built-in cond() functionally
+        if _is_cond_builtin_local(s):
+            ev = _eval_body_sync(s, eng, 0)
+            if ev is not None:
+                return _evaluate_result_for_display(ev.deref(), eng, 1)
+            return None
+        return s
 
-    if t2.type is not None and t2.type is wl.and_sym:
-        t2 = _eval_and_conjunction(t2, eng)
-        if t2 is None:
-            return None
-    else:
-        t2 = _strip_bq(t2)
+    t1 = _eval_side(t1)
+    if t1 is None:
+        return None
+    t2 = _eval_side(t2)
+    if t2 is None:
+        return None
+
+    def _check_sort_member(elem: PsiTerm, sort_t: PsiTerm) -> bool:
+        """Check if elem satisfies the sort sort_t.
+
+        For a conditional sort (sort_t.type has sort-membership rules stored as
+        [(pattern, condition), ...]), unify elem with the pattern and prove the
+        condition.  Falls back to direct unification for simple sorts.
+        """
+        _ct = copy_term  # copy_term imported at module level from wild_life.unification
+        sort_d = sort_t.deref()
+        sort_def = sort_d.type
+        if sort_def is None:
+            return False
+        rules = sort_def.rule
+        if rules and isinstance(rules, list) and rules:
+            # Conditional sort rules: [(pattern, condition), ...]
+            for pat, cond in rules:
+                _mark2 = eng.trail.mark()
+                _vm2: dict = {}
+                pat_copy = _ct(pat, _vm2)
+                cond_copy = _ct(cond, _vm2) if cond is not None else None
+                ok_pat = eng.unifier.unify(elem, pat_copy)
+                if ok_pat:
+                    if cond_copy is None:
+                        eng.trail.undo_to(_mark2)
+                        return True
+                    # Prove condition synchronously
+                    from wild_life.inference import GoalType as _GT2, _DEFRULES as _DR2, _INNER_RUN_BARRIER as _IRB2
+                    _cp2 = eng.choice_stack
+                    _gs2 = eng.goal_stack
+                    eng.goal_stack = None
+                    eng.push_goal(_GT2.PROVE, cond_copy.deref(), _DR2, None)
+                    _old_ok2 = eng.main_loop_ok
+                    _bar2 = _cp2 if _cp2 is not None else _IRB2
+                    ok_cond = eng.run(cs_barrier=_bar2)
+                    eng.main_loop_ok = _old_ok2
+                    eng.choice_stack = _cp2
+                    eng.goal_stack = _gs2
+                    eng.trail.undo_to(_mark2)
+                    if ok_cond:
+                        return True
+                else:
+                    eng.trail.undo_to(_mark2)
+            return False
+        # No conditional rules: plain sort — try direct unification
+        _mark3 = eng.trail.mark()
+        fresh3 = PsiTerm(); fresh3.type = wl.top
+        ok_a = eng.unifier.unify(fresh3, elem)
+        ok_b = ok_a and eng.unifier.unify(fresh3.deref(), sort_d)
+        eng.trail.undo_to(_mark3)
+        return ok_b
+
+    # If one side is a disjunction, distribute & over elements and filter
+    t1_is_disj = t1.type is not None and (t1.type is wl.disjunction or t1.type is wl.disj_nil)
+    t2_is_disj = t2.type is not None and (t2.type is wl.disjunction or t2.type is wl.disj_nil)
+
+    if t1_is_disj or t2_is_disj:
+        # Determine the disjunction and the filter term
+        if t1_is_disj and not t2_is_disj:
+            disj_side, filter_side = t1, t2
+        elif t2_is_disj and not t1_is_disj:
+            disj_side, filter_side = t2, t1
+        else:
+            # Both are disjunctions: cross-product (keep pairs that unify)
+            elems1 = _collect_disjunction(t1, eng)
+            elems2 = _collect_disjunction(t2, eng)
+            surviving: list = []
+            for e1 in elems1:
+                for e2 in elems2:
+                    _mark4 = eng.trail.mark()
+                    fresh4 = PsiTerm(); fresh4.type = wl.top
+                    ok_a = eng.unifier.unify(fresh4, e1.deref())
+                    ok_b = ok_a and eng.unifier.unify(fresh4.deref(), e2.deref())
+                    if ok_b:
+                        surviving.append(copy_term(fresh4.deref(), {}))
+                    eng.trail.undo_to(_mark4)
+            if not surviving:
+                return None
+            return _make_disjunction_psi(surviving, wl)
+
+        elems = _collect_disjunction(disj_side, eng)
+        surviving = []
+        for e in elems:
+            e_d = e.deref()
+            if _check_sort_member(e_d, filter_side):
+                surviving.append(e_d)
+        if not surviving:
+            return None  # empty disjunction = fail (No)
+        return _make_disjunction_psi(surviving, wl)
 
     # Unify t1 and t2 through a fresh variable to find their meet
     fresh = PsiTerm()
@@ -2532,23 +2639,28 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
             result_list = eng.wl.make_list(collected)
             return _unify(eng, b_d, result_list)
 
-    # Handle conjunction on RHS: A = t1 & t2  →  A = t1, A = t2 (psi-term merge)
-    # '&' is psi-term conjunction: the result must satisfy BOTH constraints.
+    # Handle conjunction (& / psi-term meet): A = t1 & t2
+    # Route through _eval_and_conjunction which:
+    #  - evaluates user functions and cond on each side
+    #  - distributes & over disjunction elements (filtering semantics)
+    #  - falls back to direct psi-term merge for non-disjunction cases
     if b_d.type is not None and b_d.type is eng.wl.and_sym:
-        t1 = b_d.attr_list.get('1')
-        t2 = b_d.attr_list.get('2')
-        if t1 is not None and t2 is not None:
-            # Push the second unification as the next goal; do the first inline.
-            eng.push_goal(GoalType.UNIFY, a_d, t2.deref(), None)
-            return _unify(eng, a_d, t1.deref())
+        t1_r = b_d.attr_list.get('1')
+        t2_r = b_d.attr_list.get('2')
+        if t1_r is not None and t2_r is not None:
+            result = _eval_and_conjunction(b_d, eng)
+            if result is None:
+                return False
+            return _unify(eng, a_d, result)
 
-    # Handle conjunction on LHS: t1 & t2 = B  →  t1 = B, t2 = B (symmetric)
     if a_d.type is not None and a_d.type is eng.wl.and_sym:
-        t1 = a_d.attr_list.get('1')
-        t2 = a_d.attr_list.get('2')
-        if t1 is not None and t2 is not None:
-            eng.push_goal(GoalType.UNIFY, t2.deref(), b_d, None)
-            return _unify(eng, t1.deref(), b_d)
+        t1_r = a_d.attr_list.get('1')
+        t2_r = a_d.attr_list.get('2')
+        if t1_r is not None and t2_r is not None:
+            result = _eval_and_conjunction(a_d, eng)
+            if result is None:
+                return False
+            return _unify(eng, b_d, result)
 
     # Handle disjunction on RHS: A = {b1;b2;...} → try A=b1, choice for rest
     if b_d.type is not None and b_d.type is eng.wl.disjunction:
