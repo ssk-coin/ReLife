@@ -2285,6 +2285,73 @@ def _eval_glb_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
     return result
 
 
+def _apply_and_conjunction_to_var(conj_t: 'PsiTerm', target: 'PsiTerm', eng) -> bool:
+    """Unify target with (sort1 & sort2), creating choice points for multiple GLBs.
+
+    Unlike calling _eval_and_conjunction + _unify(target, result), this
+    function creates choice points that directly bind *target* (not an
+    internal fresh variable), so that backtracking correctly yields each
+    alternative GLB bound to the original target variable.
+
+    Falls back to _eval_and_conjunction for disjunction/user-function cases.
+    """
+    from wild_life.unification import compute_all_glbs as _all_glbs
+    wl = eng.wl
+
+    t1_r = conj_t.attr_list.get('1')
+    t2_r = conj_t.attr_list.get('2')
+    if t1_r is None or t2_r is None:
+        return False
+
+    t1 = t1_r.deref()
+    t2 = t2_r.deref()
+
+    # Resolve nested conjunctions on each side
+    if t1.type is not None and t1.type is wl.and_sym:
+        t1 = _eval_and_conjunction(t1, eng)
+        if t1 is None:
+            return False
+        t1 = t1.deref()
+    if t2.type is not None and t2.type is wl.and_sym:
+        t2 = _eval_and_conjunction(t2, eng)
+        if t2 is None:
+            return False
+        t2 = t2.deref()
+
+    # For disjunction cases or user-function sides, fall back to old approach
+    t1_is_disj = t1.type is not None and (t1.type is wl.disjunction or t1.type is wl.disj_nil)
+    t2_is_disj = t2.type is not None and (t2.type is wl.disjunction or t2.type is wl.disj_nil)
+    if t1_is_disj or t2_is_disj or _is_user_function(t1) or _is_user_function(t2):
+        result = _eval_and_conjunction(conj_t, eng)
+        if result is None:
+            return False
+        return _unify(eng, target, result)
+
+    # Both sides are concrete sorts with no concrete value: use GLB enumeration
+    d1 = t1.type
+    d2 = t2.type
+    if d1 is None or d2 is None or t1.value is not None or t2.value is not None:
+        # Has a concrete value (e.g. a number or string) or no type def:
+        # use the old approach which handles glb(1, int) etc.
+        result = _eval_and_conjunction(conj_t, eng)
+        if result is None:
+            return False
+        return _unify(eng, target, result)
+
+    glbs = _all_glbs(d1, d2)
+    if not glbs:
+        return False
+
+    # Push choice points for alternatives (last to first so first fires next)
+    for alt_def in reversed(glbs[1:]):
+        alt_psi = PsiTerm(type_def=alt_def)
+        eng.push_choice_point(GoalType.UNIFY, target, alt_psi, None)
+
+    # Unify target with first GLB
+    first_psi = PsiTerm(type_def=glbs[0])
+    return _unify(eng, target, first_psi)
+
+
 def _apply_glb_to_var(t: 'PsiTerm', target: 'PsiTerm', eng) -> bool:
     """Unify target with glb(X,Y), creating choice points when multiple GLBs exist.
 
@@ -2917,27 +2984,22 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
             return _unify(eng, b_d, result_list)
 
     # Handle conjunction (& / psi-term meet): A = t1 & t2
-    # Route through _eval_and_conjunction which:
-    #  - evaluates user functions and cond on each side
-    #  - distributes & over disjunction elements (filtering semantics)
-    #  - falls back to direct psi-term merge for non-disjunction cases
+    # Use _apply_and_conjunction_to_var which creates choice points that bind
+    # the TARGET variable (a_d/b_d) directly — unlike the old approach of
+    # computing the result in a local fresh variable and then unifying, which
+    # caused choice points to bind the local fresh var rather than the target,
+    # so backtracking would leave the target unbound.
     if b_d.type is not None and b_d.type is eng.wl.and_sym:
         t1_r = b_d.attr_list.get('1')
         t2_r = b_d.attr_list.get('2')
         if t1_r is not None and t2_r is not None:
-            result = _eval_and_conjunction(b_d, eng)
-            if result is None:
-                return False
-            return _unify(eng, a_d, result)
+            return _apply_and_conjunction_to_var(b_d, a_d, eng)
 
     if a_d.type is not None and a_d.type is eng.wl.and_sym:
         t1_r = a_d.attr_list.get('1')
         t2_r = a_d.attr_list.get('2')
         if t1_r is not None and t2_r is not None:
-            result = _eval_and_conjunction(a_d, eng)
-            if result is None:
-                return False
-            return _unify(eng, b_d, result)
+            return _apply_and_conjunction_to_var(a_d, b_d, eng)
 
     # Handle disjunction on RHS: A = {b1;b2;...} → try A=b1, choice for rest
     if b_d.type is not None and b_d.type is eng.wl.disjunction:
