@@ -352,6 +352,32 @@ class Unifier:
                 self.bind(u, v)
                 self._wakeup_resid(u, v)
             else:
+                # If v is a disjunction psi-term, expand into UNIFY choice points.
+                # These choice points are created AFTER the cut_barrier (during head
+                # unification), so '!' inside the clause body will correctly cut them.
+                # Example: q(A:{1;2;3}) :- !, write(A). with q(X)?
+                #   → unify(X, {1;2;3}_copy) here; expand to X=1 (default) + CPs for 2,3
+                #
+                # IMPORTANT: choice points and initial binding are placed on v (the
+                # disjunction object itself), NOT on u.  The clause body references the
+                # SAME psi-term as the head attribute, so binding v → elem[0] makes all
+                # body references deref to elem[0].  u is then bound to v so that the
+                # top-level query variable also dereferences correctly.
+                if not v_is_var and v.type is WL.disjunction and self.engine is not None:
+                    from wild_life.built_ins import _collect_disjunction as _cdisj
+                    _elems = _cdisj(v, self.engine)
+                    if not _elems:
+                        return False
+                    for _alt in reversed(_elems[1:]):
+                        # Push UNIFY choice point on v (disjunction) so backtracking
+                        # re-binds v → next alternative (body refs also update).
+                        self.engine.push_choice_point(GoalType.UNIFY, v, _alt, None)
+                    # Bind v (the disjunction) to the first element
+                    self.bind(v, _elems[0])
+                    # Bind u (X) to v so u dereferences through v to elem[0]
+                    self.bind(u, v)
+                    self._wakeup_resid(u, v)
+                    return True
                 self.bind(u, v)
                 self._wakeup_resid(u, v)
             return True
@@ -393,6 +419,20 @@ class Unifier:
             if v_is_sort_var:
                 if not self._unify_types(v, u):
                     return False
+            # If u is a disjunction psi-term, expand into UNIFY choice points.
+            # Same logic as in the u_is_var+else branch above: bind u (the disjunction)
+            # to elem[0] and bind v to u, so body refs deref correctly.
+            if u.type is WL.disjunction and self.engine is not None:
+                from wild_life.built_ins import _collect_disjunction as _cdisj
+                _elems = _cdisj(u, self.engine)
+                if not _elems:
+                    return False
+                for _alt in reversed(_elems[1:]):
+                    self.engine.push_choice_point(GoalType.UNIFY, u, _alt, None)
+                self.bind(u, _elems[0])
+                self.bind(v, u)
+                self._wakeup_resid(v, u)
+                return True
             self.bind(v, u)
             self._wakeup_resid(v, u)
             return True

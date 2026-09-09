@@ -72,8 +72,19 @@ def _expand_head_disj(head: PsiTerm, wl, depth: int = 0) -> list:
     combos = [{}]
     has_disj = False
     for key in attr_keys:
-        val_d = head_d.attr_list[key].deref()
-        alts = _expand_head_disj(val_d, wl, depth + 1)
+        attr_val = head_d.attr_list[key]
+        val_d = attr_val.deref()
+        # Only expand if the attribute IS the disjunction directly (attr_val is val_d),
+        # not when deref'd THROUGH a variable wrapper (attr_val is not val_d).
+        # A variable wrapper (type=Def('variable')) with coref pointing to a disjunction
+        # represents a SORT-CONSTRAINED FORMAL PARAMETER, e.g. A:{1;2;3} in a clause head.
+        # Expanding it at load time would lose the shared reference between head and body;
+        # the disjunction must instead be expanded at RUNTIME during head unification.
+        if attr_val is not val_d:
+            # Dereffed through a variable: keep the attribute as-is (no expansion).
+            alts = [attr_val]
+        else:
+            alts = _expand_head_disj(val_d, wl, depth + 1)
         if len(alts) > 1:
             has_disj = True
         new_combos = []
@@ -739,6 +750,28 @@ class Engine:
         if self.trace:
             sym = defn.keyword.symbol if defn and defn.keyword else '?'
             print(f"[trace] prove {sym}", file=sys.stderr)
+
+        # ── DISJUNCTION EXPANSION IN ACTUAL ARGUMENTS ────────────────────────
+        # When any ACTUAL argument of thegoal is a disjunction (e.g. p({1;2;3})?),
+        # expand into multiple PROVE alternatives BEFORE setting the cut barrier.
+        # This ensures that '!' inside the clause body only cuts the clause's own
+        # alternatives, NOT the disjunction alternatives from the call site.
+        #
+        # Example: p({1;2;3})? with  p(A) :- !, write(A).
+        #   → PROVE(p(3)) and PROVE(p(2)) are pushed here (before cut_barrier),
+        #     then thegoal = p(1).  '!' inside p cuts its own choices, NOT p(2)/p(3).
+        #
+        # Contrast: q(X)? with q(A:{1;2;3}) :- !, write(A).
+        #   → X is unbound (not a disjunction at the call site), so NO expansion here.
+        #     The disjunction comes from the clause head; those choice points are
+        #     created during head unification (after cut_barrier) → '!' DOES cut them.
+        _goal_alts = _expand_head_disj(thegoal, wl)
+        if len(_goal_alts) > 1:
+            for _alt in reversed(_goal_alts[1:]):
+                self.push_choice_point(GoalType.PROVE, _alt, _DEFRULES, None)
+            thegoal = _goal_alts[0]
+        elif len(_goal_alts) == 0:
+            return False  # empty disjunction in argument → fail
 
         # Multiple clauses → set up choice point for first, then proceed.
         # Record cut_barrier BEFORE pushing the multi-clause choice point so
