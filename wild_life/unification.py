@@ -380,6 +380,12 @@ class Unifier:
                     return True
                 self.bind(u, v)
                 self._wakeup_resid(u, v)
+                # Sort narrowing: when a plain variable is bound to a term with
+                # attributes, check if the term's sort can be narrowed based on
+                # :: Sort(attrs) prototype declarations (e.g. @(nose=>pretty) → cleopatra).
+                _v_canon = v.deref()
+                if _v_canon.attr_list and _v_canon.type is not None and self.engine is not None:
+                    self._try_sort_narrowing(_v_canon)
             return True
 
         if v_is_var:
@@ -435,6 +441,10 @@ class Unifier:
                 return True
             self.bind(v, u)
             self._wakeup_resid(v, u)
+            # Sort narrowing for terms with attributes
+            _u_canon = u.deref()
+            if _u_canon.attr_list and _u_canon.type is not None and self.engine is not None:
+                self._try_sort_narrowing(_u_canon)
             return True
 
         # Arithmetic evaluation: if one term is a concrete number and the other
@@ -471,6 +481,13 @@ class Unifier:
         # 特性の単一化
         if not self._unify_attrs(u, v):
             return False
+
+        # ソート絞り込み: :: Sort(attrs) プロトタイプに基づいて、より特定のソートに絞り込む
+        # cleopatra(nose=>pretty, occupation=>queen) の prototype があり、
+        # u が person(nose=>pretty) になったとき、 u を cleopatra に絞り込む
+        u_canon = u.deref()
+        if u_canon.type is not None and u_canon.attr_list and self.engine is not None:
+            self._try_sort_narrowing(u_canon)
 
         # After successful structural unification, merge the two psi-terms by
         # binding v → u (via coref).  This preserves the sharing relationship
@@ -611,6 +628,132 @@ class Unifier:
                 self.set_attr(u, key, v_val)
 
         return True
+
+    def _try_sort_narrowing(self, u: PsiTerm) -> bool:
+        """ソートプロトタイプに基づいて u のソートを絞り込む試み。
+
+        WL.proto_sorts に登録されているソートの中から、u の現在のソートのサブタイプで
+        かつ u の属性がプロトタイプと互換なソートを探す。
+        例: :: cleopatra(nose => pretty, occupation => queen). の後、
+            u が @(nose => pretty) になると u を cleopatra に絞り込む。
+
+        Note: WL.top.children には必ずしも全ユーザー定義ソートが含まれないため、
+        BFS ではなくグローバルレジストリ WL.proto_sorts を使って検索する。
+        """
+        sort_def = u.type
+        if sort_def is None:
+            return False
+
+        # Use the global proto_sorts registry (populated by _assert_colon_colon_proto).
+        # WL.top.children may not contain all user sorts (e.g. 'person' is not
+        # explicitly declared as 'person <| @'), so we must search the registry.
+        candidates = []
+        for child in WL.proto_sorts:
+            # The candidate sort must be a subsort of (or equal to) the current sort.
+            # When sort_def is WL.top (@), ALL sorts are implicitly subtypes of @.
+            is_sub = (sort_def is WL.top) or child.is_subtype_of(sort_def)
+            if not is_sub:
+                continue
+            # Skip if the candidate sort is the same as (or a supertype of) the current sort
+            # (we only narrow DOWN, not stay the same or go up)
+            if child is sort_def:
+                continue
+
+            proto = child.prototype_attrs
+            if not proto:
+                continue
+
+            # Check compatibility: for each attr in child's prototype,
+            # if u has that attr, their values must match
+            compatible = True
+            has_evidence = False
+            for key, proto_val in proto.items():
+                if key in u.attr_list:
+                    has_evidence = True
+                    u_val = u.attr_list[key]
+                    u_val_d = u_val.deref()
+                    proto_val_d = proto_val.deref()
+                    # Compare: types and values must agree
+                    if u_val_d.type is not proto_val_d.type:
+                        compatible = False
+                        break
+                    if (u_val_d.value is not None and proto_val_d.value is not None
+                            and u_val_d.value != proto_val_d.value):
+                        compatible = False
+                        break
+            if compatible and has_evidence:
+                candidates.append(child)
+
+        if len(candidates) != 1:
+            # 0 candidates: no narrowing; >1 candidates: ambiguous, skip
+            return False
+
+        child = candidates[0]
+        # Narrow u's sort to child
+        self.bind_type(u, child)
+
+        # Merge prototype attrs into u (add missing attrs from prototype)
+        proto = child.prototype_attrs
+        for key, proto_val in proto.items():
+            if key not in u.attr_list:
+                self.set_attr(u, key, proto_val.deref())
+
+        # Fire global delay rules for the new sort
+        if self.engine is not None:
+            self._fire_delay_rules(u, child)
+
+        return True
+
+    def _fire_delay_rules(self, u: PsiTerm, new_sort) -> None:
+        """グローバル遅延ルール (:: Pattern | Goal) を起動する。
+
+        u のソートが new_sort に絞り込まれたとき、パターンのソートが
+        new_sort のスーパーソートである遅延ルールを起動する。
+        """
+        if self.engine is None:
+            return
+        wl = WL
+        for rule_inner in wl.delay_rules:
+            # rule_inner is the | (Pattern | Goal) psiterm
+            pattern_side = rule_inner.attr_list.get('1')
+            goal_side = rule_inner.attr_list.get('2')
+            if pattern_side is None or goal_side is None:
+                continue
+            pattern_d = pattern_side.deref()
+            # Pattern sort must be a supersort of (or equal to) new_sort
+            pat_sort = pattern_d.type
+            if pat_sort is None or pat_sort is wl.top:
+                pat_sort_ok = True
+            else:
+                pat_sort_ok = new_sort.is_subtype_of(pat_sort)
+            if not pat_sort_ok:
+                continue
+
+            # Build a copy of pattern AND goal using the SAME shared_map
+            # so that variables shared between pattern and goal stay shared.
+            # IMPORTANT: copy pattern_side (the variable wrapper), not pattern_d,
+            # so that the id of the wrapper is in shared_map for the goal copy to
+            # find when it encounters the same wrapper object.
+            shared_map = {}
+            pattern_copy = copy_term(pattern_side, shared_map)
+            goal_copy = copy_term(goal_side, shared_map)
+
+            # Deref to get the actual sort-constrained term (past any variable wrapper)
+            pattern_d_copy = pattern_copy.deref()
+
+            # Unify pattern_d_copy with u (e.g. person(best_friend=>Q) with cleopatra_pt)
+            # This binds u's attrs from the pattern (adds best_friend=Q_fresh)
+            unify_ok = self.unify(pattern_d_copy, u)
+            if not unify_ok:
+                continue
+
+            # Prove the goal (e.g. get_along(P, Q)) by pushing it onto the goal stack.
+            # The engine will process it in the next iteration, after the current
+            # unification step completes.
+            from wild_life.data_structures import GoalType as _GT
+            from wild_life.inference import _DEFRULES as _defrules_sentinel
+            goal_d_copy = goal_copy.deref()
+            self.engine.push_goal(_GT.PROVE, goal_d_copy, _defrules_sentinel, None)
 
     def _wakeup_resid(self, var: PsiTerm, val: PsiTerm):
         """残留ゴールを覚醒させる

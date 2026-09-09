@@ -147,6 +147,15 @@ class WildLifeRuntime:
         self.null_psi_term: Optional[PsiTerm] = None
         self.error_psi_term: Optional[PsiTerm] = None
 
+        # ==================== グローバル遅延ルール ====================
+        # :: Pattern | Goal. の形式で登録されるグローバル遅延ルール
+        # 各エントリは (pattern_sort: Definition, rule_psiterm: PsiTerm)
+        # pattern_sort: マッチするソート (intなど)
+        # rule_psiterm: ルール全体 (パターンと目標を含む)
+        self.delay_rules: list = []  # list of PsiTerm (:: | (Pattern, Goal))
+        # :: Sort(attrs). で登録されるソートのレジストリ (prototype_attrs を持つ Definition)
+        self.proto_sorts: list = []  # list of Definition that have prototype_attrs
+
         # ==================== 組み込み関数テーブル ====================
         self.builtin_table: Dict[Definition, Callable] = {}
 

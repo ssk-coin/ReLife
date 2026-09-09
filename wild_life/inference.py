@@ -461,9 +461,46 @@ class Engine:
                 self.add_rule(h, b, DefType.FUNCTION)
         elif sym in ('<|', ':='):
             self._assert_type(t)
+        elif sym == '::':
+            # :: Inner — either delay rule (:: Pattern | Goal) or sort prototype (:: Sort(attrs))
+            inner = t.attr_list.get('1')
+            if inner is not None:
+                inner_d = inner.deref()
+                inner_sym = (inner_d.type.keyword.symbol
+                             if inner_d.type and inner_d.type.keyword else '')
+                if inner_sym == '|':
+                    # :: Pattern | Goal — global delay rule
+                    wl.delay_rules.append(inner_d)
+                else:
+                    # :: Sort(attrs) — sort-level prototype attributes
+                    self._assert_colon_colon_proto(inner_d)
         else:
             # Bare fact
             self.add_rule(t, None, DefType.PREDICATE)
+
+    def _assert_colon_colon_proto(self, proto: PsiTerm) -> None:
+        """Handle :: Sort(attrs) — stores sort-level prototype attributes.
+
+        :: cleopatra(nose => pretty, occupation => queen).
+        means: the sort 'cleopatra' has prototype attrs nose=pretty, occupation=queen.
+        Any variable narrowed to sort 'cleopatra' automatically gets these attrs.
+        """
+        proto = proto.deref()
+        if proto.type is None or not proto.attr_list:
+            return
+        sort_def = proto.type
+        # Ensure the sort has a prototype_attrs dict
+        if sort_def.prototype_attrs is None:
+            sort_def.prototype_attrs = {}
+        # Store copies of the prototype attrs (deep copy to avoid shared state)
+        for key, val in proto.attr_list.items():
+            val_d = val.deref()
+            sort_def.prototype_attrs[key] = val_d
+        # Register in the global proto_sorts list so _try_sort_narrowing can find it
+        # even when the sort is not reachable via WL.top.children (e.g. 'person' is
+        # not explicitly declared as 'person <| @').
+        if sort_def not in self.wl.proto_sorts:
+            self.wl.proto_sorts.append(sort_def)
 
     def _assert_type(self, t: PsiTerm) -> None:
         """Handle type declarations (<| or :=).
