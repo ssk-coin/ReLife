@@ -907,7 +907,13 @@ class WildLifeRuntime:
         if module is None:
             module = self.bi_module
         defn = self.update_symbol(module, name)
-        defn.type = def_type
+        # Don't overwrite an established TYPE definition with PREDICATE.
+        # Built-in sorts like 'int' and 'real' are TYPE definitions that also
+        # have built-in predicates (e.g. int(X,N) coerces X to int N).
+        # Overwriting TYPE→PREDICATE breaks the parser's sort-constrained-variable
+        # detection (N:int annotation) — see parser_.py ':' handling.
+        if not (defn.type == DefType.TYPE and def_type == DefType.PREDICATE):
+            defn.type = def_type
         defn._builtin_func = func
         defn.evaluate_args = True
         self.builtin_table[defn] = func
