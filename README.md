@@ -2,7 +2,8 @@
 
 Python rewrite of the **Wild Life 1.02** interpreter — an implementation of the
 **LIFE** (Logic, Inheritance, Functions, Equations) programming language,
-originally developed at DEC Paris Research Laboratory (1991–1995).
+originally developed at DEC Paris Research Laboratory (1991–1995). 
+This porting has been done for research purpose.
 
 ## About LIFE
 
