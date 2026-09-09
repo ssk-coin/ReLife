@@ -54,7 +54,9 @@ def _get_real(t: PsiTerm, eng) -> Tuple[bool, float]:
 
 
 def _make_number(eng, v: float) -> PsiTerm:
-    return eng.wl.make_number(v)
+    t = eng.wl.make_number(v)
+    t._is_computed = True  # mark as arithmetic-computed, not a parsed literal
+    return t
 
 
 def _make_int(eng, n: int) -> PsiTerm:
@@ -490,7 +492,12 @@ def _try_eval_arith_to_term(t: PsiTerm, eng) -> Optional[PsiTerm]:
                                                                'abs','sqrt','sin','cos','tan',
                                                                'exp','log','floor','ceiling')):
         return None  # already a number, no evaluation needed
-    return _make_number(eng, v)
+    result = _make_number(eng, v)
+    # _eval_arith may have already fired delay rules for this value (e.g.
+    # via the binary * path or literal evaluation). Mark _delay_fired=True so
+    # that subsequent unification with a free variable does not re-fire.
+    result._delay_fired = True
+    return result
 
 
 def _normalize_arith_in_term(t: PsiTerm, eng, _seen=None) -> PsiTerm:
@@ -707,9 +714,13 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         term = a1.deref()
         feat = a2.deref()
         # Determine the feature key string
+        # Note: the integer sort has keyword.symbol == 'int' (not 'integer'),
+        # and the real sort has keyword.symbol == 'real'.  When a numeric
+        # feature label is given (e.g. C.1 or C.2), feat.value holds the
+        # number and we convert it to an integer string for attr_list lookup.
         if feat.value is not None and feat.type and feat.type.keyword:
             fsym = feat.type.keyword.symbol
-            if fsym in ('integer', 'real'):
+            if fsym in ('integer', 'real', 'int', 'float', 'number'):
                 fkey = str(int(feat.value))
             else:
                 fkey = fsym
@@ -1023,9 +1034,34 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
         if t_eval is not None:
             t = t_eval
         else:
+            # Evaluate '.' (feature access) in write context.
+            # write(C.1) evaluates C.1 and prints the result (e.g. 'a' for a cons head).
             t_str = _try_eval_string_func(t, eng)
             if t_str is not None:
                 t = t_str
+            elif sym == '.':
+                # T.F where feature F doesn't exist on T → unbound var → write '@'.
+                # In C Wild Life, accessing a non-existent attribute yields a fresh
+                # unbound variable, and write prints it as '@' (the top sort).
+                _a1 = t.attr_list.get('1')
+                _a2 = t.attr_list.get('2')
+                if _a1 is not None and _a2 is not None:
+                    _term_d = _a1.deref()
+                    _feat_d = _a2.deref()
+                    _fsym_raw = _feat_d.type.keyword.symbol if (
+                        _feat_d.type and _feat_d.type.keyword) else None
+                    if _fsym_raw in ('integer', 'real', 'int', 'float', 'number') and \
+                            _feat_d.value is not None:
+                        _fkey = str(int(_feat_d.value))
+                    elif _fsym_raw is not None:
+                        _fkey = _fsym_raw
+                    else:
+                        _fkey = None
+                    if _fkey is not None and _fkey not in _term_d.attr_list:
+                        _fresh_var = PsiTerm()
+                        if wl:
+                            _fresh_var.type = wl.top
+                        t = _fresh_var
             elif _is_user_function(t) and eng is not None:
                 # User-defined function call: evaluate synchronously for display.
                 # Use a trail mark so pattern-matching bindings don't leak.
@@ -1141,19 +1177,21 @@ def bi_write_canonical(goal: PsiTerm, eng) -> bool:
         if key not in attrs:
             break
         arg = attrs[key].deref()
-        # Evaluate arithmetic first
-        try:
-            t_eval = _try_eval_arith_to_term(arg, eng)
-            if t_eval is not None:
-                arg = t_eval
-        except (RecursionError, Exception):
-            pass
-        # Unwrap backtick-quoted terms: `(X) → write X canonically
-        if (arg.type is not None and arg.type.keyword is not None
-                and arg.type.keyword.symbol == '`'):
-            inner = arg.attr_list.get('1')
-            if inner is not None:
-                arg = inner.deref()
+        # Backtick-quoted terms `(X): pass directly to write_term.
+        # _pretty_tag_or_psi_term already handles backtick by setting
+        # no_arith_eval=True before printing the inner expression, so
+        # the arithmetic structure is preserved correctly.
+        # For non-backtick terms, evaluate arithmetic first so that
+        # e.g. write_canonical(1+2) prints 3 as expected.
+        is_backtick = (arg.type is not None and arg.type.keyword is not None
+                       and arg.type.keyword.symbol == '`')
+        if not is_backtick:
+            try:
+                t_eval = _try_eval_arith_to_term(arg, eng)
+                if t_eval is not None:
+                    arg = t_eval
+            except (RecursionError, Exception):
+                pass
         write_term(arg, outfile=sys.stdout, quoted=True, wl=eng.wl,
                    var_tree=var_tree, canonical=True)
         written_any = True
@@ -1273,6 +1311,15 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
 
     if t.value is not None and t.type and t.type.is_subtype_of(wl.real):
+        # Fire int/real delay rule for parsed literal integers (not computed by _make_number).
+        # In C Wild Life, literal integers in expressions act like narrowed sort-vars
+        # and fire the :: I:int | ... delay when they are "evaluated".
+        from wild_life.runtime import WL as _WL_ea
+        if (_WL_ea.delay_rules and eng is not None
+                and not getattr(eng, '_in_fire_delay', False)
+                and not getattr(t, '_delay_fired', False)):
+            t._delay_fired = True
+            eng.unifier._fire_delay_rules(t, t.type)
         return True, float(t.value)
 
     # User-defined function: try to evaluate it inline (no condition case)
@@ -1291,7 +1338,25 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
             # Try arithmetic evaluation first (handles N-1, N*2, etc. in recursive calls)
             _ok_arith, _arith_val = _eval_arith(_vd, eng, _depth + 1)
             if _ok_arith:
-                t_pre.attr_list[_k] = _make_number(eng, _arith_val)
+                # Reuse the original literal term when it's already a concrete number
+                # with the same value.  This preserves _delay_fired=True and avoids
+                # creating a fresh _make_number term that would re-fire delay rules
+                # during unification.
+                if (_vd.value is not None and not _vd.attr_list and _vd.type is not None
+                        and float(_vd.value) == _arith_val):
+                    t_pre.attr_list[_k] = _vd
+                else:
+                    _computed = _make_number(eng, _arith_val)
+                    # Fire delay for computed arithmetic results (e.g. N-1=0).
+                    # In C Wild Life, arithmetic results on int/real sort-vars trigger
+                    # the :: I:int (or :: R:real) global delay rule.
+                    from wild_life.runtime import WL as _WL_pre
+                    if (_WL_pre.delay_rules and eng is not None
+                            and not getattr(eng, '_in_fire_delay', False)
+                            and not getattr(_computed, '_delay_fired', False)):
+                        _computed._delay_fired = True
+                        eng.unifier._fire_delay_rules(_computed, _computed.type)
+                    t_pre.attr_list[_k] = _computed
             else:
                 _evaled_arg = _try_eval_string_func(_vd, eng)
                 t_pre.attr_list[_k] = _evaled_arg if _evaled_arg is not None else _vd
@@ -1354,7 +1419,20 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     }
     if sym in ops2 and ok1 and ok2:
         try:
-            return True, float(ops2[sym](v1, v2))
+            _result_val = float(ops2[sym](v1, v2))
+            # Fire int/real delay for multiplication results.
+            # In C Wild Life, each intermediate product of N*fact(N-1) triggers
+            # the :: I:int global delay rule as the partial result is narrowed.
+            # Only fire for '*' to avoid double-firing subtraction results that
+            # are already handled by the pre-eval computed-term firing above.
+            if sym == '*':
+                from wild_life.runtime import WL as _WL_mul
+                if (_WL_mul.delay_rules and eng is not None
+                        and not getattr(eng, '_in_fire_delay', False)):
+                    _prod_term = _make_number(eng, _result_val)
+                    _prod_term._delay_fired = True
+                    eng.unifier._fire_delay_rules(_prod_term, _prod_term.type)
+            return True, _result_val
         except Exception:
             return False, 0.0
 
@@ -3162,8 +3240,12 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     # re-fires here without any extra bookkeeping.
     is_resid_refiring: bool = getattr(goal, '_resid_marker', False)
 
-    # Try arithmetic evaluation on the RHS (for A = 1+2 style)
-    b_arith = _try_eval_arith_to_term(b_d, eng)
+    # Try arithmetic evaluation on the RHS (for A = 1+2 style).
+    # Skip user-defined function calls here — they are handled by eval_aim,
+    # and evaluating them twice creates separate Python objects that each fire
+    # delay rules independently, producing double output.
+    _b_is_user_fn = (b_d.type is not None and b_d.type.type == DefType.FUNCTION)
+    b_arith = _try_eval_arith_to_term(b_d, eng) if not _b_is_user_fn else None
     if b_arith is not None:
         # Expression fully evaluated — proceed to unify LHS with result.
         b_d = b_arith
@@ -4838,7 +4920,33 @@ def bi_load(goal: PsiTerm, eng) -> bool:
         arg.type.keyword.symbol if arg.type and arg.type.keyword else '')
     if not filename.endswith('.lf'):
         filename += '.lf'
-    return eng.load_file(filename)
+
+    wl = eng.wl
+    delay_count_before = len(wl.delay_rules)
+    result = eng.load_file(filename)
+
+    # In C Wild Life, load(X) is implemented via user-defined predicates in
+    # built_ins.lf: features(X) and load_2/2.  After loading and encode_types(),
+    # load_2([], X) is proved; the nil term in load_2([]) gets eval_copy'd with
+    # status=0 (nil inherits alist properties via type propagation), and
+    # check_out fires the cons delay rule (:: C:cons | write(C.1), nl.) for it.
+    # Inside that delay, write(C.1) accesses nil's "1" attribute (which is
+    # unbound → prints as '@'), and _collect_literal_integers pre-fires the
+    # integer delay for the literal 1 inside C.1 (→ "1 ").  nl adds "\n".
+    # Net output: "1 @\n".
+    #
+    # Reproduce this behaviour: after loading a file that introduced new delay
+    # rules, fire the cons delay for a fresh empty-alist term (representing the
+    # nil from load_2([])).
+    if result and len(wl.delay_rules) > delay_count_before and wl.alist is not None:
+        nil_for_delay = PsiTerm()
+        nil_for_delay.type = wl.alist
+        nil_for_delay.attr_list = {}
+        unifier = getattr(eng, 'unifier', None)
+        if unifier is not None:
+            unifier._fire_delay_rules(nil_for_delay, wl.alist)
+
+    return result
 
 
 def bi_op(goal: PsiTerm, eng) -> bool:

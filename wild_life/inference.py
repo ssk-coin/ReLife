@@ -1015,9 +1015,8 @@ class Engine:
         # Fix: walk body and bind every free SORT_VAR of the same sort to funct.
         from wild_life.data_structures import SORT_VAR as _SORT_VAR_FLAG
         _head_orig_d = head_orig  # head_orig is the stored (un-copied) head
-        if ((_head_orig_d.flags & _SORT_VAR_FLAG) and
-                _head_orig_d.type is not None and
-                not _head_orig_d.attr_list):
+        _will_bfsv = ((_head_orig_d.flags & _SORT_VAR_FLAG) and _head_orig_d.type is not None and not _head_orig_d.attr_list)
+        if _will_bfsv:
             _sort_type = _head_orig_d.type
             _sv_visited: set = set()
 
@@ -1045,8 +1044,12 @@ class Engine:
         from wild_life.built_ins import _eval_arith, _make_number
         arith_ok, arith_val = _eval_arith(body_d2, self)
         if arith_ok:
-            # Body evaluated to a number — unify result with it immediately
+            # Body evaluated to a number — unify result with it immediately.
+            # Mark _delay_fired=True because _eval_arith already fired delay for
+            # the result (via the binary * path or pre-eval computed-term firing).
+            # This prevents a second delay fire during unification with result.
             num_term = _make_number(self, arith_val)
+            num_term._delay_fired = True
             ok2 = self.unifier.unify(result, num_term)
             if not ok2:
                 self.trail.undo_to(mark)
