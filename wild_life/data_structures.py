@@ -177,6 +177,10 @@ class Definition:
         self.init_value: Optional['PsiTerm'] = None    # 初期値
         self._builtin_func: Optional[Callable] = None  # 組み込み関数
 
+        # :: Sort(attrs). で登録されるソートレベルのプロトタイプ属性
+        # key → PsiTerm のdict。ソートの「典型的な」属性値を保存する。
+        self.prototype_attrs: Optional[dict] = None  # {attr_name: PsiTerm}
+
         # 型エンコード (推移閉包による高速な型チェック)
         self._type_code: Optional[set] = None
 

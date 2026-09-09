@@ -72,8 +72,19 @@ def _expand_head_disj(head: PsiTerm, wl, depth: int = 0) -> list:
     combos = [{}]
     has_disj = False
     for key in attr_keys:
-        val_d = head_d.attr_list[key].deref()
-        alts = _expand_head_disj(val_d, wl, depth + 1)
+        attr_val = head_d.attr_list[key]
+        val_d = attr_val.deref()
+        # Only expand if the attribute IS the disjunction directly (attr_val is val_d),
+        # not when deref'd THROUGH a variable wrapper (attr_val is not val_d).
+        # A variable wrapper (type=Def('variable')) with coref pointing to a disjunction
+        # represents a SORT-CONSTRAINED FORMAL PARAMETER, e.g. A:{1;2;3} in a clause head.
+        # Expanding it at load time would lose the shared reference between head and body;
+        # the disjunction must instead be expanded at RUNTIME during head unification.
+        if attr_val is not val_d:
+            # Dereffed through a variable: keep the attribute as-is (no expansion).
+            alts = [attr_val]
+        else:
+            alts = _expand_head_disj(val_d, wl, depth + 1)
         if len(alts) > 1:
             has_disj = True
         new_combos = []
@@ -166,6 +177,19 @@ def _eval_body_to_result(branch: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
     # Nested built-in cond?
     if _is_cond_builtin(branch_d):
         return _eval_cond_functional(branch_d, result, eng)
+
+    # Disjunction branch: evaluate each element (including arithmetic like
+    # 1 + posint_stream_to(N)) via _eval_body_sync, then unify result with
+    # the produced disjunction.  The generic _collect_embedded_func_goals path
+    # below cannot evaluate 1 + {disjunction} because the arithmetic wrapping
+    # the embedded function call is not reduced after the EVAL goal fires.
+    wl = eng.wl
+    if branch_d.type is not None and branch_d.type is wl.disjunction:
+        from wild_life.built_ins import _eval_body_sync
+        evaled = _eval_body_sync(branch_d, eng, 0)
+        if evaled is not None:
+            return eng.unifier.unify(result, evaled)
+        # fall through on sync failure
 
     # Compound with embedded user-function sub-terms
     eval_goals = _collect_embedded_func_goals(branch_d, eng, set())
@@ -437,9 +461,46 @@ class Engine:
                 self.add_rule(h, b, DefType.FUNCTION)
         elif sym in ('<|', ':='):
             self._assert_type(t)
+        elif sym == '::':
+            # :: Inner — either delay rule (:: Pattern | Goal) or sort prototype (:: Sort(attrs))
+            inner = t.attr_list.get('1')
+            if inner is not None:
+                inner_d = inner.deref()
+                inner_sym = (inner_d.type.keyword.symbol
+                             if inner_d.type and inner_d.type.keyword else '')
+                if inner_sym == '|':
+                    # :: Pattern | Goal — global delay rule
+                    wl.delay_rules.append(inner_d)
+                else:
+                    # :: Sort(attrs) — sort-level prototype attributes
+                    self._assert_colon_colon_proto(inner_d)
         else:
             # Bare fact
             self.add_rule(t, None, DefType.PREDICATE)
+
+    def _assert_colon_colon_proto(self, proto: PsiTerm) -> None:
+        """Handle :: Sort(attrs) — stores sort-level prototype attributes.
+
+        :: cleopatra(nose => pretty, occupation => queen).
+        means: the sort 'cleopatra' has prototype attrs nose=pretty, occupation=queen.
+        Any variable narrowed to sort 'cleopatra' automatically gets these attrs.
+        """
+        proto = proto.deref()
+        if proto.type is None or not proto.attr_list:
+            return
+        sort_def = proto.type
+        # Ensure the sort has a prototype_attrs dict
+        if sort_def.prototype_attrs is None:
+            sort_def.prototype_attrs = {}
+        # Store copies of the prototype attrs (deep copy to avoid shared state)
+        for key, val in proto.attr_list.items():
+            val_d = val.deref()
+            sort_def.prototype_attrs[key] = val_d
+        # Register in the global proto_sorts list so _try_sort_narrowing can find it
+        # even when the sort is not reachable via WL.top.children (e.g. 'person' is
+        # not explicitly declared as 'person <| @').
+        if sort_def not in self.wl.proto_sorts:
+            self.wl.proto_sorts.append(sort_def)
 
     def _assert_type(self, t: PsiTerm) -> None:
         """Handle type declarations (<| or :=).
@@ -476,6 +537,37 @@ class Engine:
             if not arg1.type:
                 return
             super_def = arg1.type   # LHS is the super-sort
+
+            # Conditional sort definition:  S := P:T | Condition
+            # The RHS is a such_that(pattern, condition) node.
+            # Store the (pattern, condition) pair as a sort-membership rule on
+            # super_def; also add the pattern's sort as a parent of super_def so
+            # that type-compatibility checks work.
+            if arg2.type is not None and arg2.type is self.wl.such_that:
+                pat  = arg2.attr_list.get('1')  # e.g. P:posint
+                cond = arg2.attr_list.get('2')  # e.g. number_of_factors(P) = one
+                if pat is not None:
+                    _ct2 = copy_term  # copy_term imported at module level
+                    pat_d = pat.deref()
+                    # Add the pattern's sort as a parent of the conditional sort
+                    if pat_d.type is not None and pat_d.type is not super_def:
+                        parent_def = pat_d.type
+                        if parent_def.type == DefType.UNDEF:
+                            parent_def.type = DefType.TYPE
+                        if super_def.type == DefType.UNDEF:
+                            super_def.type = DefType.TYPE
+                        if parent_def not in super_def.parents:
+                            super_def.parents.append(parent_def)
+                        if super_def not in parent_def.children:
+                            parent_def.children.append(super_def)
+                    # Store sort-membership rule: (head_pattern, condition)
+                    rule_entry = (pat, cond)
+                    if super_def.rule is None:
+                        super_def.rule = [rule_entry]
+                    else:
+                        super_def.rule.append(rule_entry)
+                return  # Don't fall through to the generic pairs logic
+
             # Collect all leaf elements from the RHS (may be a disjunction or atom)
             rhs_elems = _collect_disj_elems(arg2, self.wl) if (
                 arg2.type is not None and arg2.type is self.wl.disjunction
@@ -696,6 +788,28 @@ class Engine:
             sym = defn.keyword.symbol if defn and defn.keyword else '?'
             print(f"[trace] prove {sym}", file=sys.stderr)
 
+        # ── DISJUNCTION EXPANSION IN ACTUAL ARGUMENTS ────────────────────────
+        # When any ACTUAL argument of thegoal is a disjunction (e.g. p({1;2;3})?),
+        # expand into multiple PROVE alternatives BEFORE setting the cut barrier.
+        # This ensures that '!' inside the clause body only cuts the clause's own
+        # alternatives, NOT the disjunction alternatives from the call site.
+        #
+        # Example: p({1;2;3})? with  p(A) :- !, write(A).
+        #   → PROVE(p(3)) and PROVE(p(2)) are pushed here (before cut_barrier),
+        #     then thegoal = p(1).  '!' inside p cuts its own choices, NOT p(2)/p(3).
+        #
+        # Contrast: q(X)? with q(A:{1;2;3}) :- !, write(A).
+        #   → X is unbound (not a disjunction at the call site), so NO expansion here.
+        #     The disjunction comes from the clause head; those choice points are
+        #     created during head unification (after cut_barrier) → '!' DOES cut them.
+        _goal_alts = _expand_head_disj(thegoal, wl)
+        if len(_goal_alts) > 1:
+            for _alt in reversed(_goal_alts[1:]):
+                self.push_choice_point(GoalType.PROVE, _alt, _DEFRULES, None)
+            thegoal = _goal_alts[0]
+        elif len(_goal_alts) == 0:
+            return False  # empty disjunction in argument → fail
+
         # Multiple clauses → set up choice point for first, then proceed.
         # Record cut_barrier BEFORE pushing the multi-clause choice point so
         # that '!' inside the clause body only cuts choices that belong to
@@ -813,11 +927,10 @@ class Engine:
             val_part  = body_d.attr_list.get('1')  # return value
             cond_part = body_d.attr_list.get('2')  # condition to prove
             if val_part is not None and cond_part is not None:
-                # Push: unify result with val_part AFTER cond_part is proven
-                self.push_goal(GoalType.UNIFY, val_part, result, None)
-                self.push_goal(GoalType.PROVE, cond_part, _DEFRULES, None)
                 # For functions with input arguments (non-nullary), unify funct
-                # with head to bind the argument variables before the body runs.
+                # with head FIRST to bind the argument variables.  This must
+                # happen before we evaluate functional sub-terms in cond_part
+                # (e.g. children(X) can only be reduced once X is bound to s1).
                 # For nullary function sorts (head is a bare variable with no
                 # attributes — e.g. `ran -> A | cond`), skip this step: linking
                 # the head variable back to funct (which has a function sort)
@@ -831,6 +944,15 @@ class Engine:
                     if not ok:
                         self.trail.undo_to(mark)
                         return False
+                # Now that argument variables are bound, eagerly evaluate any
+                # built-in or user-defined functional sub-terms in cond_part
+                # (e.g. genChildren(children(X), A) → children(X) → [a,b,c,d]).
+                from wild_life.built_ins import _eval_embedded_user_funcs
+                _cond_d = cond_part.deref()
+                _eval_embedded_user_funcs(_cond_d, self, 0, set())
+                # Push: unify result with val_part AFTER cond_part is proven
+                self.push_goal(GoalType.UNIFY, val_part, result, None)
+                self.push_goal(GoalType.PROVE, _cond_d, _DEFRULES, None)
                 return True
 
         # Pre-evaluate any function call arguments in funct.

@@ -86,6 +86,14 @@ _ARITH_OPS_SET = frozenset((
     '+', '-', '*', '/', '//', 'mod', '**', '^',
     'max', 'min', 'abs', 'sqrt', 'sin', 'cos', 'tan',
     'exp', 'log', 'floor', 'ceiling', 'truncate', 'round',
+    # Bitwise operators (also produce numeric results)
+    '/\\', '\\/', 'xor', '>>', '<<',
+    # Bitwise NOT (unary)
+    '\\',
+    # Time functions (0-ary arithmetic; always return a number)
+    'cpu_time', 'real_time',
+    # Global integer counter (0-ary; increments each evaluation)
+    'genint',
 ))
 
 
@@ -108,6 +116,50 @@ def _mark_real_sort(var: 'PsiTerm', wl, eng) -> None:
         if eng is not None:
             eng.trail.trail_psi(var, 'type')
         var.type = wl.real
+    if not (var.flags & SORT_VAR):
+        if eng is not None:
+            eng.trail.trail_psi(var, 'flags')
+        var.flags |= SORT_VAR
+    # Set resid to empty list (not None) so print_term knows: "no pending constraints"
+    # (resid=None means "pure sort annotation, always show ~").
+    if var.resid is None:
+        if eng is not None:
+            eng.trail.trail_psi(var, 'resid')
+        var.resid = []
+
+
+def _mark_bool_sort(var: 'PsiTerm', wl, eng) -> None:
+    """Mark a free variable as constrained to sort bool, with no pending constraints.
+
+    Sets type=boolean and SORT_VAR flag.  Sets resid=[] (empty list, not None) to
+    indicate 'constrained to bool but no pending residuation' — this suppresses
+    the tilde in display (print_term treats resid=None as 'always ~' but resid=[]
+    as 'no pending').
+
+    Used when a boolean constraint was immediately solved (e.g. B and false → false
+    short-circuits B) so the variable is bool-constrained but has no suspended goal.
+
+    Concrete atoms (like false/true) are silently skipped — they are not variables.
+    Atoms have a specific subtype (wl.false, wl.true) without the SORT_VAR flag,
+    which distinguishes them from free variables constrained to sort bool.
+    """
+    from wild_life.data_structures import SORT_VAR
+    var = var.deref()
+    if var.value is not None or var.attr_list:
+        return  # Not a free variable (has a numeric value or children)
+    # Distinguish free variables from concrete atoms:
+    # - Free untyped variable:      type=wl.top or type=None
+    # - Free bool-sort variable:    type=wl.boolean AND SORT_VAR flag set
+    # - Concrete atom (e.g. false): type=wl.false (subtype of bool), NO SORT_VAR
+    # Only process actual free variables.
+    is_free_var = (var.type is wl.top or var.type is None or
+                   (var.type is wl.boolean and bool(var.flags & SORT_VAR)))
+    if not is_free_var:
+        return  # Concrete atom (true/false/other) — leave it unchanged
+    if var.type is wl.top or var.type is None:
+        if eng is not None:
+            eng.trail.trail_psi(var, 'type')
+        var.type = wl.boolean
     if not (var.flags & SORT_VAR):
         if eng is not None:
             eng.trail.trail_psi(var, 'flags')
@@ -180,6 +232,86 @@ def _attach_arith_resid(var: 'PsiTerm', wl, pending_goal, eng=None) -> None:
                 return
         if eng is not None:
             eng.trail.trail_copy(var, 'resid')  # trail: save copy of list
+        var.resid.append(Residuation(goal=pending_goal))
+
+
+def _is_proper_bool_expr(t: 'PsiTerm') -> bool:
+    """Return True if *t* is a well-formed boolean expression.
+
+    Binary operators (and, or, xor) require BOTH positional attributes '1' and '2'.
+    Unary operator (not) requires attribute '1'.
+    Psi-terms that happen to use 'and'/'or' as a functor name but have the wrong
+    arity (e.g. and(B) with only attribute '1') are NOT boolean expressions.
+    """
+    sym = _get_sym(t)
+    if sym in ('and', 'or', 'xor'):
+        return '1' in t.attr_list and '2' in t.attr_list
+    if sym == 'not':
+        return '1' in t.attr_list
+    return False
+
+
+def _collect_bool_free_vars(t: 'PsiTerm', wl, result: list, seen: set) -> None:
+    """Collect unbound variables in a boolean expression (and, or, not, xor).
+
+    Traverses the boolean expression tree; any free variable found is added to
+    *result*.  Stops at ground terms (atoms, concrete values) and at variables
+    that are already bound.
+
+    Only recurses into 'and'/'or' sub-terms that have the correct arity for a
+    boolean expression (both '1' and '2' args present).  A unary 'and(B)' is a
+    psi-term constructor and is treated as a ground compound, not a bool expr.
+    """
+    from wild_life.data_structures import SORT_VAR
+    if t is None:
+        return
+    t = t.deref()
+    tid = id(t)
+    if tid in seen:
+        return
+    seen.add(tid)
+    is_free = not t.attr_list and t.value is None and t.coref is None
+    if is_free and (t.type is wl.top or t.type is None or t.type is wl.boolean
+                    or bool(t.flags & SORT_VAR)):
+        if t not in result:
+            result.append(t)
+        return
+    if t.value is not None:
+        return  # ground numeric/string value
+    # Only recurse into properly-formed boolean operator applications.
+    if _is_proper_bool_expr(t):
+        for val in t.attr_list.values():
+            _collect_bool_free_vars(val, wl, result, seen)
+
+
+def _attach_bool_resid(var: 'PsiTerm', wl, pending_goal, eng=None) -> None:
+    """Constrain *var* to sort bool and attach a pending residuated goal.
+
+    Mirrors _attach_arith_resid but uses wl.boolean instead of wl.real.
+    When *var* is later bound, _wakeup_resid fires *pending_goal*.
+    """
+    from wild_life.data_structures import Residuation, SORT_VAR
+    var = var.deref()
+    if var.value is not None or var.attr_list:
+        return  # not a free variable — skip
+    if var.type is wl.top or var.type is None:
+        if eng is not None:
+            eng.trail.trail_psi(var, 'type')
+        var.type = wl.boolean
+    if not (var.flags & SORT_VAR):
+        if eng is not None:
+            eng.trail.trail_psi(var, 'flags')
+        var.flags |= SORT_VAR
+    if var.resid is None:
+        if eng is not None:
+            eng.trail.trail_psi(var, 'resid')
+        var.resid = [Residuation(goal=pending_goal)]
+    else:
+        for r in var.resid:
+            if r.goal is pending_goal:
+                return
+        if eng is not None:
+            eng.trail.trail_copy(var, 'resid')
         var.resid.append(Residuation(goal=pending_goal))
 
 
@@ -284,6 +416,14 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
             return _make_atom(eng, 'false')
         if s1 == 'true' and s2 == 'true':
             return _make_atom(eng, 'true')
+        # Partial evaluation: one concrete arg
+        if s1 == 'true':
+            return a2   # true and X = X
+        if s2 == 'true':
+            return a1   # X and true = X
+        # Idempotent: X and X = X (same variable by identity)
+        if id(a1.deref()) == id(a2.deref()):
+            return a1
         return None
 
     elif sym == 'or':
@@ -297,6 +437,14 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
             return _make_atom(eng, 'true')
         if s1 == 'false' and s2 == 'false':
             return _make_atom(eng, 'false')
+        # Partial evaluation: one concrete arg
+        if s1 == 'false':
+            return a2   # false or X = X
+        if s2 == 'false':
+            return a1   # X or false = X
+        # Idempotent: X or X = X
+        if id(a1.deref()) == id(a2.deref()):
+            return a1
         return None
 
     elif sym == 'not':
@@ -574,6 +722,30 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             return None
         return val.deref()
 
+    elif sym == 'chr':
+        # chr(N) → character string for ASCII code N (uses N mod 256)
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return None
+        a1d = a1.deref()
+        ok, v = _eval_arith(a1d, eng)
+        if not ok:
+            return None
+        code = int(v) % 256
+        return _make_string(eng, chr(code))
+
+    elif sym == 'int2str':
+        # int2str(N) → string representation of number N
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return None
+        a1d = a1.deref()
+        ok, v = _eval_arith(a1d, eng)
+        if not ok:
+            return None
+        iv = int(v)
+        return _make_string(eng, str(iv) if float(iv) == v else str(v))
+
     return None
 
 
@@ -617,20 +789,127 @@ def _eval_and_conjunction(t: PsiTerm, eng) -> Optional[PsiTerm]:
     t1 = t1_ref.deref()
     t2 = t2_ref.deref()
 
-    # Recursively evaluate nested conjunctions
-    if t1.type is not None and t1.type is wl.and_sym:
-        t1 = _eval_and_conjunction(t1, eng)
-        if t1 is None:
+    def _eval_side(s: PsiTerm) -> Optional[PsiTerm]:
+        """Evaluate one side of & before conjunction: user func, cond, nested &."""
+        s = s.deref()
+        if s.type is not None and s.type is wl.and_sym:
+            return _eval_and_conjunction(s, eng)
+        s = _strip_bq(s)
+        # Evaluate user-defined function calls (e.g. posint_stream_to(5))
+        if _is_user_function(s):
+            _mark = eng.trail.mark()
+            try:
+                ev = _eval_user_func_sync(s, eng, 0)
+                if ev is not None:
+                    ev = copy_term(ev.deref(), {})
+            finally:
+                eng.trail.undo_to(_mark)
+            if ev is not None:
+                return _evaluate_result_for_display(ev, eng, 1)
             return None
-    else:
-        t1 = _strip_bq(t1)
+        # Evaluate built-in cond() functionally
+        if _is_cond_builtin_local(s):
+            ev = _eval_body_sync(s, eng, 0)
+            if ev is not None:
+                return _evaluate_result_for_display(ev.deref(), eng, 1)
+            return None
+        return s
 
-    if t2.type is not None and t2.type is wl.and_sym:
-        t2 = _eval_and_conjunction(t2, eng)
-        if t2 is None:
-            return None
-    else:
-        t2 = _strip_bq(t2)
+    t1 = _eval_side(t1)
+    if t1 is None:
+        return None
+    t2 = _eval_side(t2)
+    if t2 is None:
+        return None
+
+    def _check_sort_member(elem: PsiTerm, sort_t: PsiTerm) -> bool:
+        """Check if elem satisfies the sort sort_t.
+
+        For a conditional sort (sort_t.type has sort-membership rules stored as
+        [(pattern, condition), ...]), unify elem with the pattern and prove the
+        condition.  Falls back to direct unification for simple sorts.
+        """
+        _ct = copy_term  # copy_term imported at module level from wild_life.unification
+        sort_d = sort_t.deref()
+        sort_def = sort_d.type
+        if sort_def is None:
+            return False
+        rules = sort_def.rule
+        if rules and isinstance(rules, list) and rules:
+            # Conditional sort rules: [(pattern, condition), ...]
+            for pat, cond in rules:
+                _mark2 = eng.trail.mark()
+                _vm2: dict = {}
+                pat_copy = _ct(pat, _vm2)
+                cond_copy = _ct(cond, _vm2) if cond is not None else None
+                ok_pat = eng.unifier.unify(elem, pat_copy)
+                if ok_pat:
+                    if cond_copy is None:
+                        eng.trail.undo_to(_mark2)
+                        return True
+                    # Prove condition synchronously
+                    from wild_life.inference import GoalType as _GT2, _DEFRULES as _DR2, _INNER_RUN_BARRIER as _IRB2
+                    _cp2 = eng.choice_stack
+                    _gs2 = eng.goal_stack
+                    eng.goal_stack = None
+                    eng.push_goal(_GT2.PROVE, cond_copy.deref(), _DR2, None)
+                    _old_ok2 = eng.main_loop_ok
+                    _bar2 = _cp2 if _cp2 is not None else _IRB2
+                    ok_cond = eng.run(cs_barrier=_bar2)
+                    eng.main_loop_ok = _old_ok2
+                    eng.choice_stack = _cp2
+                    eng.goal_stack = _gs2
+                    eng.trail.undo_to(_mark2)
+                    if ok_cond:
+                        return True
+                else:
+                    eng.trail.undo_to(_mark2)
+            return False
+        # No conditional rules: plain sort — try direct unification
+        _mark3 = eng.trail.mark()
+        fresh3 = PsiTerm(); fresh3.type = wl.top
+        ok_a = eng.unifier.unify(fresh3, elem)
+        ok_b = ok_a and eng.unifier.unify(fresh3.deref(), sort_d)
+        eng.trail.undo_to(_mark3)
+        return ok_b
+
+    # If one side is a disjunction, distribute & over elements and filter
+    t1_is_disj = t1.type is not None and (t1.type is wl.disjunction or t1.type is wl.disj_nil)
+    t2_is_disj = t2.type is not None and (t2.type is wl.disjunction or t2.type is wl.disj_nil)
+
+    if t1_is_disj or t2_is_disj:
+        # Determine the disjunction and the filter term
+        if t1_is_disj and not t2_is_disj:
+            disj_side, filter_side = t1, t2
+        elif t2_is_disj and not t1_is_disj:
+            disj_side, filter_side = t2, t1
+        else:
+            # Both are disjunctions: cross-product (keep pairs that unify)
+            elems1 = _collect_disjunction(t1, eng)
+            elems2 = _collect_disjunction(t2, eng)
+            surviving: list = []
+            for e1 in elems1:
+                for e2 in elems2:
+                    _mark4 = eng.trail.mark()
+                    fresh4 = PsiTerm(); fresh4.type = wl.top
+                    ok_a = eng.unifier.unify(fresh4, e1.deref())
+                    ok_b = ok_a and eng.unifier.unify(fresh4.deref(), e2.deref())
+                    if ok_b:
+                        surviving.append(copy_term(fresh4.deref(), {}))
+                    eng.trail.undo_to(_mark4)
+            if not surviving:
+                return None
+            return _make_disjunction_psi(surviving, wl)
+
+        elems = _collect_disjunction(disj_side, eng)
+        surviving = []
+        for e in elems:
+            e_d = e.deref()
+            if _check_sort_member(e_d, filter_side):
+                surviving.append(e_d)
+        if not surviving:
+            return None  # empty disjunction = fail (No)
+        return _make_disjunction_psi(surviving, wl)
 
     # Unify t1 and t2 through a fresh variable to find their meet
     fresh = PsiTerm()
@@ -747,6 +1026,33 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
             t_str = _try_eval_string_func(t, eng)
             if t_str is not None:
                 t = t_str
+            elif _is_user_function(t) and eng is not None:
+                # User-defined function call: evaluate synchronously for display.
+                # Use a trail mark so pattern-matching bindings don't leak.
+                _mark = eng.trail.mark()
+                try:
+                    _evaled = _eval_user_func_sync(t, eng, 0)
+                    if _evaled is not None:
+                        # Deep-copy while trail bindings are still active so that
+                        # trail-bound variables (e.g. H' → d) are resolved into
+                        # concrete values before we roll back the trail.
+                        _evaled = copy_term(_evaled.deref(), {})
+                finally:
+                    eng.trail.undo_to(_mark)
+                if _evaled is not None:
+                    # Fully evaluate the result: walk disjunction elements and
+                    # compute any arithmetic ops that involve disjunction operands
+                    # (e.g. {1; 1+posint_stream_to(N-1)} → {1;2;3}).
+                    _evaled = _evaluate_result_for_display(_evaled, eng, 1)
+                    t = _evaled
+            elif _is_cond_builtin_local(t) and eng is not None:
+                # Built-in cond(C, T, E) as a functional expression: evaluate
+                # synchronously so write(cond(3<2,{},f(3))) prints the result,
+                # not the unevaluated cond term.
+                _evaled = _eval_body_sync(t, eng, 0)
+                if _evaled is not None:
+                    _evaled = _evaluate_result_for_display(_evaled.deref(), eng, 1)
+                    t = _evaled
             elif wl and sym in (_arith_binary_ops | _arith_unary_ops):
                 # The top-level operator is arithmetic but evaluation failed.
                 # If any immediate arg is a concrete non-numeric atom, this is
@@ -1112,6 +1418,72 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         # Fall through: cannot evaluate (unbound variable etc.)
         return False, 0.0
 
+    # asc(C) — ASCII code of character C (first character, mod 256)
+    if sym == 'asc':
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return False, 0.0
+        a1d = a1.deref()
+        # First try to evaluate as chr(N) or another string function
+        char_term = _try_eval_string_func(a1d, eng)
+        if char_term is not None:
+            if char_term.value is not None:
+                s = str(char_term.value)
+                if s:
+                    return True, float(ord(s[0]) % 256)
+            return False, 0.0
+        # Try as a direct string value
+        if a1d.value is not None and eng is not None:
+            wl = eng.wl
+            if a1d.type and a1d.type.is_subtype_of(wl.quoted_string):
+                s = str(a1d.value)
+                return (True, float(ord(s[0]) % 256)) if s else (False, 0.0)
+        # Try as atom (symbol name like 'a', 'b', etc.)
+        if a1d.type is not None and a1d.type.keyword is not None:
+            s = a1d.type.keyword.symbol
+            if len(s) == 1:
+                return True, float(ord(s[0]) % 256)
+        return False, 0.0
+
+    # int(X) — integer part of X (truncate towards zero)
+    if sym == 'int':
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return False, 0.0
+        a1d = a1.deref()
+        ok, v = _eval_arith(a1d, eng)
+        if ok:
+            return True, float(int(v))
+        return False, 0.0
+
+    # real(X) / float(X) — convert X to floating-point
+    if sym == 'real':
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return False, 0.0
+        a1d = a1.deref()
+        ok, v = _eval_arith(a1d, eng)
+        if ok:
+            return True, float(v)
+        return False, 0.0
+
+    # cpu_time — 0-ary function returning process CPU time in seconds
+    if sym == 'cpu_time' and not t.attr_list:
+        return True, float(time.process_time())
+
+    # real_time — 0-ary function returning wall-clock time in seconds
+    if sym == 'real_time' and not t.attr_list:
+        return True, float(time.time())
+
+    # genint — 0-ary global integer counter; increments on each evaluation
+    if sym == 'genint' and not t.attr_list:
+        wl = getattr(eng, 'wl', None) if eng is not None else None
+        if wl is not None:
+            current = getattr(wl, '_genint_counter', 0) + 1
+            wl._genint_counter = current
+            return True, float(current)
+        return False, 0.0
+
     return False, 0.0
 
 
@@ -1192,6 +1564,7 @@ def _try_solve_nonlinear(expr, x_var, v_lhs, eng):
     Handles simple inversion patterns:
       a / x = v  →  x = a / v    (denominator is the unknown)
       x ^ n = v  →  x = v^(1/n)  (x to an integer power, v ≥ 0)
+      \(x) = v   →  x = ~v = -(v+1)  (bitwise NOT inversion)
 
     Returns the solution as a float, or None if no pattern matched.
     """
@@ -1202,6 +1575,15 @@ def _try_solve_nonlinear(expr, x_var, v_lhs, eng):
     if sym not in _ARITH_OPS_SET:
         return None
     arg1, arg2 = _get_two_args(expr)
+
+    # ── Unary operators (arg2 is None) ────────────────────────────────────────
+    if sym == '\\' and arg1 is not None and arg2 is None:
+        # \ (bitwise NOT): \(x) = v  →  x = ~v = -(v+1)
+        arg1_d = arg1.deref()
+        if id(arg1_d) == id(x_var):
+            return float(~int(round(v_lhs)))
+        return None
+
     if arg1 is None or arg2 is None:
         return None
 
@@ -1464,6 +1846,108 @@ def bi_arith_ge(goal: PsiTerm, eng) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# String comparison operators:  A$>B  A$>=B  A$<B  A$=<B  A$==B  A$\==B
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_str_val(t: PsiTerm, eng) -> Optional[str]:
+    """Return the string comparison key for a psi-term, or None on failure.
+
+    Wild Life string comparisons ($>, $<, etc.) compare the *print name*
+    of atoms and strings.
+
+    Rules:
+      - Quoted string (backtick literal): return t.value (the raw string)
+      - Atom:                             return t.type.keyword.symbol
+      - Number (int/float):               return str(int(v)) or str(v)
+      - Anything else (variable, compound): return None → predicate fails
+    """
+    if t is None:
+        return None
+    t = t.deref()
+    wl = eng.wl
+    # Quoted string — value holds the raw string content
+    if t.type is not None and t.type.is_subtype_of(wl.quoted_string):
+        return str(t.value) if t.value is not None else ''
+    # Number
+    if t.value is not None:
+        v = t.value
+        if isinstance(v, float) and v == int(v):
+            return str(int(v))
+        return str(v)
+    # Atom: a plain atom has a keyword symbol and no children/value
+    if t.type is not None and t.type.keyword is not None and not t.attr_list:
+        return t.type.keyword.symbol
+    # Anything else (variable, compound term): cannot compare
+    return None
+
+
+def bi_str_gt(goal: PsiTerm, eng) -> bool:
+    """A $> B — string greater-than."""
+    a, b = _get_two_args(goal)
+    if a is None or b is None:
+        return False
+    sa, sb = _get_str_val(a, eng), _get_str_val(b, eng)
+    if sa is None or sb is None:
+        return False
+    return sa > sb
+
+
+def bi_str_ge(goal: PsiTerm, eng) -> bool:
+    """A $>= B — string greater-than-or-equal."""
+    a, b = _get_two_args(goal)
+    if a is None or b is None:
+        return False
+    sa, sb = _get_str_val(a, eng), _get_str_val(b, eng)
+    if sa is None or sb is None:
+        return False
+    return sa >= sb
+
+
+def bi_str_lt(goal: PsiTerm, eng) -> bool:
+    """A $< B — string less-than."""
+    a, b = _get_two_args(goal)
+    if a is None or b is None:
+        return False
+    sa, sb = _get_str_val(a, eng), _get_str_val(b, eng)
+    if sa is None or sb is None:
+        return False
+    return sa < sb
+
+
+def bi_str_le(goal: PsiTerm, eng) -> bool:
+    """A $=< B — string less-than-or-equal."""
+    a, b = _get_two_args(goal)
+    if a is None or b is None:
+        return False
+    sa, sb = _get_str_val(a, eng), _get_str_val(b, eng)
+    if sa is None or sb is None:
+        return False
+    return sa <= sb
+
+
+def bi_str_eq(goal: PsiTerm, eng) -> bool:
+    """A $== B — string equality."""
+    a, b = _get_two_args(goal)
+    if a is None or b is None:
+        return False
+    sa, sb = _get_str_val(a, eng), _get_str_val(b, eng)
+    if sa is None or sb is None:
+        return False
+    return sa == sb
+
+
+def bi_str_ne(goal: PsiTerm, eng) -> bool:
+    r"""A $\== B — string inequality."""
+    a, b = _get_two_args(goal)
+    if a is None or b is None:
+        return False
+    sa, sb = _get_str_val(a, eng), _get_str_val(b, eng)
+    if sa is None or sb is None:
+        return False
+    return sa != sb
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Unification / comparison
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1637,6 +2121,11 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
                 if not ok_h:
                     eng.trail.undo_to(mark)
                     continue
+            # Evaluate built-in / user-defined functional sub-terms inside
+            # the guard goal (e.g. genChildren(children(X), A) → the
+            # children(X) arg must be reduced before the predicate is called).
+            _cond_d = cond_part.deref()
+            _eval_embedded_user_funcs(_cond_d, eng, _depth + 1, set())
             # Run the guard in an inner proof loop.
             # IMPORTANT: clear goal_stack so only the guard is proved;
             # the outer continuation must not run inside this inner loop.
@@ -1644,7 +2133,7 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
             cp_save = eng.choice_stack
             gs_save = eng.goal_stack
             eng.goal_stack = None
-            eng.push_goal(_GoalType.PROVE, cond_part, _DR, None)
+            eng.push_goal(_GoalType.PROVE, _cond_d, _DR, None)
             old_ok = eng.main_loop_ok
             _barrier = cp_save if cp_save is not None else _IRB
             cond_ok = eng.run(cs_barrier=_barrier)
@@ -1661,9 +2150,23 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
                 eng.trail.undo_to(mark)
                 continue
 
+        # Pre-evaluate any user-defined or built-in functional sub-terms in
+        # the input term's arguments before trying to unify with the head.
+        # This mirrors the EVAL goal handler in inference.py (lines ~843-857)
+        # and is necessary so that e.g. app([1], rev([2,3])) can match
+        # app(L, [H|T]) after rev([2,3]) is reduced to [3,2].
+        t_copy_attrs = dict(t.attr_list)
+        for _key in list(t.attr_list.keys()):
+            _attr = t.attr_list[_key].deref()
+            _ev = _try_eval_any_func(_attr, eng)
+            if _ev is not None and _ev is not _attr:
+                t.attr_list[_key] = _ev
+
         mark = eng.trail.mark()
         ok = eng.unifier.unify(t, head)
         if not ok:
+            # Restore original attrs in case we modified them
+            t.attr_list = t_copy_attrs
             eng.trail.undo_to(mark)
             continue
 
@@ -1700,6 +2203,282 @@ def _eval_copy_term_func(t: 'PsiTerm') -> 'PsiTerm':
     """Evaluate copy_term(X) → fresh copy of X."""
     arg = t.attr_list['1'].deref()
     return copy_term(arg)
+
+
+def _is_glb_func(t: 'PsiTerm') -> bool:
+    """Return True if t is glb(X, Y) with exactly 2 arguments (functional use)."""
+    if t is None or t.type is None or t.type.keyword is None:
+        return False
+    return (t.type.keyword.symbol == 'glb' and
+            '1' in t.attr_list and '2' in t.attr_list and '3' not in t.attr_list)
+
+
+def _is_children_func(t: 'PsiTerm') -> bool:
+    """Return True if t is children(X) with exactly 1 argument (functional use)."""
+    if t is None or t.type is None or t.type.keyword is None:
+        return False
+    return (t.type.keyword.symbol == 'children' and
+            '1' in t.attr_list and '2' not in t.attr_list)
+
+
+def _eval_children_func(t: 'PsiTerm', eng) -> 'PsiTerm':
+    """Evaluate children(X) → WL list of direct subsorts of X's sort."""
+    arg = t.attr_list['1'].deref()
+    defn = arg.type
+    wl = eng.wl
+    nil_term = PsiTerm(type_def=wl.nil)
+    if defn is None:
+        return nil_term
+    child_defs = getattr(defn, 'children', [])
+    lst = nil_term
+    for cd in reversed(child_defs):
+        child_term = PsiTerm(type_def=cd)
+        pair = PsiTerm()
+        pair.type = wl.alist
+        pair.attr_list = {'1': child_term, '2': lst}
+        lst = pair
+    return lst
+
+
+def _is_lub_func(t: 'PsiTerm') -> bool:
+    """Return True if t is lub(X, Y) with exactly 2 arguments (functional use)."""
+    if t is None or t.type is None or t.type.keyword is None:
+        return False
+    return (t.type.keyword.symbol == 'lub' and
+            '1' in t.attr_list and '2' in t.attr_list and '3' not in t.attr_list)
+
+
+def _is_chr_func(t: 'PsiTerm') -> bool:
+    """Return True if t is chr(N) with exactly 1 argument (functional use)."""
+    if t is None or t.type is None or t.type.keyword is None:
+        return False
+    return (t.type.keyword.symbol == 'chr' and
+            '1' in t.attr_list and '2' not in t.attr_list)
+
+
+def _is_asc_func(t: 'PsiTerm') -> bool:
+    """Return True if t is asc(C) with exactly 1 argument (functional use)."""
+    if t is None or t.type is None or t.type.keyword is None:
+        return False
+    return (t.type.keyword.symbol == 'asc' and
+            '1' in t.attr_list and '2' not in t.attr_list)
+
+
+def _eval_glb_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
+    """Evaluate glb(X, Y) → GLB (unification) of X and Y, or None on failure.
+
+    Returns only the FIRST GLB; multiple-GLB non-determinism is handled by
+    _apply_glb_to_var (called from bi_unify) which pushes choice points.
+    """
+    t1 = t.attr_list['1'].deref()
+    t2 = t.attr_list['2'].deref()
+    # Compute GLB non-destructively via copy + unify + copy-result
+    c1 = copy_term(t1)
+    c2 = copy_term(t2)
+    mark = eng.trail.mark()
+    ok = eng.unifier.unify(c1, c2)
+    if not ok:
+        eng.trail.undo_to(mark)
+        return None
+    result = copy_term(c1.deref())
+    eng.trail.undo_to(mark)
+    return result
+
+
+def _apply_and_conjunction_to_var(conj_t: 'PsiTerm', target: 'PsiTerm', eng) -> bool:
+    """Unify target with (sort1 & sort2), creating choice points for multiple GLBs.
+
+    Unlike calling _eval_and_conjunction + _unify(target, result), this
+    function creates choice points that directly bind *target* (not an
+    internal fresh variable), so that backtracking correctly yields each
+    alternative GLB bound to the original target variable.
+
+    Falls back to _eval_and_conjunction for disjunction/user-function cases.
+    """
+    from wild_life.unification import compute_all_glbs as _all_glbs
+    wl = eng.wl
+
+    t1_r = conj_t.attr_list.get('1')
+    t2_r = conj_t.attr_list.get('2')
+    if t1_r is None or t2_r is None:
+        return False
+
+    t1 = t1_r.deref()
+    t2 = t2_r.deref()
+
+    # Resolve nested conjunctions on each side
+    if t1.type is not None and t1.type is wl.and_sym:
+        t1 = _eval_and_conjunction(t1, eng)
+        if t1 is None:
+            return False
+        t1 = t1.deref()
+    if t2.type is not None and t2.type is wl.and_sym:
+        t2 = _eval_and_conjunction(t2, eng)
+        if t2 is None:
+            return False
+        t2 = t2.deref()
+
+    # For disjunction cases or user-function sides, fall back to old approach
+    t1_is_disj = t1.type is not None and (t1.type is wl.disjunction or t1.type is wl.disj_nil)
+    t2_is_disj = t2.type is not None and (t2.type is wl.disjunction or t2.type is wl.disj_nil)
+    if t1_is_disj or t2_is_disj or _is_user_function(t1) or _is_user_function(t2):
+        result = _eval_and_conjunction(conj_t, eng)
+        if result is None:
+            return False
+        return _unify(eng, target, result)
+
+    # Both sides are concrete sorts with no concrete value: use GLB enumeration
+    d1 = t1.type
+    d2 = t2.type
+    if d1 is None or d2 is None or t1.value is not None or t2.value is not None:
+        # Has a concrete value (e.g. a number or string) or no type def:
+        # use the old approach which handles glb(1, int) etc.
+        result = _eval_and_conjunction(conj_t, eng)
+        if result is None:
+            return False
+        return _unify(eng, target, result)
+
+    glbs = _all_glbs(d1, d2)
+    if not glbs:
+        return False
+
+    # Push choice points for alternatives (last to first so first fires next)
+    for alt_def in reversed(glbs[1:]):
+        alt_psi = PsiTerm(type_def=alt_def)
+        eng.push_choice_point(GoalType.UNIFY, target, alt_psi, None)
+
+    # Unify target with first GLB
+    first_psi = PsiTerm(type_def=glbs[0])
+    return _unify(eng, target, first_psi)
+
+
+def _apply_glb_to_var(t: 'PsiTerm', target: 'PsiTerm', eng) -> bool:
+    """Unify target with glb(X,Y), creating choice points when multiple GLBs exist.
+
+    When `glb(k,l)` has minimal common subtypes a and b (both are GLBs),
+    this pushes a choice point for b and returns target=a first; backtracking
+    yields target=b.
+
+    When either arg carries a concrete value (integer, float, string), we use
+    the copy+unify approach so that glb(1, int) → 1 (not int).
+    """
+    from wild_life.unification import compute_all_glbs as _all_glbs
+    t1 = t.attr_list['1'].deref()
+    t2 = t.attr_list['2'].deref()
+    d1 = t1.type
+    d2 = t2.type
+
+    # If either arg has a concrete value or no type, use copy+unify approach
+    # (handles glb(1, int) → 1, glb(3.14, real) → 3.14, etc.)
+    if d1 is None or d2 is None or t1.value is not None or t2.value is not None:
+        r = _eval_glb_func(t, eng)
+        return _unify(eng, target, r) if r is not None else False
+
+    glbs = _all_glbs(d1, d2)
+    if not glbs:
+        return False
+
+    # Push choice points for alternatives (last to first so first fires next)
+    from wild_life.data_structures import GoalType as _GT
+    for alt_def in reversed(glbs[1:]):
+        alt_psi = PsiTerm(type_def=alt_def)
+        eng.push_choice_point(_GT.UNIFY, target, alt_psi, None)
+
+    # Unify target with first GLB
+    first_psi = PsiTerm(type_def=glbs[0])
+    return _unify(eng, target, first_psi)
+
+
+def _compute_all_lubs(d1, d2, wl):
+    """Compute all minimal common supertypes (LUBs) of d1 and d2.
+
+    Returns a list of Definition objects. When multiple incomparable minimal
+    common supertypes exist (e.g. k and l both supertype of a and b),
+    all are returned so that lub(a,b) can non-deterministically yield each.
+    """
+    if d1 is d2:
+        return [d1]
+    if d1 is wl.top:
+        return [wl.top]
+    if d2 is wl.top:
+        return [wl.top]
+
+    # Fast paths: subtype relationship
+    if d1.is_subtype_of(d2):
+        return [d2]   # d2 is more general; LUB = d2
+    if d2.is_subtype_of(d1):
+        return [d1]
+
+    # BFS upward from d to collect all ancestors (self included), closest first
+    def _ancestors(start):
+        seen = set()
+        result = []
+        queue = [start]
+        while queue:
+            d = queue.pop(0)
+            if d is None or d in seen:
+                continue
+            seen.add(d)
+            result.append(d)
+            for p in getattr(d, 'parents', []):
+                if p not in seen:
+                    queue.append(p)
+        return result
+
+    anc1 = _ancestors(d1)
+    set1 = set(anc1)
+    anc2 = _ancestors(d2)
+    set2 = set(anc2)
+
+    # Common ancestors (excluding self)
+    common = [a for a in anc1 if a in set2 and a is not d1]
+    # Also include ancestors of d2 that are in set1
+    for a in anc2:
+        if a in set1 and a is not d2 and a not in common:
+            common.append(a)
+
+    if not common:
+        return [wl.top]
+
+    # Keep only minimal common ancestors (those not subsumed by a more specific one)
+    minimal = []
+    for a in common:
+        if not any(b is not a and b.is_subtype_of(a) and b in common for b in common):
+            if a not in minimal:
+                minimal.append(a)
+
+    return minimal if minimal else [wl.top]
+
+
+def _eval_lub_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
+    """Evaluate lub(X, Y) → first LUB; non-determinism handled by _apply_lub_to_var."""
+    lubs = _compute_all_lubs_from_t(t, eng)
+    return PsiTerm(type_def=lubs[0]) if lubs else None
+
+
+def _compute_all_lubs_from_t(t: 'PsiTerm', eng):
+    t1 = t.attr_list['1'].deref()
+    t2 = t.attr_list['2'].deref()
+    d1 = t1.type
+    d2 = t2.type
+    wl = eng.wl
+    if d1 is None or d2 is None:
+        return [wl.top]
+    return _compute_all_lubs(d1, d2, wl)
+
+
+def _apply_lub_to_var(t: 'PsiTerm', target: 'PsiTerm', eng) -> bool:
+    """Unify target with lub(X,Y), creating choice points for multiple LUBs."""
+    from wild_life.data_structures import GoalType as _GT
+    lubs = _compute_all_lubs_from_t(t, eng)
+    if not lubs:
+        return False
+    # Push choice points for alternatives (reversed so first fires next)
+    for alt_def in reversed(lubs[1:]):
+        alt_psi = PsiTerm(type_def=alt_def)
+        eng.push_choice_point(_GT.UNIFY, target, alt_psi, None)
+    first_psi = PsiTerm(type_def=lubs[0])
+    return _unify(eng, target, first_psi)
 
 
 def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
@@ -1757,14 +2536,105 @@ def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
 
         return _eval_body_sync(branch, eng, _depth + 1)
 
+    # Disjunction body {a; b; ...}: evaluate each element recursively.
+    # This handles function bodies like {1; 1+posint_stream_to(N-1)} where
+    # arithmetic ops inside the disjunction need to be fully evaluated.
+    wl = eng.wl
+    if body_d.type is not None and body_d.type is wl.disjunction:
+        elems = _collect_disjunction(body_d, eng)
+        new_elems: list = []
+        for e in elems:
+            ev_r = _eval_body_sync(e.deref(), eng, _depth + 1)
+            ev = (ev_r if ev_r is not None else e).deref()
+            if ev.type is not None and ev.type is wl.disjunction:
+                new_elems.extend(_collect_disjunction(ev, eng))
+            elif ev.type is None or ev.type is not wl.disj_nil:
+                new_elems.append(ev)
+            # disj_nil (empty branch) → drop
+        if not new_elems:
+            nil = PsiTerm(); nil.type = wl.disj_nil; return nil
+        return _make_disjunction_psi(new_elems, wl)
+
+    # Arithmetic op that may have disjunction operands (e.g. 1 + f(N) where
+    # f(N) returns a disjunction): use _eval_arith_psi for distribution.
+    psi_r = _eval_arith_psi(body_d, eng, _depth)
+    if psi_r is not None:
+        return psi_r
+
     # Compound term: evaluate embedded user-function and cond sub-terms in-place
     _eval_embedded_user_funcs(body_d, eng, _depth, set())
     return body_d
 
 
+def _try_eval_any_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
+    """Try to evaluate t as any functional form (user-defined or built-in).
+
+    Returns the evaluated PsiTerm, or None if t is not a functional form
+    (or evaluation fails).  Used to eagerly reduce function sub-terms that
+    appear in predicate-argument position inside function bodies.
+    """
+    if t is None or eng is None:
+        return None
+    td = t.deref()
+    if td.type is None:
+        return None
+
+    # User-defined function
+    if _is_user_function(td):
+        return _eval_user_func_sync(td, eng, 0)
+
+    # Built-in copy_term
+    if _is_copy_term_func(td):
+        return _eval_copy_term_func(td)
+
+    # Built-in cond(C,T,E)
+    if _is_cond_builtin_local(td):
+        return _eval_body_sync(td, eng, 0)
+
+    # children(X) — returns list of direct sub-sorts
+    if _is_children_func(td):
+        return _eval_children_func(td, eng)
+
+    # chr(N) — returns character string for ASCII code N
+    if _is_chr_func(td):
+        return _try_eval_string_func(td, eng)
+
+    # asc(C) — returns ASCII code of character C
+    if _is_asc_func(td):
+        ok, v = _eval_arith(td, eng)
+        return _make_number(eng, v) if ok else None
+
+    # glb(X, Y) — greatest lower bound in sort hierarchy
+    if _is_glb_func(td):
+        return _eval_glb_func(td, eng)
+
+    # lub(X, Y) — least upper bound in sort hierarchy
+    if _is_lub_func(td):
+        return _eval_lub_func(td, eng)
+
+    # General string function (strcon, substr, strlen, int2str, …)
+    r = _try_eval_string_func(td, eng)
+    if r is not None:
+        return r
+
+    # Arithmetic expression (+, -, *, /, abs, sqrt, …)
+    # _eval_arith returns (False, 0.0) quickly for non-arithmetic terms,
+    # so calling it unconditionally is safe.
+    ok, v = _eval_arith(td, eng)
+    if ok:
+        return _make_number(eng, v)
+
+    return None
+
+
 def _eval_embedded_user_funcs(
         t: PsiTerm, eng, _depth: int, visited: set) -> None:
     """Walk t's attribute tree and evaluate any user-function sub-terms.
+
+    Also evaluates built-in functional sub-terms (children, chr, asc,
+    glb, lub, arithmetic, string functions) so that predicate arguments
+    that contain functional calls are fully reduced before the predicate
+    is called.
 
     Modifies t's attr_list in-place (replacing function calls with their
     evaluated results).  t must be a fresh copy (not a stored rule term).
@@ -1777,26 +2647,233 @@ def _eval_embedded_user_funcs(
     visited.add(id(td))
     for key in list(td.attr_list.keys()):
         child = td.attr_list[key].deref()
-        if _is_user_function(child):
-            evaled = _eval_user_func_sync(child, eng, _depth + 1)
-            if evaled is not None and evaled is not child:
-                td.attr_list[key] = evaled
-                _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited)
-            else:
-                _eval_embedded_user_funcs(child, eng, _depth + 1, visited)
-        elif _is_copy_term_func(child):
-            # Evaluate built-in copy_term(X) sub-terms in-place
-            evaled = _eval_copy_term_func(child)
+        evaled = _try_eval_any_func(child, eng)
+        if evaled is not None and evaled is not child:
             td.attr_list[key] = evaled
             _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited)
-        elif _is_cond_builtin_local(child):
-            # Evaluate built-in cond(C, T, E) sub-terms in-place
-            evaled = _eval_body_sync(child, eng, _depth + 1)
-            if evaled is not None and evaled is not child:
-                td.attr_list[key] = evaled
-                _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited)
         elif child.attr_list:
             _eval_embedded_user_funcs(child, eng, _depth + 1, visited)
+
+
+def _make_disjunction_psi(elems: list, wl) -> PsiTerm:
+    """Build {e1;e2;...} from a list of PsiTerms.  Empty list → disj_nil ({})."""
+    tail = PsiTerm()
+    tail.type = wl.disj_nil
+    for e in reversed(elems):
+        node = PsiTerm()
+        node.type = wl.disjunction
+        node.attr_list = {'1': e, '2': tail}
+        tail = node
+    return tail
+
+
+def _eval_arith_psi(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
+    """Evaluate an arithmetic expression that may contain disjunctions.
+
+    Returns a PsiTerm (a concrete number *or* a disjunction of numbers) when
+    evaluation succeeds, or None on failure.
+
+    Binary/unary ops distribute over disjunction operands:
+        1 + {a; b}  →  {1+a; 1+b}
+    User-defined function calls are evaluated synchronously; if they return
+    a disjunction the distribution continues recursively.
+    """
+    if t is None or _depth > 40:
+        return None
+    t = t.deref()
+    wl = eng.wl
+    sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
+
+    # ── concrete number ──────────────────────────────────────────────────────
+    if t.value is not None and t.type and t.type.is_subtype_of(wl.real):
+        return t
+
+    # ── disjunction / disj_nil leaf ─────────────────────────────────────────
+    if t.type is not None and (t.type is wl.disjunction or t.type is wl.disj_nil):
+        return t
+
+    # ── user-defined function ────────────────────────────────────────────────
+    if _is_user_function(t):
+        _mark = eng.trail.mark()
+        try:
+            result = _eval_user_func_sync(t, eng, _depth)
+            if result is not None:
+                result = copy_term(result.deref(), {})
+        finally:
+            eng.trail.undo_to(_mark)
+        if result is not None:
+            return _eval_arith_psi(result, eng, _depth + 1)
+        return None
+
+    # ── binary operators ─────────────────────────────────────────────────────
+    _ops2 = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+                       'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
+    _ops1 = frozenset(('-', 'abs', 'sqrt', 'sin', 'cos', 'tan',
+                       'asin', 'acos', 'atan', 'exp', 'log',
+                       'floor', 'ceiling', 'round', 'truncate',
+                       'float', 'integer', '\\'))
+    arg1_r = t.attr_list.get('1')
+    arg2_r = t.attr_list.get('2')
+
+    if sym in _ops2 and arg1_r is not None and arg2_r is not None:
+        r1 = _eval_arith_psi(arg1_r.deref(), eng, _depth + 1)
+        r2 = _eval_arith_psi(arg2_r.deref(), eng, _depth + 1)
+        if r1 is None or r2 is None:
+            return None
+        is_d1 = r1.type is not None and (r1.type is wl.disjunction or r1.type is wl.disj_nil)
+        is_d2 = r2.type is not None and (r2.type is wl.disjunction or r2.type is wl.disj_nil)
+        if is_d1 or is_d2:
+            elems1 = _collect_disjunction(r1, eng) if is_d1 else [r1]
+            elems2 = _collect_disjunction(r2, eng) if is_d2 else [r2]
+            result_elems: list = []
+            for e1 in elems1:
+                for e2 in elems2:
+                    op_t = PsiTerm()
+                    op_t.type = t.type
+                    op_t.attr_list = {'1': e1, '2': e2}
+                    elem_r = _eval_arith_psi(op_t, eng, _depth + 1)
+                    if elem_r is not None:
+                        elem_r = elem_r.deref()
+                        if elem_r.type is wl.disj_nil:
+                            pass  # empty branch → drop
+                        elif elem_r.type is not None and elem_r.type is wl.disjunction:
+                            result_elems.extend(_collect_disjunction(elem_r, eng))
+                        else:
+                            result_elems.append(elem_r)
+            if not result_elems:
+                nil = PsiTerm(); nil.type = wl.disj_nil; return nil
+            return _make_disjunction_psi(result_elems, wl)
+        # Both concrete — scalar arithmetic
+        ok1, v1 = _eval_arith(r1, eng, _depth + 1)
+        ok2, v2 = _eval_arith(r2, eng, _depth + 1)
+        if ok1 and ok2:
+            _op_f = {
+                '+': lambda a, b: a + b, '-': lambda a, b: a - b,
+                '*': lambda a, b: a * b,
+                '/': lambda a, b: a / b if b != 0 else float('inf'),
+                '//': lambda a, b: float(int(a) // int(b)) if b != 0 else 0.0,
+                'mod': lambda a, b: float(int(a) % int(b)) if b != 0 else 0.0,
+                '**': lambda a, b: a ** b, '^': lambda a, b: a ** b,
+                'max': lambda a, b: max(a, b), 'min': lambda a, b: min(a, b),
+                '/\\': lambda a, b: float(int(a) & int(b)),
+                '\\/': lambda a, b: float(int(a) | int(b)),
+                'xor': lambda a, b: float(int(a) ^ int(b)),
+                '>>': lambda a, b: float(int(a) >> int(b)),
+                '<<': lambda a, b: float(int(a) << int(b)),
+            }
+            if sym in _op_f:
+                try:
+                    return _make_number(eng, float(_op_f[sym](v1, v2)))
+                except Exception:
+                    return None
+        return None
+
+    # ── unary operators ──────────────────────────────────────────────────────
+    if sym in _ops1 and arg1_r is not None and arg2_r is None:
+        r1 = _eval_arith_psi(arg1_r.deref(), eng, _depth + 1)
+        if r1 is None:
+            return None
+        is_d1 = r1.type is not None and (r1.type is wl.disjunction or r1.type is wl.disj_nil)
+        if is_d1:
+            elems = _collect_disjunction(r1, eng)
+            result_elems = []
+            for e in elems:
+                op_t = PsiTerm()
+                op_t.type = t.type
+                op_t.attr_list = {'1': e}
+                elem_r = _eval_arith_psi(op_t, eng, _depth + 1)
+                if elem_r is not None:
+                    elem_r = elem_r.deref()
+                    if elem_r.type is wl.disj_nil:
+                        pass
+                    elif elem_r.type is not None and elem_r.type is wl.disjunction:
+                        result_elems.extend(_collect_disjunction(elem_r, eng))
+                    else:
+                        result_elems.append(elem_r)
+            if not result_elems:
+                nil = PsiTerm(); nil.type = wl.disj_nil; return nil
+            return _make_disjunction_psi(result_elems, wl)
+        ok1, v1 = _eval_arith(r1, eng, _depth + 1)
+        if ok1:
+            _op_f = {
+                '-': lambda a: -a, 'abs': lambda a: abs(a),
+                'sqrt': lambda a: math.sqrt(a), 'sin': lambda a: math.sin(a),
+                'cos': lambda a: math.cos(a), 'tan': lambda a: math.tan(a),
+                'asin': lambda a: math.asin(a), 'acos': lambda a: math.acos(a),
+                'atan': lambda a: math.atan(a), 'exp': lambda a: math.exp(a),
+                'log': lambda a: math.log(a), 'floor': lambda a: math.floor(a),
+                'ceiling': lambda a: math.ceil(a), 'round': lambda a: round(a),
+                'truncate': lambda a: math.trunc(a),
+                'float': lambda a: float(a), 'integer': lambda a: float(int(a)),
+                '\\': lambda a: float(~int(a)),
+            }
+            if sym in _op_f:
+                try:
+                    return _make_number(eng, float(_op_f[sym](v1)))
+                except Exception:
+                    return None
+        return None
+
+    # ── fallback: standard scalar arithmetic ─────────────────────────────────
+    ok, v = _eval_arith(t, eng, _depth)
+    if ok:
+        return _make_number(eng, v)
+    return None
+
+
+def _evaluate_result_for_display(t: PsiTerm, eng, _depth: int = 0) -> PsiTerm:
+    """Fully evaluate a function result for display (used by _write_term).
+
+    Walks disjunction elements and recursively evaluates arithmetic ops and
+    user-function calls within them, distributing ops over disjunctions so
+    that e.g. {1; 1+posint_stream_to(2)} becomes {1;2;3}.
+    """
+    if t is None or _depth > 40:
+        return t
+    t = t.deref()
+    wl = eng.wl
+
+    # ── disjunction: evaluate each element, then flatten ────────────────────
+    if t.type is not None and t.type is wl.disjunction:
+        elems = _collect_disjunction(t, eng)
+        new_elems: list = []
+        for e in elems:
+            ev = _evaluate_result_for_display(e, eng, _depth + 1)
+            ev = ev.deref()
+            if ev.type is not None and ev.type is wl.disjunction:
+                new_elems.extend(_collect_disjunction(ev, eng))
+            elif ev.type is None or ev.type is not wl.disj_nil:
+                new_elems.append(ev)
+            # disj_nil branches are empty — drop them
+        if not new_elems:
+            nil = PsiTerm(); nil.type = wl.disj_nil; return nil
+        return _make_disjunction_psi(new_elems, wl)
+
+    # ── arithmetic op (possibly with disjunction operands) ───────────────────
+    sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
+    _ops = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+                      'max', 'min', '/\\', '\\/', 'xor', '>>', '<<',
+                      'abs', 'sqrt', 'sin', 'cos', 'tan',
+                      'asin', 'acos', 'atan', 'exp', 'log',
+                      'floor', 'ceiling', 'round', 'truncate', 'float', 'integer'))
+    if sym in _ops:
+        r = _eval_arith_psi(t, eng, _depth)
+        if r is not None:
+            return _evaluate_result_for_display(r, eng, _depth + 1)
+
+    # ── user-defined function call ───────────────────────────────────────────
+    if _is_user_function(t):
+        _mark = eng.trail.mark()
+        try:
+            evaled = _eval_user_func_sync(t, eng, _depth)
+            if evaled is not None:
+                evaled = copy_term(evaled.deref(), {})
+        finally:
+            eng.trail.undo_to(_mark)
+        if evaled is not None:
+            return _evaluate_result_for_display(evaled, eng, _depth + 1)
+
+    return t
 
 
 def bi_unify(goal: PsiTerm, eng) -> bool:
@@ -1823,6 +2900,21 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         eng.push_goal(GoalType.EVAL, a_d, result, a_d.type.rule)
         return True
 
+    # Handle cond(C, T, E) in functional position:
+    #   X = cond(3 < 2, {}, f(N))  →  evaluate cond, unify result with X
+    if _is_cond_builtin_local(b_d):
+        evaled = _eval_body_sync(b_d, eng, 0)
+        if evaled is None:
+            return False
+        evaled = _evaluate_result_for_display(evaled.deref(), eng, 1)
+        return _unify(eng, a_d, evaled)
+    if _is_cond_builtin_local(a_d):
+        evaled = _eval_body_sync(a_d, eng, 0)
+        if evaled is None:
+            return False
+        evaled = _evaluate_result_for_display(evaled.deref(), eng, 1)
+        return _unify(eng, b_d, evaled)
+
     # Handle copy_term(X) functional use: Y = copy_term(X) → Y = fresh copy of X
     if _is_copy_term_func(b_d):
         c = _eval_copy_term_func(b_d)
@@ -1830,6 +2922,41 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     if _is_copy_term_func(a_d):
         c = _eval_copy_term_func(a_d)
         return _unify(eng, b_d, c)
+
+    # Handle glb(X,Y) functional use: B = glb(X,Y) → B = GLB of X and Y
+    # Uses _apply_glb_to_var to create choice points for multiple GLBs.
+    if _is_glb_func(b_d):
+        return _apply_glb_to_var(b_d, a_d, eng)
+    if _is_glb_func(a_d):
+        return _apply_glb_to_var(a_d, b_d, eng)
+
+    # Handle lub(X,Y) functional use: B = lub(X,Y) → B = LUB of X and Y
+    if _is_lub_func(b_d):
+        return _apply_lub_to_var(b_d, a_d, eng)
+    if _is_lub_func(a_d):
+        return _apply_lub_to_var(a_d, b_d, eng)
+
+    # Handle children(X) functional use: L = children(X) → list of direct subsorts
+    if _is_children_func(b_d):
+        return _unify(eng, a_d, _eval_children_func(b_d, eng))
+    if _is_children_func(a_d):
+        return _unify(eng, b_d, _eval_children_func(a_d, eng))
+
+    # Handle chr(N) functional use: C = chr(N) → character string for ASCII code N
+    if _is_chr_func(b_d):
+        r = _try_eval_string_func(b_d, eng)
+        return _unify(eng, a_d, r) if r is not None else False
+    if _is_chr_func(a_d):
+        r = _try_eval_string_func(a_d, eng)
+        return _unify(eng, b_d, r) if r is not None else False
+
+    # Handle asc(C) functional use: N = asc(C) → ASCII code of character C
+    if _is_asc_func(b_d):
+        ok, v = _eval_arith(b_d, eng)
+        return _unify(eng, a_d, _make_number(eng, v)) if ok else False
+    if _is_asc_func(a_d):
+        ok, v = _eval_arith(a_d, eng)
+        return _unify(eng, b_d, _make_number(eng, v)) if ok else False
 
     # Handle bagof/findall/setof in functional position:
     #   L = bagof(Template, Goal)  →  collect all solutions and unify with L
@@ -1856,23 +2983,23 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
             result_list = eng.wl.make_list(collected)
             return _unify(eng, b_d, result_list)
 
-    # Handle conjunction on RHS: A = t1 & t2  →  A = t1, A = t2 (psi-term merge)
-    # '&' is psi-term conjunction: the result must satisfy BOTH constraints.
+    # Handle conjunction (& / psi-term meet): A = t1 & t2
+    # Use _apply_and_conjunction_to_var which creates choice points that bind
+    # the TARGET variable (a_d/b_d) directly — unlike the old approach of
+    # computing the result in a local fresh variable and then unifying, which
+    # caused choice points to bind the local fresh var rather than the target,
+    # so backtracking would leave the target unbound.
     if b_d.type is not None and b_d.type is eng.wl.and_sym:
-        t1 = b_d.attr_list.get('1')
-        t2 = b_d.attr_list.get('2')
-        if t1 is not None and t2 is not None:
-            # Push the second unification as the next goal; do the first inline.
-            eng.push_goal(GoalType.UNIFY, a_d, t2.deref(), None)
-            return _unify(eng, a_d, t1.deref())
+        t1_r = b_d.attr_list.get('1')
+        t2_r = b_d.attr_list.get('2')
+        if t1_r is not None and t2_r is not None:
+            return _apply_and_conjunction_to_var(b_d, a_d, eng)
 
-    # Handle conjunction on LHS: t1 & t2 = B  →  t1 = B, t2 = B (symmetric)
     if a_d.type is not None and a_d.type is eng.wl.and_sym:
-        t1 = a_d.attr_list.get('1')
-        t2 = a_d.attr_list.get('2')
-        if t1 is not None and t2 is not None:
-            eng.push_goal(GoalType.UNIFY, t2.deref(), b_d, None)
-            return _unify(eng, t1.deref(), b_d)
+        t1_r = a_d.attr_list.get('1')
+        t2_r = a_d.attr_list.get('2')
+        if t1_r is not None and t2_r is not None:
+            return _apply_and_conjunction_to_var(a_d, b_d, eng)
 
     # Handle disjunction on RHS: A = {b1;b2;...} → try A=b1, choice for rest
     if b_d.type is not None and b_d.type is eng.wl.disjunction:
@@ -1902,13 +3029,132 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
             return _unify(eng, a_d, alts[0])
 
     # Try to evaluate functional terms before unifying (boolean ops)
+    _b_orig_for_bool = b_d   # save original so we can collect vars to mark after eval
     b_evaled = _try_eval_bool(b_d, eng)
     if b_evaled is not None:
+        # Boolean expression was fully or partially evaluated.
+        # Mark all free variables that appeared in the original expression as
+        # bool-constrained with resid=[] (no pending constraint — tilde suppressed).
+        # This handles short-circuit cases (e.g. B and false → false consumes B)
+        # and idempotent cases (e.g. B and B → B keeps sort bool, resid=[]).
+        _bool_free_evaled: list = []
+        _collect_bool_free_vars(_b_orig_for_bool, eng.wl, _bool_free_evaled, set())
+        for _bv_evaled in _bool_free_evaled:
+            _mark_bool_sort(_bv_evaled, eng.wl, eng)
+        # Also mark the result itself if it is a free variable
+        # (e.g. and(B,B)→B or and(true,X)→X; A = result gives A bool sort)
+        _result_evaled = b_evaled.deref()
+        _mark_bool_sort(_result_evaled, eng.wl, eng)
+        # Also mark a_d (LHS) if it is a free variable: when we are about to
+        # unify it with b_evaled, a_d should have resid=[] too so it does not
+        # display as bool~ if it ends up as the canonical representative.
+        _a_d_cur_for_mark = a_d.deref()
+        _mark_bool_sort(_a_d_cur_for_mark, eng.wl, eng)
         b_d = b_evaled
     else:
+        _a_orig_for_bool = a_d
         a_evaled = _try_eval_bool(a_d, eng)
         if a_evaled is not None:
+            _bool_free_evaled_a: list = []
+            _collect_bool_free_vars(_a_orig_for_bool, eng.wl, _bool_free_evaled_a, set())
+            for _bv_evaled_a in _bool_free_evaled_a:
+                _mark_bool_sort(_bv_evaled_a, eng.wl, eng)
+            _result_evaled_a = a_evaled.deref()
+            _mark_bool_sort(_result_evaled_a, eng.wl, eng)
+            # Also mark b_d (other side) if it's a free variable.
+            _b_d_cur_for_mark = b_d.deref()
+            _mark_bool_sort(_b_d_cur_for_mark, eng.wl, eng)
             a_d = a_evaled
+
+    # Boolean residuation: if one side is an unevaluated boolean expression
+    # with free variables, propagate bool-sort constraints and set up a
+    # suspended goal that re-fires when any free variable is bound.
+    #
+    # Design mirrors arithmetic residuation:
+    #  - true = and(B,C)  → force B=true, C=true  (unique back-propagation)
+    #  - false = or(B,C)  → force B=false, C=false (unique)
+    #  - true = not(B)    → force B=false
+    #  - false = not(B)   → force B=true
+    #  - other cases      → suspend (non-deterministic or no-op if LHS is free)
+    # Use _is_proper_bool_expr to distinguish genuine boolean operator applications
+    # (and(X,Y), or(X,Y), not(X), xor(X,Y)) from psi-terms that happen to use
+    # 'and'/'or' as a constructor name with the wrong arity (e.g. and(B) with
+    # only 1 argument, which should be treated as a regular psi-term).
+    _b_bool_unevaluated = (b_evaled is None) and _is_proper_bool_expr(b_d)
+    # Also handle: bool expr on the LHS (e.g. and(B,C) = true)
+    # We check a_d only if b_d is not already a bool expr (to avoid double-handling).
+    _a_bool_unevaluated = (not _b_bool_unevaluated) and _is_proper_bool_expr(a_d)
+
+    if _b_bool_unevaluated or _a_bool_unevaluated:
+        # Normalise: bool_expr is the expression side, other_side is the other side.
+        if _b_bool_unevaluated:
+            _bool_expr_br, _other_br = b_d, a_d
+        else:
+            _bool_expr_br, _other_br = a_d, b_d
+        _bool_sym_br = _get_sym(_bool_expr_br)
+
+        # Collect free variables inside the boolean expression.
+        _bool_vars_br: list = []
+        _collect_bool_free_vars(_bool_expr_br, eng.wl, _bool_vars_br, set())
+
+        if _bool_vars_br:
+            # --- Deterministic backward propagation ---
+            _other_sym_br = _get_sym(_other_br)
+            if _other_sym_br == 'true' and _bool_sym_br == 'and':
+                # true = and(B, C)  →  B = true, C = true
+                for _bv_br in _bool_vars_br:
+                    if not _unify(eng, _bv_br, _make_atom(eng, 'true')):
+                        return False
+                return True
+            elif _other_sym_br == 'false' and _bool_sym_br == 'or':
+                # false = or(B, C)  →  B = false, C = false
+                for _bv_br in _bool_vars_br:
+                    if not _unify(eng, _bv_br, _make_atom(eng, 'false')):
+                        return False
+                return True
+            elif _other_sym_br == 'false' and _bool_sym_br == 'not':
+                # false = not(B)  →  B = true
+                for _bv_br in _bool_vars_br:
+                    if not _unify(eng, _bv_br, _make_atom(eng, 'true')):
+                        return False
+                return True
+            elif _other_sym_br == 'true' and _bool_sym_br == 'not':
+                # true = not(B)  →  B = false
+                for _bv_br in _bool_vars_br:
+                    if not _unify(eng, _bv_br, _make_atom(eng, 'false')):
+                        return False
+                return True
+
+            # --- Non-deterministic or free-LHS case: suspend ---
+            from wild_life.data_structures import Goal as _BoolGoal
+            _wl_br = eng.wl
+            _eq_defn_br = (getattr(_wl_br, 'eqsym', None) or
+                           _wl_br.syntax_module.symbol_table.get('='))
+            _bool_eq_br = PsiTerm(type_def=_eq_defn_br)
+            # Store as (other = bool_expr) so re-firing reads the right
+            # sides as a and b respectively.
+            _bool_eq_br.attr_list['1'] = _other_br
+            _bool_eq_br.attr_list['2'] = _bool_expr_br
+            _bool_eq_br._resid_marker = True
+            _bool_pend_br = _BoolGoal(GoalType.PROVE, _bool_eq_br,
+                                      None, None, pending=True)
+            for _bv_br in _bool_vars_br:
+                _attach_bool_resid(_bv_br, _wl_br, _bool_pend_br, eng)
+            # Also attach to _other_br if it is a genuine free variable
+            # (not a concrete atom like 'false'), so it displays as bool~
+            # and wakes the goal when it gets a value.
+            from wild_life.data_structures import SORT_VAR as _SORT_VAR_BR
+            _other_cur_br = _other_br.deref()
+            _other_is_free_br = (
+                _other_cur_br.value is None and not _other_cur_br.attr_list
+                and (_other_cur_br.type is _wl_br.top
+                     or _other_cur_br.type is None
+                     or bool(_other_cur_br.flags & _SORT_VAR_BR))
+            )
+            if _other_is_free_br:
+                _attach_bool_resid(_other_cur_br, _wl_br, _bool_pend_br, eng)
+            return True
+
     # Detect whether this call is a re-fire of a suspended residuated goal
     # (as opposed to the initial constraint setup).  The eq_term created during
     # residuation is tagged with _resid_marker=True; when _wakeup_resid fires
@@ -2404,6 +3650,20 @@ def bi_true(goal: PsiTerm, eng) -> bool:
 def bi_fail(goal: PsiTerm, eng) -> bool:
     """fail/false — always fails."""
     return False
+
+
+def bi_repeat(goal: PsiTerm, eng) -> bool:
+    """repeat — always succeeds, creates an infinite choice point on backtrack.
+
+    Equivalent to the Prolog definition:
+        repeat.
+        repeat :- repeat.
+    """
+    # Push a choice point that re-enters repeat on backtracking.
+    # goal is the repeat term itself; proving it again creates another choice
+    # point, giving infinite backtracking.
+    eng.push_choice_point(GoalType.PROVE, goal, _DEFRULES_SENTINEL, None)
+    return True
 
 
 def bi_not(goal: PsiTerm, eng) -> bool:
@@ -4043,6 +5303,363 @@ def bi_alias(goal: PsiTerm, eng) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# trace / notrace / spy / nospy
+# ─────────────────────────────────────────────────────────────────────────────
+
+def bi_trace(goal: PsiTerm, eng) -> bool:
+    """trace — enable execution tracing."""
+    if not eng.trace:
+        eng.trace = True
+        print("*** Tracing is turned on.", file=sys.stderr)
+    return True
+
+
+def bi_notrace(goal: PsiTerm, eng) -> bool:
+    """notrace — disable execution tracing."""
+    eng.trace = False
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# open_in / open_out / close  (stream-based I/O redirection)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def bi_open_in(goal: PsiTerm, eng) -> bool:
+    """open_in(File) or open_in(File, Stream) — open file for reading,
+    redirect stdin (or bind Stream to the file object).
+    """
+    a1 = goal.attr_list.get('1')
+    a2 = goal.attr_list.get('2')
+    if a1 is None:
+        return False
+    a1d = a1.deref()
+    # Get filename string
+    if a1d.value is not None:
+        filename = str(a1d.value)
+    elif a1d.type and a1d.type.keyword:
+        filename = a1d.type.keyword.symbol
+    else:
+        return False
+    try:
+        f = open(filename, 'r')
+    except OSError:
+        return False
+    if a2 is not None:
+        # 2-arg form: bind stream token to a2
+        stream_term = PsiTerm()
+        stream_term.value = f          # store file object as value
+        stream_term.type = eng.wl.top  # generic type
+        if not hasattr(eng, '_open_streams'):
+            eng._open_streams = {}
+        eng._open_streams[id(stream_term)] = f
+        # Push the old stdin
+        if not hasattr(eng, '_stdin_stack'):
+            eng._stdin_stack = []
+        eng._stdin_stack.append(sys.stdin)
+        sys.stdin = f
+        return _unify(eng, a2.deref(), stream_term)
+    else:
+        # 1-arg form: redirect global stdin
+        if not hasattr(eng, '_stdin_stack'):
+            eng._stdin_stack = []
+        eng._stdin_stack.append(sys.stdin)
+        sys.stdin = f
+        return True
+
+
+def bi_open_out(goal: PsiTerm, eng) -> bool:
+    """open_out(File) or open_out(File, Stream) — open file for writing."""
+    a1 = goal.attr_list.get('1')
+    a2 = goal.attr_list.get('2')
+    if a1 is None:
+        return False
+    a1d = a1.deref()
+    if a1d.value is not None:
+        filename = str(a1d.value)
+    elif a1d.type and a1d.type.keyword:
+        filename = a1d.type.keyword.symbol
+    else:
+        return False
+    try:
+        f = open(filename, 'w')
+    except OSError:
+        return False
+    if a2 is not None:
+        stream_term = PsiTerm()
+        stream_term.value = f
+        stream_term.type = eng.wl.top
+        if not hasattr(eng, '_open_streams'):
+            eng._open_streams = {}
+        eng._open_streams[id(stream_term)] = f
+        if not hasattr(eng, '_stdout_stack'):
+            eng._stdout_stack = []
+        eng._stdout_stack.append(sys.stdout)
+        sys.stdout = f
+        return _unify(eng, a2.deref(), stream_term)
+    else:
+        if not hasattr(eng, '_stdout_stack'):
+            eng._stdout_stack = []
+        eng._stdout_stack.append(sys.stdout)
+        sys.stdout = f
+        return True
+
+
+def bi_close(goal: PsiTerm, eng) -> bool:
+    """close(Stream) — close an open stream and restore stdin/stdout."""
+    a1 = goal.attr_list.get('1')
+    if a1 is None:
+        return False
+    a1d = a1.deref()
+    f = None
+    if a1d.value is not None and hasattr(a1d.value, 'close'):
+        f = a1d.value
+    elif hasattr(eng, '_open_streams') and id(a1d) in eng._open_streams:
+        f = eng._open_streams.pop(id(a1d))
+    if f is None:
+        return True  # nothing to close
+    try:
+        f.close()
+    except Exception:
+        pass
+    # Restore stdin if this was the current stdin
+    if sys.stdin is f:
+        if hasattr(eng, '_stdin_stack') and eng._stdin_stack:
+            sys.stdin = eng._stdin_stack.pop()
+        else:
+            sys.stdin = sys.__stdin__
+    # Restore stdout if this was the current stdout
+    if sys.stdout is f:
+        if hasattr(eng, '_stdout_stack') and eng._stdout_stack:
+            sys.stdout = eng._stdout_stack.pop()
+        else:
+            sys.stdout = sys.__stdout__
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# map(F, List) → ResultList  (functional built-in)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _apply_func(f_term: PsiTerm, arg: PsiTerm, eng) -> Optional[PsiTerm]:
+    """Apply functor f_term to one argument, returning the result term.
+
+    In Wild Life, F(X) is written as a psi-term whose type is F and whose
+    '1' attribute is X.  For partial applications like *(2=>4), F already
+    carries some attributes — we merge the new positional arg into position
+    '1' (or the next free position).
+    """
+    from wild_life.unification import copy_term as _copy
+    # Build a copy of f_term with arg placed into the first available
+    # positional slot: if f_term has no '1', use '1'; otherwise use '2', etc.
+    f_copy = _copy(f_term)
+    f_copy = f_copy.deref()
+    if '1' not in f_copy.attr_list:
+        f_copy.attr_list['1'] = arg
+    elif '2' not in f_copy.attr_list:
+        f_copy.attr_list['2'] = arg
+    else:
+        # Fallback: create a new application term
+        app = PsiTerm(type=f_copy.type)
+        app.attr_list = dict(f_copy.attr_list)
+        app.attr_list['1'] = arg
+        f_copy = app
+    return f_copy
+
+
+def bi_map(goal: PsiTerm, eng) -> bool:
+    """map(F, List) → MappedList  — apply function F to each element.
+
+    Supports:
+      map(F, List, Result)  — 3-arg predicate form
+      X = map(F, List)      — 2-arg functional form (via bi_unify)
+    """
+    wl = eng.wl
+    a1 = goal.attr_list.get('1')  # F
+    a2 = goal.attr_list.get('2')  # List
+    a3 = goal.attr_list.get('3')  # Result (optional)
+    if a1 is None or a2 is None:
+        return False
+    f_term = a1.deref()
+    list_term = a2.deref()
+
+    # Walk the list
+    results = []
+    node = list_term
+    while True:
+        node = node.deref()
+        sym = node.type.keyword.symbol if (node.type and node.type.keyword) else ''
+        if sym in ('nil', '[]') or (node.value is None and not node.attr_list and node.type is wl.nil):
+            break
+        if sym in ('cons', '.', '|') or node.type is wl.alist:
+            head_ref = node.attr_list.get('1')
+            tail_ref = node.attr_list.get('2')
+            if head_ref is None:
+                break
+            head = head_ref.deref()
+            applied = _apply_func(f_term, head, eng)
+            if applied is None:
+                return False
+            # Evaluate the applied function
+            ok, val = _eval_arith(applied, eng)
+            if ok:
+                results.append(_make_number(eng, val))
+            else:
+                # Try string evaluation
+                str_result = _try_eval_string_func(applied, eng)
+                if str_result is not None:
+                    results.append(str_result)
+                else:
+                    # Leave as unevaluated application term
+                    results.append(applied)
+            node = tail_ref if tail_ref is not None else wl.make_atom('nil', wl.bi_module)
+        else:
+            # Not a list — apply to the single element
+            applied = _apply_func(f_term, node, eng)
+            if applied is None:
+                return False
+            ok, val = _eval_arith(applied, eng)
+            results.append(_make_number(eng, val) if ok else applied)
+            break
+
+    result_list = wl.make_list(results)
+    if a3 is not None:
+        return _unify(eng, a3.deref(), result_list)
+    # 2-arg form used as function — the call site (bi_unify) handles unification
+    # by calling bi_map and using the return value; since we can't return a term
+    # from a bool function, we need the goal's result to be accessible.
+    # Workaround: unify '0' attribute (return slot) if present, else fail.
+    ret_slot = goal.attr_list.get('0')
+    if ret_slot is not None:
+        return _unify(eng, ret_slot.deref(), result_list)
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# residuate(X) — force X to display as X~ (pending residuation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def bi_residuate(goal: PsiTerm, eng) -> bool:
+    """residuate(X) — mark X as having a pending residuation (show X~)."""
+    from wild_life.unification import Residuation
+    a1 = goal.attr_list.get('1')
+    if a1 is None:
+        return True
+    v = a1.deref()
+    if v.resid is None:
+        eng.trail.trail_psi(v, 'resid')
+        v.resid = [Residuation(pending=True)]
+    elif not any(getattr(r, 'pending', False) for r in v.resid):
+        eng.trail.trail_psi(v, 'resid')
+        v.resid = list(v.resid) + [Residuation(pending=True)]
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# global(X1, X2, ...) — declare mutable global variables
+# ─────────────────────────────────────────────────────────────────────────────
+
+def bi_global(goal: PsiTerm, eng) -> bool:
+    """global(X1, X2, ...) — declare and optionally initialise global variables.
+
+    Each argument is either:
+      - An atom name: declare it as a global (0-ary predicate returning its value)
+      - A term  X <- Value: declare X and set its initial value to Value
+      - A term  <-(X):     declare X as a global reference
+    """
+    wl = eng.wl
+
+    def _do_global_arg(a):
+        a = a.deref()
+        sym = a.type.keyword.symbol if (a.type and a.type.keyword) else ''
+
+        # Form: X <- Value
+        if sym == '<-':
+            lhs_ref = a.attr_list.get('1')
+            rhs_ref = a.attr_list.get('2')
+            if lhs_ref is None:
+                return True
+            lhs = lhs_ref.deref()
+            lhs_sym = lhs.type.keyword.symbol if (lhs.type and lhs.type.keyword) else ''
+            if not lhs_sym:
+                return True
+            # Evaluate rhs as arithmetic if possible
+            rhs = None
+            if rhs_ref is not None:
+                rhs_d = rhs_ref.deref()
+                ok, val = _eval_arith(rhs_d, eng)
+                if ok:
+                    rhs = _make_number(eng, val)
+                else:
+                    rhs = rhs_d
+            # Register as a 0-ary function in current module
+            defn = wl.update_symbol(wl.current_module, lhs_sym)
+            from wild_life.data_structures import DefType as _DT
+            defn.type = _DT.FUNCTION
+            result_term = rhs if rhs is not None else PsiTerm(type=wl.top)
+            defn.rule = [(PsiTerm(type=defn), result_term)]
+            return True
+
+        # Form: <-(X) — declare X as global reference
+        if sym == '<-' and not a.attr_list.get('2'):
+            inner = a.attr_list.get('1')
+            if inner is not None:
+                return _do_global_arg(inner)
+            return True
+
+        # Bare atom: declare as global (no initial value — evaluates to itself)
+        if sym:
+            defn = wl.update_symbol(wl.current_module, sym)
+            from wild_life.data_structures import DefType as _DT
+            if defn.type == _DT.UNDEF:
+                defn.type = _DT.FUNCTION
+                head = PsiTerm(type=defn)
+                defn.rule = [(head, head)]  # f -> f (returns itself)
+            return True
+
+        return True
+
+    # Iterate over positional arguments 1, 2, 3, ...
+    i = 1
+    while True:
+        arg_ref = goal.attr_list.get(str(i))
+        if arg_ref is None:
+            break
+        _do_global_arg(arg_ref)
+        i += 1
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# writeq_err / put_err — write to stderr
+# ─────────────────────────────────────────────────────────────────────────────
+
+def bi_writeq_err(goal: PsiTerm, eng) -> bool:
+    """writeq_err(T) — write T in quoted form to stderr."""
+    return _write_all_args(goal, eng, quoted=True, stream=sys.stderr)
+
+
+def bi_put_err(goal: PsiTerm, eng) -> bool:
+    """put_err(C) — write character C to stderr."""
+    a1 = goal.attr_list.get('1')
+    if a1 is None:
+        return False
+    a1d = a1.deref()
+    c = None
+    if a1d.value is not None:
+        v = a1d.value
+        if isinstance(v, (int, float)):
+            c = chr(int(v))
+        else:
+            c = str(v)[0] if str(v) else ''
+    elif a1d.type and a1d.type.keyword:
+        s = a1d.type.keyword.symbol
+        c = s[0] if s else ''
+    if c is not None:
+        sys.stderr.write(c)
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Sentinel used inside inference.py
 # ─────────────────────────────────────────────────────────────────────────────
 from wild_life.inference import _DEFRULES, _INNER_RUN_BARRIER
@@ -4076,6 +5693,12 @@ def register_all(wl) -> None:
     _reg('format', bi_format)
     _reg('nl_err', bi_nl_err)
     _reg('with_output_to', bi_with_output_to)
+    _reg('writeq_err', bi_writeq_err)
+    _reg('put_err', bi_put_err)
+    # File stream I/O
+    _reg('open_in', bi_open_in)
+    _reg('open_out', bi_open_out)
+    _reg('close', bi_close)
 
     # Arithmetic
     _reg('is', bi_is)
@@ -4085,6 +5708,14 @@ def register_all(wl) -> None:
     _reg('=<', bi_arith_le)
     _reg('>', bi_arith_gt)
     _reg('>=', bi_arith_ge)
+
+    # String comparison  (A$>B  A$>=B  A$<B  A$=<B  A$==B  A$\==B)
+    _reg('$>', bi_str_gt)
+    _reg('$>=', bi_str_ge)
+    _reg('$<', bi_str_lt)
+    _reg('$=<', bi_str_le)
+    _reg('$==', bi_str_eq)
+    _reg('$\\==', bi_str_ne)
 
     # Unification
     _reg('=', bi_unify)
@@ -4112,6 +5743,7 @@ def register_all(wl) -> None:
     _reg('true', bi_true)
     _reg('fail', bi_fail)
     _reg('false', bi_fail)
+    _reg('repeat', bi_repeat)
     _reg('not', bi_not)
     _reg('\\+', bi_not)
     _reg('and', bi_and)
@@ -4124,6 +5756,17 @@ def register_all(wl) -> None:
     _reg('bagof', bi_findall)   # simplified
     _reg('setof', bi_findall)   # simplified
     _reg('aggregate_all', bi_aggregate_all)
+    # Tracing / debugging
+    _reg('trace', bi_trace)
+    _reg('notrace', bi_notrace)
+    _reg('spy', bi_trace)       # simplified: spy = trace
+    _reg('nospy', bi_notrace)   # simplified: nospy = notrace
+    # Higher-order
+    _reg('map', bi_map)
+    # Residuation
+    _reg('residuate', bi_residuate)
+    # Globals
+    _reg('global', bi_global)
 
     # Assert / retract
     _reg('assert', bi_assert)
@@ -4217,6 +5860,7 @@ def register_all(wl) -> None:
 
     # Type hierarchy
     _reg('sub_type', bi_sub_type)
+    _reg('subsort', bi_sub_type)   # alias: subsort(A,B) ↔ sub_type(A,B)
     _reg('get_attribute', bi_get_attribute)
     _reg('set_attribute', bi_set_attribute)
     _reg('type_of', bi_type_of)
@@ -4476,3 +6120,489 @@ def register_all(wl) -> None:
         defn = t.type
         return defn is not None and defn.type == _DT.PREDICATE
     _reg('is_predicate', _bi_is_predicate)
+
+    def _bi_glb(goal, eng):
+        """glb(X, Y, Z) — Z is the GLB (unification) of X and Y.
+        Also handles functional 2-arg form via bi_unify interception."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        a3 = goal.attr_list.get('3')
+        if a1 is None or a2 is None:
+            return False
+        t = goal
+        if a3 is None:
+            # 2-arg predicate form called directly: just unify the two args
+            return _unify(eng, a1.deref(), a2.deref())
+        # 3-arg form: use _apply_glb_to_var so multiple GLBs create choice points
+        return _apply_glb_to_var(goal, a3.deref(), eng)
+    _reg('glb', _bi_glb)
+
+    def _bi_lub(goal, eng):
+        """lub(X, Y, Z) — Z is the LUB of types X and Y.
+        Also handles functional 2-arg form via bi_unify interception."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        a3 = goal.attr_list.get('3')
+        if a1 is None or a2 is None:
+            return False
+        t = goal
+        if a3 is None:
+            return True  # 2-arg with no result: trivially succeed
+        return _apply_lub_to_var(goal, a3.deref(), eng)
+    _reg('lub', _bi_lub)
+
+    def _bi_children(goal, eng):
+        """children(X) → list of direct subsorts of X (1-arg functional form).
+        children(X, L) → L is the list of direct subsorts of X (2-arg predicate)."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None:
+            return False
+        lst = _eval_children_func(goal, eng)
+        if a2 is None:
+            # 1-arg: used as a goal (e.g. listloop(children(@))) — succeeds
+            return True
+        return _unify(eng, a2.deref(), lst)
+    _reg('children', _bi_children)
+
+    # ── succeed ──────────────────────────────────────────────────────────────
+    def _bi_succeed(goal, eng):
+        """succeed — always succeeds (like true/0)."""
+        return True
+    _reg('succeed', _bi_succeed)
+
+    # ── genint — global counter; 0-ary increments on each call ────────────
+    def _bi_genint(goal, eng):
+        """genint — 0-ary: increment and return the global integer counter.
+        genint(N) — 1-arg: non-deterministically bind N to next counter value.
+        """
+        a1 = goal.attr_list.get('1')
+        if a1 is None:
+            # 0-ary form used as a predicate — just succeed (evaluation happens
+            # via _eval_arith when genint appears in arithmetic context)
+            return True
+        a1d = a1.deref()
+        # 1-arg form: bind N to the next counter value
+        current = getattr(wl, '_genint_counter', 0) + 1
+        wl._genint_counter = current
+        return _unify(eng, a1d, wl.make_integer(current))
+    _reg('genint', _bi_genint)
+
+    # ── is_number(X) — true if X is a numeric value ──────────────────────
+    def _bi_is_number(goal, eng):
+        """is_number(X) — succeeds if X is a number (integer or real)."""
+        a1 = goal.attr_list.get('1')
+        if a1 is None:
+            return False
+        a1d = a1.deref()
+        if a1d.value is None:
+            return False
+        return (a1d.type is not None and
+                wl.real is not None and
+                a1d.type.is_subtype_of(wl.real))
+    _reg('is_number', _bi_is_number)
+
+    # ── is_value(X) — true if X is a concrete (ground) value ─────────────
+    def _bi_is_value(goal, eng):
+        """is_value(X) — succeeds if X is a concrete value (number or string)."""
+        a1 = goal.attr_list.get('1')
+        if a1 is None:
+            return False
+        a1d = a1.deref()
+        if a1d.value is None:
+            return False
+        return (a1d.type is not None and (
+            (wl.real is not None and a1d.type.is_subtype_of(wl.real)) or
+            (wl.quoted_string is not None and a1d.type.is_subtype_of(wl.quoted_string))
+        ))
+    _reg('is_value', _bi_is_value)
+
+    # ── has_feature(F, T) — true if term T has feature named F ───────────
+    def _bi_has_feature(goal, eng):
+        """has_feature(F, T) — succeeds if T has a feature named F."""
+        a1 = goal.attr_list.get('1')  # feature name
+        a2 = goal.attr_list.get('2')  # term
+        if a1 is None or a2 is None:
+            return False
+        feat = a1.deref()
+        term = a2.deref()
+        # Determine feature name
+        if feat.type is not None and feat.type.keyword is not None:
+            fname = feat.type.keyword.symbol
+        elif feat.value is not None:
+            fname = str(feat.value)
+        else:
+            return False
+        return fname in term.attr_list
+    _reg('has_feature', _bi_has_feature)
+
+    # ── parents(X, L) — L is list of direct parent sorts of X ─────────────
+    def _bi_parents(goal, eng):
+        """parents(X, L) — L is the list of direct parent sorts of X.
+        parents(X) is the functional 1-arg form (handled via bi_unify)."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None:
+            return False
+        a1d = a1.deref()
+        defn = a1d.type
+        if defn is None:
+            if a2 is None:
+                return True
+            return _unify(eng, a2.deref(), wl.make_list([]))
+        parent_defs = getattr(defn, 'parents', [])
+        parent_terms = []
+        for pd in parent_defs:
+            if pd is not None and pd.keyword is not None:
+                parent_terms.append(wl.make_atom(pd.keyword.symbol, wl.bi_module))
+        lst = wl.make_list(parent_terms)
+        if a2 is None:
+            # 1-arg functional form (via bi_unify interception)
+            return True
+        return _unify(eng, a2.deref(), lst)
+    _reg('parents', _bi_parents)
+
+    # ── least_sorts(X, L) — L is the list of most-specific sorts of X ─────
+    def _bi_least_sorts(goal, eng):
+        """least_sorts(X, L) — L is the list of minimal (most-specific) sorts of X."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None or a2 is None:
+            return False
+        a1d = a1.deref()
+        defn = a1d.type
+        if defn is None:
+            return _unify(eng, a2.deref(), wl.make_list([]))
+        # The most-specific sort of a term is the term's own type (leaf in hierarchy).
+        # For atoms with children, the type itself is the sort; for values, use the type.
+        least = [wl.make_atom(defn.keyword.symbol, wl.bi_module)] if defn.keyword else []
+        return _unify(eng, a2.deref(), wl.make_list(least))
+    _reg('least_sorts', _bi_least_sorts)
+
+    # ── chr(N, C) / chr(N) — ASCII code N → character C ──────────────────
+    def _bi_chr(goal, eng):
+        """chr(N, C) — C is the character for ASCII code N (mod 256).
+        chr(N) in functional position is handled via bi_unify."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None:
+            return False
+        a1d = a1.deref()
+        ok, v = _eval_arith(a1d, eng)
+        if not ok:
+            return False
+        c = chr(int(v) % 256)
+        char_term = _make_string(eng, c)
+        if a2 is None:
+            return True  # 1-arg predicate form just succeeds
+        return _unify(eng, a2.deref(), char_term)
+    _reg('chr', _bi_chr)
+
+    # ── asc(C, N) / asc(C) — character C → ASCII code N ─────────────────
+    def _bi_asc(goal, eng):
+        """asc(C, N) — N is the ASCII code of character C.
+        asc(C) in functional position is handled via bi_unify."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None:
+            return False
+        a1d = a1.deref()
+        ok, v = _eval_arith(a1d, eng)  # handles asc(chr(N)) too
+        if ok:
+            n = int(v) % 256
+        else:
+            # Direct character argument: string or atom
+            if a1d.value is not None and a1d.type and a1d.type.is_subtype_of(wl.quoted_string):
+                s = str(a1d.value)
+                n = ord(s[0]) % 256 if s else 0
+            elif a1d.type and a1d.type.keyword:
+                s = a1d.type.keyword.symbol
+                n = ord(s[0]) % 256 if len(s) == 1 else -1
+                if n < 0:
+                    return False
+            else:
+                return False
+        if a2 is None:
+            return True  # 1-arg just succeeds
+        return _unify(eng, a2.deref(), wl.make_integer(n))
+    _reg('asc', _bi_asc)
+
+    # ── int2str(N, S) — integer N → string S ─────────────────────────────
+    def _bi_int2str(goal, eng):
+        """int2str(N, S) — S is the string representation of integer N."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None or a2 is None:
+            return False
+        a1d = a1.deref()
+        ok, v = _eval_arith(a1d, eng)
+        if not ok:
+            return False
+        iv = int(v)
+        s = str(iv) if float(iv) == v else str(v)
+        return _unify(eng, a2.deref(), _make_string(eng, s))
+    _reg('int2str', _bi_int2str)
+
+    # ── int(X, N) — coerce X to integer N ────────────────────────────────
+    def _bi_int_coerce(goal, eng):
+        """int(X, N) — N is the integer part of X (truncate towards zero)."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None or a2 is None:
+            return False
+        a1d = a1.deref()
+        ok, v = _eval_arith(a1d, eng)
+        if not ok:
+            return False
+        return _unify(eng, a2.deref(), wl.make_integer(int(v)))
+    _reg('int', _bi_int_coerce)
+
+    # ── real(X, R) — coerce X to real R ──────────────────────────────────
+    def _bi_real_coerce(goal, eng):
+        """real(X, R) — R is the floating-point value of X."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None or a2 is None:
+            return False
+        a1d = a1.deref()
+        ok, v = _eval_arith(a1d, eng)
+        if not ok:
+            return False
+        from wild_life.runtime import WildLifeRuntime
+        real_t = PsiTerm()
+        real_t.type = wl.real
+        real_t.value = float(v)
+        real_t.status = 4
+        from wild_life.data_structures import QUOTED_TRUE
+        real_t.flags = QUOTED_TRUE
+        return _unify(eng, a2.deref(), real_t)
+    _reg('real', _bi_real_coerce)
+
+
+    # ── Module system predicates ──────────────────────────────────────────────
+
+    def _get_string_or_atom(t: PsiTerm, eng) -> Optional[str]:
+        """Extract a name from a string PsiTerm or atom PsiTerm, or None."""
+        td = t.deref()
+        if td.value is not None and td.type and td.type.is_subtype_of(eng.wl.quoted_string):
+            return str(td.value)
+        if td.type and td.type.keyword:
+            return td.type.keyword.symbol
+        return None
+
+    def _bi_module(goal, eng):
+        """module("Name") — switch the current module to Name, creating if needed."""
+        a1 = goal.attr_list.get('1')
+        if a1 is None:
+            return False
+        name = _get_string_or_atom(a1, eng)
+        if name is None:
+            return False
+        mod = wl.create_module(name)
+        # New user-created modules open bi and syntax automatically
+        if wl.bi_module not in mod.open_modules:
+            mod.open_modules.append(wl.bi_module)
+        if wl.syntax_module not in mod.open_modules:
+            mod.open_modules.append(wl.syntax_module)
+        wl.set_current_module(mod)
+        return True
+    _reg('module', _bi_module)
+
+    def _bi_public(goal, eng):
+        """public(P, Q, ...) — declare symbols as public in the current module."""
+        mod = wl.current_module
+        if mod is None:
+            return True
+        i = 1
+        while True:
+            a = goal.attr_list.get(str(i))
+            if a is None:
+                break
+            ad = a.deref()
+            name = _get_string_or_atom(ad, eng)
+            if name is None and ad.type and ad.type.keyword:
+                name = ad.type.keyword.symbol
+            if name:
+                defn = wl.update_symbol(mod, name)
+                if defn.keyword:
+                    defn.keyword.public = True
+            i += 1
+        return True
+    _reg('public', _bi_public)
+
+    def _bi_private_feature(goal, eng):
+        """private_feature(F, ...) — mark features as private to current module."""
+        mod = wl.current_module
+        if mod is None:
+            return True
+        i = 1
+        while True:
+            a = goal.attr_list.get(str(i))
+            if a is None:
+                break
+            ad = a.deref()
+            name = _get_string_or_atom(ad, eng)
+            if name is None and ad.type and ad.type.keyword:
+                name = ad.type.keyword.symbol
+            if name:
+                defn = wl.update_symbol(mod, name)
+                if defn.keyword:
+                    defn.keyword.private_feature = True
+            i += 1
+        return True
+    _reg('private_feature', _bi_private_feature)
+
+    def _bi_open(goal, eng):
+        """open("Mod", ...) — add named module(s) to current module's open list."""
+        mod = wl.current_module
+        if mod is None:
+            return True
+        i = 1
+        while True:
+            a = goal.attr_list.get(str(i))
+            if a is None:
+                break
+            name = _get_string_or_atom(a, eng)
+            if name:
+                target = wl.create_module(name)
+                # Ensure target itself opens bi/syntax
+                if wl.bi_module not in target.open_modules:
+                    target.open_modules.append(wl.bi_module)
+                if wl.syntax_module not in target.open_modules:
+                    target.open_modules.append(wl.syntax_module)
+                if target not in mod.open_modules:
+                    mod.open_modules.append(target)
+            i += 1
+        return True
+    _reg('open', _bi_open)
+
+    def _bi_display_modules(goal, eng):
+        """display_modules — print info about all known modules."""
+        for name, mod in sorted(wl.module_table.items()):
+            opens = [m.module_name for m in mod.open_modules
+                     if m.module_name not in ('bi', 'syntax')]
+            sym_count = len(mod.symbol_table)
+            if opens:
+                print(f"Module '{name}': {sym_count} symbols, opens {opens}")
+            else:
+                print(f"Module '{name}': {sym_count} symbols")
+        return True
+    _reg('display_modules', _bi_display_modules)
+
+    def _bi_import_clauses(goal, eng):
+        """import_clauses(for => Module#Pred, replacing => [(Module#Old, New), ...])
+
+        Copies all clauses (rules) of Module#Pred into the homonymous predicate /
+        function in the current module.  The optional 'replacing' list maps old
+        Definition references (Module#Name) inside the copied clause bodies to new
+        local ones so that recursive calls target the local copy.
+
+        Syntax note: import_clauses uses NAMED features, not positional args.
+        The goal term itself carries 'for' and 'replacing' as attribute keys.
+        """
+        from wild_life.data_structures import DefType as _DT
+        from wild_life.unification import copy_term
+
+        # ── 1. Locate the 'for' feature directly on the goal term ─────────────
+        # (import_clauses(for => X, replacing => Y) uses named features, not
+        #  positional '1'/'2' args)
+        for_part = goal.attr_list.get('for')
+        repl_part = goal.attr_list.get('replacing')
+
+        if for_part is None:
+            # fall back: try positional arg wrapping a compound with 'for' feature
+            a1 = goal.attr_list.get('1')
+            if a1 is None:
+                return True
+            a1d = a1.deref()
+            for_part = a1d.attr_list.get('for')
+            repl_part = a1d.attr_list.get('replacing')
+            if for_part is None:
+                return True
+
+        for_d = for_part.deref()
+
+        # ── 2. Extract source module name and predicate/function name ──────────
+        if for_d.type is None or for_d.type.keyword is None:
+            return True
+        sym = for_d.type.keyword.symbol
+        src_mod_obj = for_d.type.keyword.module
+        if src_mod_obj is None:
+            # Unqualified name: try current module
+            src_mod_obj = wl.current_module
+        src_mod = wl.find_module(src_mod_obj.module_name) if src_mod_obj else None
+        if src_mod is None:
+            return True
+        src_defn = src_mod.symbol_table.get(sym)
+        if src_defn is None or not src_defn.rule:
+            return True
+
+        # ── 3. Parse the 'replacing' list: [(OldDef, NewDef), ...] ────────────
+        # Build a mapping {old_Definition_id → new_Definition} for substitution.
+        replacements: dict = {}   # id(old_defn) → new_defn
+        if repl_part is not None:
+            node = repl_part.deref()
+            while node.type is not None and node.type is wl.alist:
+                head_ref = node.attr_list.get('1')
+                node = node.attr_list.get('2').deref() if node.attr_list.get('2') else wl.make_atom('nil', wl.bi_module).deref()
+                if head_ref is None:
+                    continue
+                pair = head_ref.deref()
+                # Pair: (OldQName, NewName) as a tuple-like term with '1' and '2'
+                p1 = pair.attr_list.get('1')
+                p2 = pair.attr_list.get('2')
+                if p1 is None or p2 is None:
+                    continue
+                old_t = p1.deref()
+                new_t = p2.deref()
+                # old_t: module-qualified (e.g. lists#app) or bare atom
+                if old_t.type and old_t.type.keyword:
+                    old_defn = old_t.type
+                    # new_t: bare atom → resolve in current module
+                    if new_t.type and new_t.type.keyword:
+                        new_name = new_t.type.keyword.symbol
+                        new_defn = wl.update_symbol(wl.current_module, new_name)
+                        replacements[id(old_defn)] = new_defn
+
+        # ── 4. Ensure the local definition exists with correct type ─────────────
+        local_defn = wl.update_symbol(wl.current_module, sym)
+        if local_defn.rule is None:
+            local_defn.rule = []
+        if local_defn.type == _DT.UNDEF:
+            local_defn.type = src_defn.type
+
+        # ── 5. Copy each source clause and apply replacements ─────────────────
+        def _replace_defns(t, visited=None):
+            """Walk PsiTerm t and replace Definition references per 'replacements'."""
+            if visited is None:
+                visited = set()
+            if id(t) in visited:
+                return
+            visited.add(id(t))
+            if t.type is not None and id(t.type) in replacements:
+                t.type = replacements[id(t.type)]
+            for child in t.attr_list.values():
+                cd = child.deref()
+                _replace_defns(cd, visited)
+
+        for (h0, b0) in src_defn.rule:
+            _vm: dict = {}
+            h_copy = copy_term(h0, _vm)
+            b_copy = copy_term(b0, _vm)
+            if replacements:
+                _replace_defns(h_copy)
+                _replace_defns(b_copy)
+            local_defn.rule.append((h_copy, b_copy))
+
+        return True
+    _reg('import_clauses', _bi_import_clauses)
+
+    def _bi_use_module(goal, eng):
+        """use_module("Name") — alias for open (compatibility)."""
+        return _bi_open(goal, eng)
+    _reg('use_module', _bi_use_module)
+
+    def _bi_module_info(goal, eng):
+        """module_info(M, Info) — basic module info (stub)."""
+        return True
+    _reg('module_info', _bi_module_info)
