@@ -2368,6 +2368,66 @@ def _is_asc_func(t: 'PsiTerm') -> bool:
             '1' in t.attr_list and '2' not in t.attr_list)
 
 
+def _is_strip_func(t: 'PsiTerm') -> bool:
+    """Return True if t is strip(S) with exactly 1 positional arg (functional use)."""
+    if t is None or t.type is None or t.type.keyword is None:
+        return False
+    return (t.type.keyword.symbol == 'strip' and
+            '1' in t.attr_list and '2' not in t.attr_list)
+
+
+def _is_copy_pointer_func(t: 'PsiTerm') -> bool:
+    """Return True if t is copy_pointer(S) with exactly 1 positional arg (functional use)."""
+    if t is None or t.type is None or t.type.keyword is None:
+        return False
+    return (t.type.keyword.symbol == 'copy_pointer' and
+            '1' in t.attr_list and '2' not in t.attr_list)
+
+
+def _eval_strip_or_copy_func(t: 'PsiTerm', eng, use_src_type: bool) -> 'PsiTerm':
+    """Evaluate strip(S) or copy_pointer(S) → result PsiTerm.
+
+    Replaces each positional attr of src with a fresh var bound to the old
+    value (via coref).  Both src and the returned result share those fresh
+    vars so the printer emits '_A: q' for src and '_A' for the result.
+    """
+    src = t.attr_list['1'].deref()
+    wl = eng.wl
+    new_src_attrs: dict = {}
+    new_res_attrs: dict = {}
+
+    for k, v in src.attr_list.items():
+        try:
+            int(k)
+            is_pos = True
+        except (ValueError, TypeError):
+            is_pos = False
+
+        if is_pos:
+            v_d = v.deref()
+            # If already an unbound variable share it; otherwise wrap in fresh var
+            if (v_d.value is None and not v_d.attr_list and
+                    (v_d.type is None or v_d.type is wl.top)):
+                fresh = v_d
+            else:
+                fresh = PsiTerm()
+                fresh.type = wl.top  # proper unbound variable (type=top)
+                fresh.coref = v  # fresh.deref() == v.deref() == the atom/value
+            new_src_attrs[k] = fresh
+            new_res_attrs[k] = fresh
+        else:
+            new_src_attrs[k] = v  # keep non-positional attrs in src only
+
+    # Trail src.attr_list so backtracking restores the raw values
+    eng.trail.trail_psi(src, 'attr_list')
+    src.attr_list = new_src_attrs
+
+    res = PsiTerm()
+    res.type = src.type if use_src_type else wl.top
+    res.attr_list = new_res_attrs
+    return res
+
+
 def _is_parse_func(t: 'PsiTerm') -> bool:
     """Return True if t is parse(String[, Status[, Vars]]) (functional use)."""
     if t is None or t.type is None or t.type.keyword is None:
@@ -3116,6 +3176,48 @@ def _evaluate_result_for_display(t: PsiTerm, eng, _depth: int = 0) -> PsiTerm:
     return t
 
 
+def _resolve_dot_feat(dot_term: 'PsiTerm', eng) -> 'Optional[PsiTerm]':
+    """Get (or create) the attribute cell for a T.F dot-access term.
+
+    Returns the PsiTerm stored at attr fkey of T's host (creating a fresh
+    variable and inserting it into host.attr_list if the key is absent).
+    Returns None if the dot-term is malformed or F cannot be resolved.
+    """
+    if dot_term.type is None or dot_term.type.keyword is None:
+        return None
+    if dot_term.type.keyword.symbol != '.':
+        return None
+    a1 = dot_term.attr_list.get('1')  # T
+    a2 = dot_term.attr_list.get('2')  # F (feature label)
+    if a1 is None or a2 is None:
+        return None
+    host = a1.deref()
+    feat = a2.deref()
+    # Compute feature key string
+    if feat.value is not None and feat.type and feat.type.keyword:
+        fsym = feat.type.keyword.symbol
+        if fsym in ('integer', 'real', 'int', 'float', 'number'):
+            fkey = str(int(feat.value))
+        else:
+            fkey = fsym
+    elif feat.type and feat.type.keyword:
+        fkey = feat.type.keyword.symbol
+    else:
+        return None
+    existing = host.attr_list.get(fkey)
+    if existing is not None:
+        return existing  # caller will deref as needed
+    # Attr absent — create a fresh variable (type=top = unbound), insert it (trailed)
+    wl_rd = eng.wl
+    fresh = PsiTerm()
+    fresh.type = wl_rd.top  # must be WL.top so unification recognises it as a free var
+    eng.trail.trail_psi(host, 'attr_list')
+    new_attrs = dict(host.attr_list)
+    new_attrs[fkey] = fresh
+    host.attr_list = new_attrs
+    return fresh
+
+
 def bi_unify(goal: PsiTerm, eng) -> bool:
     """X = Y — LIFE sort unification (with functional evaluation)."""
     a, b = _get_two_args(goal)
@@ -3124,6 +3226,22 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
 
     a_d = a.deref()
     b_d = b.deref()
+
+    # Handle T.F = V and V = T.F (dot feature access / creation).
+    # When T.F does not yet exist as an attribute, a fresh variable is
+    # inserted into T's attr_list (trailed) and unified with V.
+    _dot_sym_check = (lambda td: td.type is not None and td.type.keyword is not None
+                      and td.type.keyword.symbol == '.')
+    if _dot_sym_check(a_d):
+        _attr_cell = _resolve_dot_feat(a_d, eng)
+        if _attr_cell is None:
+            return False
+        return _unify(eng, _attr_cell.deref(), b_d)
+    if _dot_sym_check(b_d):
+        _attr_cell = _resolve_dot_feat(b_d, eng)
+        if _attr_cell is None:
+            return False
+        return _unify(eng, a_d, _attr_cell.deref())
 
     # Try to evaluate b as a user-defined function call (f -> result style)
     if _is_user_function(b_d):
@@ -3181,6 +3299,18 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         return _unify(eng, a_d, _eval_children_func(b_d, eng))
     if _is_children_func(a_d):
         return _unify(eng, b_d, _eval_children_func(a_d, eng))
+
+    # Handle strip(S) / copy_pointer(S) functional use:
+    #   R = strip(S)          → R has type @, shares S's positional args as vars
+    #   R = copy_pointer(S)   → R has S's type, shares S's positional args as vars
+    if _is_strip_func(b_d):
+        return _unify(eng, a_d, _eval_strip_or_copy_func(b_d, eng, False))
+    if _is_strip_func(a_d):
+        return _unify(eng, b_d, _eval_strip_or_copy_func(a_d, eng, False))
+    if _is_copy_pointer_func(b_d):
+        return _unify(eng, a_d, _eval_strip_or_copy_func(b_d, eng, True))
+    if _is_copy_pointer_func(a_d):
+        return _unify(eng, b_d, _eval_strip_or_copy_func(a_d, eng, True))
 
     # Handle apply(Args, functor=>F) functional use: X = F(Args).
     # When the parser sees a variable F used as a functor (e.g. A(Q)), it creates
@@ -6537,18 +6667,103 @@ def register_all(wl) -> None:
         return _unify(eng, a2.deref(), lst)
     _reg('features', _bi_features)
 
+    def _make_strip_result(src, use_src_type):
+        """Core of strip / copy_pointer.
+
+        For each *positional* attribute of *src* (keys '1', '2', ...):
+          - If the current value is already an unbound variable, share it as-is.
+          - Otherwise create a fresh unbound PsiTerm and set its coref to the
+            current attribute value so that fresh.deref() == old_value.
+        Both src's attr_list and the new result share the same fresh var objects
+        for those positional keys; new attrs added to either term after the call
+        will not affect the other (separate dicts).
+
+        *src* is modified in place (trailed) to replace raw values with fresh
+        variables so that the printer sees them as SHARED and emits "name: val".
+
+        Returns the new result PsiTerm with:
+          type = wl.top       (strip)
+          type = src.type     (copy_pointer)
+        """
+        wl = eng.wl
+        new_src_attrs: dict = {}
+        new_res_attrs: dict = {}
+
+        for k, v in src.attr_list.items():
+            # Positional keys are numeric strings ('1', '2', ...)
+            try:
+                int(k)
+                is_pos = True
+            except (ValueError, TypeError):
+                is_pos = False
+
+            if is_pos:
+                v_d = v.deref()
+                if _term_is_unbound(v_d, eng):
+                    # Already a free variable — share directly
+                    fresh = v_d
+                else:
+                    # Create a fresh variable and bind it to the old value.
+                    # We set coref = v (the original cell, preserving the chain)
+                    # so that fresh.deref() ultimately reaches v_d.
+                    # The printer deref()s before lookup, so both this fresh var
+                    # in A's attr_list and the copy in B's attr_list dereference
+                    # to the same underlying psiterm, making it SHARED and giving
+                    # it a generated name ("_A: q" on first print, "_A" later).
+                    fresh = PsiTerm()
+                    fresh.coref = v  # binds fresh → v → v_d (atom / value)
+                new_src_attrs[k] = fresh
+                new_res_attrs[k] = fresh
+            else:
+                # Named (non-positional) attrs: keep in src, skip in result
+                new_src_attrs[k] = v
+
+        # Trail the entire attr_list of src so backtracking restores raw values
+        eng.trail.trail_psi(src, 'attr_list')
+        src.attr_list = new_src_attrs
+
+        # Build result psiterm
+        res = PsiTerm()
+        res.type = src.type if use_src_type else wl.top
+        res.attr_list = new_res_attrs
+        return res
+
     def _bi_strip(goal, eng):
-        """strip(T): return T without sort constraints (just top-level copy)."""
+        """strip(S, R): R has type @, sharing S's positional args as variables.
+
+        In LIFE, strip(S) creates a new term R with anonymous type (@) whose
+        positional attributes are aliases for S's attributes.  New attributes
+        added to either S or R after the call are independent.
+
+        1-arg form: strip(S)   — just validates (always succeeds)
+        2-arg form: strip(S,R) — R is the stripped copy
+        """
         a1 = goal.attr_list.get('1')
         a2 = goal.attr_list.get('2')
         if a1 is None:
             return False
-        t = a1.deref()
-        # Return the term as-is (stripping sort annotation not implemented)
+        src = a1.deref()
+        res = _make_strip_result(src, False)
         if a2 is None:
             return True
-        return _unify(eng, a2.deref(), t)
+        return _unify(eng, a2.deref(), res)
     _reg('strip', _bi_strip)
+
+    def _bi_copy_pointer(goal, eng):
+        """copy_pointer(S, R): R has the same type as S, sharing positional args.
+
+        Like strip but preserves S's sort: R.type == S.type.
+        """
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None:
+            return False
+        src = a1.deref()
+        res = _make_strip_result(src, True)
+        if a2 is None:
+            return True
+        return _unify(eng, a2.deref(), res)
+    _reg('copy_pointer', _bi_copy_pointer)
 
     def _bi_sort_of(goal, eng):
         """sort_of(T): synonym for root_sort."""
