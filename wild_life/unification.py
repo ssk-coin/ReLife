@@ -351,6 +351,12 @@ class Unifier:
                     return False
                 self.bind(u, v)
                 self._wakeup_resid(u, v)
+                # Fire global delay rules: sort-constrained variable just got bound.
+                # e.g. :: I:int | write(I," "). fires when I:int is unified with an integer.
+                if WL.delay_rules and self.engine is not None:
+                    _v_d = v.deref()
+                    if _v_d.type is not None and _v_d.type is not WL.top:
+                        self._fire_delay_rules(u, u.type)
             else:
                 # If v is a disjunction psi-term, expand into UNIFY choice points.
                 # These choice points are created AFTER the cut_barrier (during head
@@ -384,6 +390,14 @@ class Unifier:
                 # attributes, check if the term's sort can be narrowed based on
                 # :: Sort(attrs) prototype declarations (e.g. @(nose=>pretty) → cleopatra).
                 _v_canon = v.deref()
+                # Fire global delay rules for the sort of the term being bound to.
+                # e.g. :: C:cons | write(C.1), nl. fires when a plain var is bound to a cons.
+                if WL.delay_rules and self.engine is not None and _v_canon.type is not None and _v_canon.type is not WL.top:
+                    # Fire sub-terms first (bottom-up / post-order, matching C Wild Life behaviour).
+                    self._fire_delay_rules_for_subterms(_v_canon)
+                    if not getattr(_v_canon, '_delay_fired', False):
+                        _v_canon._delay_fired = True
+                        self._fire_delay_rules(_v_canon, _v_canon.type)
                 if _v_canon.attr_list and _v_canon.type is not None and self.engine is not None:
                     self._try_sort_narrowing(_v_canon)
             return True
@@ -443,6 +457,13 @@ class Unifier:
             self._wakeup_resid(v, u)
             # Sort narrowing for terms with attributes
             _u_canon = u.deref()
+            # Fire global delay rules for the sort of the term being bound to.
+            if WL.delay_rules and self.engine is not None and _u_canon.type is not None and _u_canon.type is not WL.top:
+                # Fire sub-terms first (bottom-up / post-order, matching C Wild Life behaviour).
+                self._fire_delay_rules_for_subterms(_u_canon)
+                if not getattr(_u_canon, '_delay_fired', False):
+                    _u_canon._delay_fired = True
+                    self._fire_delay_rules(_u_canon, _u_canon.type)
             if _u_canon.attr_list and _u_canon.type is not None and self.engine is not None:
                 self._try_sort_narrowing(_u_canon)
             return True
@@ -704,7 +725,7 @@ class Unifier:
 
         return True
 
-    def _fire_delay_rules(self, u: PsiTerm, new_sort) -> None:
+    def _fire_delay_rules(self, u: PsiTerm, new_sort) -> None:  # noqa: E501
         """グローバル遅延ルール (:: Pattern | Goal) を起動する。
 
         u のソートが new_sort に絞り込まれたとき、パターンのソートが
@@ -712,6 +733,51 @@ class Unifier:
         """
         if self.engine is None:
             return
+        # Re-entrancy guard: _fire_delay_rules calls self.unify() which could
+        # in turn trigger _fire_delay_rules again, causing infinite recursion.
+        # Skip the recursive call — the goal is already being set up.
+        if getattr(self.engine, '_in_fire_delay', False):
+            return
+        self.engine._in_fire_delay = True
+        # Collect concrete typed literals from goal copies for deferred firing.
+        # (In C Wild Life, integer/real literals in rule bodies act as sort-constrained
+        # variables that get "bound" when the rule fires, triggering the int delay.)
+        deferred_literal_fires: list = []
+        try:
+            self._fire_delay_rules_inner(u, new_sort, deferred_literal_fires)
+        finally:
+            self.engine._in_fire_delay = False
+        # Fire deferred delays for concrete integer/real literals found in goal copies.
+        for _lit_term in deferred_literal_fires:
+            self._fire_delay_rules(_lit_term, _lit_term.type)
+
+    def _collect_literal_integers(self, t: PsiTerm, result: list, visited: set) -> None:
+        """Walk t recursively and collect concrete integer/real PsiTerms.
+
+        These correspond to numeric literals in rule bodies that, in the original
+        C Wild Life implementation, act as sort-constrained variables narrowed to
+        their value — causing the int/real delay rule to fire.
+        """
+        t = t.deref()
+        tid = id(t)
+        if tid in visited:
+            return
+        visited.add(tid)
+        wl = WL
+        if (t.value is not None and t.type is not None
+                and t.type is not wl.top
+                and t.type.keyword is not None
+                and t.type.keyword.symbol in ('int', 'integer', 'real', 'float', 'number')):
+            result.append(t)
+        # In C Wild Life, the integer label in T.F (e.g. '1' in C.1) DOES fire the
+        # int delay rule — the REFOUT for manual8 shows '1 d\n1 c\n1 b\n1 a\n' where
+        # '1' comes from the feature key. So collect all sub-terms including .2.
+        for k, val_ref in t.attr_list.items():
+            self._collect_literal_integers(val_ref, result, visited)
+
+    def _fire_delay_rules_inner(self, u: PsiTerm, new_sort,
+                                deferred_literal_fires: list = None) -> None:
+        """_fire_delay_rules の実処理 (再入禁止ガード外側から呼ぶ)。"""
         wl = WL
         for rule_inner in wl.delay_rules:
             # rule_inner is the | (Pattern | Goal) psiterm
@@ -741,6 +807,15 @@ class Unifier:
             # Deref to get the actual sort-constrained term (past any variable wrapper)
             pattern_d_copy = pattern_copy.deref()
 
+            # Collect concrete integer/real literals from the goal copy BEFORE unification.
+            # In C Wild Life, integer literals in rule bodies act as sort-constrained
+            # variables that get "narrowed" to their value during rule instantiation,
+            # triggering the int/real delay rule.  We collect them here (before unify
+            # changes any bindings) to avoid collecting already-bound sort-vars.
+            if deferred_literal_fires is not None:
+                pre_unify_literals: list = []
+                self._collect_literal_integers(goal_copy, pre_unify_literals, set())
+
             # Unify pattern_d_copy with u (e.g. person(best_friend=>Q) with cleopatra_pt)
             # This binds u's attrs from the pattern (adds best_friend=Q_fresh)
             unify_ok = self.unify(pattern_d_copy, u)
@@ -753,7 +828,58 @@ class Unifier:
             from wild_life.data_structures import GoalType as _GT
             from wild_life.inference import _DEFRULES as _defrules_sentinel
             goal_d_copy = goal_copy.deref()
-            self.engine.push_goal(_GT.PROVE, goal_d_copy, _defrules_sentinel, None)
+            # Create a trail-independent concrete copy of the goal by materialising all
+            # current trail bindings.  This ensures that if the caller later undoes its
+            # trail (as _eval_arith does after testing a function-rule head), the pushed
+            # goal still contains the concrete integer values rather than unbound sort-vars.
+            goal_materialized = copy_term(goal_d_copy, {})
+
+            # Fire integer literal delays BEFORE the goal so they appear first in output.
+            # In C Wild Life the integer feature key '1' in write(C.1) fires BEFORE
+            # the element value is printed (e.g. '1 d' not 'd 1').
+            # We temporarily release _in_fire_delay to allow _fire_delay_rules to run.
+            if deferred_literal_fires is not None and pre_unify_literals:
+                self.engine._in_fire_delay = False
+                try:
+                    for _lit in pre_unify_literals:
+                        _lit_d = _lit.deref()
+                        if not getattr(_lit_d, '_delay_fired', False):
+                            _lit_d._delay_fired = True
+                            self._fire_delay_rules(_lit_d, _lit_d.type)
+                finally:
+                    self.engine._in_fire_delay = True
+
+            # Execute the goal synchronously so delay outputs appear in
+            # triggering order (FIFO) rather than LIFO stack order.
+            _exec_delay_goal_sync(goal_materialized, self.engine)
+            # (Do NOT extend deferred_literal_fires — literals are fired above.)
+
+    def _fire_delay_rules_for_subterms(self, t: PsiTerm, visited: set = None) -> None:
+        """Fire delay rules recursively for all typed sub-terms of t.
+
+        When a variable is bound to a compound structure (e.g. a list [a,b,c,d]),
+        delay rules should fire not just for the top-level term but also for each
+        typed sub-term (e.g. each cons cell in the list).  This mirrors C Wild Life
+        behaviour where binding a variable to a structure propagates delay firing
+        to all matching sub-terms.
+        """
+        if self.engine is None or not WL.delay_rules:
+            return
+        if visited is None:
+            visited = set()
+        t = t.deref()
+        tid = id(t)
+        if tid in visited:
+            return
+        visited.add(tid)
+        for val_ref in t.attr_list.values():
+            sub = val_ref.deref()
+            sub_type = sub.type
+            if sub_type is not None and sub_type is not WL.top:
+                # Recurse into sub-term first (depth-first post-order = bottom-up firing).
+                # In C Wild Life, delay fires for inner terms before outer ones.
+                self._fire_delay_rules_for_subterms(sub, visited)
+                self._fire_delay_rules(sub, sub_type)
 
     def _wakeup_resid(self, var: PsiTerm, val: PsiTerm):
         """残留ゴールを覚醒させる
@@ -829,6 +955,63 @@ def unify_terms(u: PsiTerm, v: PsiTerm,
     return success, trail
 
 
+def _exec_delay_goal_sync(goal: PsiTerm, eng) -> None:
+    """Execute a delay rule goal synchronously (for FIFO ordering of delay outputs).
+
+    Handles conjunctions, write, nl, print and similar built-in predicates
+    directly so that delay outputs appear in the order they were triggered
+    (i.e. each delay fires and completes before the next one starts).
+    Falls back to push_goal for complex or unknown predicates.
+    """
+    goal = goal.deref()
+    sym = goal.type.keyword.symbol if (goal.type and goal.type.keyword) else ''
+
+    if sym == ',':  # conjunction: execute each conjunct in order
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is not None:
+            _exec_delay_goal_sync(a1.deref(), eng)
+        if a2 is not None:
+            _exec_delay_goal_sync(a2.deref(), eng)
+        return
+
+    # Direct dispatch for common built-in predicates
+    try:
+        from wild_life.built_ins import (bi_write, bi_nl, bi_writeln, bi_print,
+                                          bi_writeq, bi_write_canonical, bi_write_err)
+        _SYNC_BUILTINS = {
+            'write': bi_write, 'nl': bi_nl, 'writeln': bi_writeln,
+            'print': bi_print, 'writeq': bi_writeq,
+            'write_canonical': bi_write_canonical,
+            'write_err': bi_write_err,
+        }
+        if sym in _SYNC_BUILTINS:
+            _SYNC_BUILTINS[sym](goal, eng)
+            return
+    except ImportError:
+        pass
+    # Also handle format/2 and put_char/1
+    try:
+        from wild_life.built_ins import bi_format
+        if sym == 'format':
+            bi_format(goal, eng)
+            return
+    except ImportError:
+        pass
+    try:
+        from wild_life.built_ins import bi_put_char
+        if sym == 'put_char':
+            bi_put_char(goal, eng)
+            return
+    except ImportError:
+        pass
+
+    # Fallback: push as a deferred goal for the engine to process
+    from wild_life.data_structures import GoalType as _GT
+    from wild_life.inference import _DEFRULES as _defrules_sentinel
+    eng.push_goal(_GT.PROVE, goal, _defrules_sentinel, None)
+
+
 def copy_term(t: PsiTerm, var_map: Optional[Dict[int, PsiTerm]] = None) -> PsiTerm:
     """psi-term をコピーする (変数を新しい変数に置き換える)
     C版の copy.c の copy_term() に対応
@@ -849,28 +1032,40 @@ def copy_term(t: PsiTerm, var_map: Optional[Dict[int, PsiTerm]] = None) -> PsiTe
     # We check SORT_VAR both BEFORE and AFTER deref so all occurrences of X share the
     # same copy regardless of whether they come via a proxy token or a direct reference.
     # In both cases, key the var_map by id(stored_X) so all occurrences converge.
+    #
+    # IMPORTANT: If the SORT_VAR has already been bound (coref is not None), we must deref
+    # and copy the concrete bound value rather than creating a fresh unbound sort-var.
+    # This handles goal materialization where e.g. C:cons is already bound to a cons cell.
     from wild_life.data_structures import SORT_VAR
     if t.flags & SORT_VAR:
-        tid = id(t)
-        if tid not in var_map:
-            new_var = PsiTerm()
-            new_var.type = t.type  # same sort constraint
-            new_var.flags = t.flags
-            var_map[tid] = new_var
-        return var_map[tid]
+        if t.coref is not None:
+            # Already bound — deref and fall through to copy the concrete value
+            t = t.deref()
+        else:
+            tid = id(t)
+            if tid not in var_map:
+                new_var = PsiTerm()
+                new_var.type = t.type  # same sort constraint
+                new_var.flags = t.flags
+                var_map[tid] = new_var
+            return var_map[tid]
 
     t = t.deref()
 
     # Post-deref SORT_VAR check: handles proxy tokens (tok.coref = stored_X)
     # where the SORT_VAR flag is on stored_X, not on tok.
     if t.flags & SORT_VAR:
-        tid = id(t)
-        if tid not in var_map:
-            new_var = PsiTerm()
-            new_var.type = t.type
-            new_var.flags = t.flags
-            var_map[tid] = new_var
-        return var_map[tid]
+        if t.coref is not None:
+            # Already bound — deref and fall through to copy the concrete value
+            t = t.deref()
+        else:
+            tid = id(t)
+            if tid not in var_map:
+                new_var = PsiTerm()
+                new_var.type = t.type
+                new_var.flags = t.flags
+                var_map[tid] = new_var
+            return var_map[tid]
 
     # 変数 (未束縛 top)
     if t.type is WL.top and not t.attr_list and not t.resid:
@@ -888,6 +1083,13 @@ def copy_term(t: PsiTerm, var_map: Optional[Dict[int, PsiTerm]] = None) -> PsiTe
         result.value = t.value
         result.flags = t.flags
         result.status = t.status
+        # Copy delay-tracking flags so that goal copies don't re-fire delay rules.
+        # Without this, _write_term → _eval_arith on a goal copy would fire delay again
+        # for each fresh copy, causing infinite recursion.
+        if getattr(t, '_delay_fired', False):
+            result._delay_fired = True
+        if getattr(t, '_is_computed', False):
+            result._is_computed = True
         return result
 
     # 複合項
