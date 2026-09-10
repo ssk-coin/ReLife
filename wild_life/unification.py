@@ -259,6 +259,13 @@ class Unifier:
     def __init__(self, trail: Trail, engine=None):
         self.trail = trail
         self.engine = engine  # back-reference to Engine (may be None)
+        # Deferred wakeup support: goals woken during nested _unify_attrs calls
+        # are queued here and pushed (in order) after the top-level unify returns.
+        # This ensures that when multiple variables are bound during compound-term
+        # unification, their pending goals fire in ATTRIBUTE ORDER (1 before 2 before
+        # 3) rather than in reversed LIFO order.
+        self._unify_nesting = 0      # depth counter for nested unify calls
+        self._deferred_wakeups: list = []  # list of (gtype, ga, gb, gc) tuples
 
     def bind(self, var: PsiTerm, val: PsiTerm):
         """変数 var を val に束縛する (バックトラック可能)
@@ -296,6 +303,24 @@ class Unifier:
         Returns:
             True if successful, False on failure
         """
+        is_top_level = (self._unify_nesting == 0)
+        self._unify_nesting += 1
+        try:
+            result = self._unify_impl(u, v)
+        finally:
+            self._unify_nesting -= 1
+            # At the top-level unify call, flush deferred wakeup goals in the
+            # order they were collected (attribute order 1,2,3,…).  Push them
+            # onto the goal stack in REVERSE order so the first goal ends up on
+            # top (LIFO → executes first → fires in the correct attribute order).
+            if is_top_level and self._deferred_wakeups and self.engine is not None:
+                for _gt, _ga, _gb, _gc in reversed(self._deferred_wakeups):
+                    self.engine.push_goal(_gt, _ga, _gb, _gc)
+                self._deferred_wakeups.clear()
+        return result
+
+    def _unify_impl(self, u: PsiTerm, v: PsiTerm) -> bool:
+        """Internal unify implementation (called from unify with nesting tracking)."""
         u = u.deref()
         v = v.deref()
 
@@ -643,7 +668,17 @@ class Unifier:
         u_attrs = dict(u.attr_list)
         v_attrs = dict(v.attr_list)
 
-        all_keys = set(u_attrs.keys()) | set(v_attrs.keys())
+        # Sort attribute keys so that positional (numeric) keys are processed in
+        # ascending order (1, 2, 3 …) and named keys follow alphabetically.
+        # Together with the deferred-wakeup mechanism in _wakeup_resid / unify,
+        # this ensures that pending goals woken during compound-term unification
+        # fire in left-to-right (attribute 1 before 2 before 3) execution order.
+        def _attr_sort_key(k):
+            try:
+                return (0, int(k))    # numeric keys: ascending numeric order
+            except (ValueError, TypeError):
+                return (1, k)          # named keys: alphabetic, after numerics
+        all_keys = sorted(set(u_attrs.keys()) | set(v_attrs.keys()), key=_attr_sort_key)
 
         for key in all_keys:
             u_val = u_attrs.get(key)
@@ -929,10 +964,19 @@ class Unifier:
         # and push them back onto the goal stack.
         # IMPORTANT: trail the pending flag change so that on backtrack the
         # goal becomes pending again and can be re-awakened next time.
+        #
+        # When called from inside nested _unify_impl (nesting depth > 0, i.e.
+        # from _unify_attrs), defer the push: collect into _deferred_wakeups.
+        # The top-level unify() will flush them in reverse order after the full
+        # unification completes, ensuring pending prove goals fire in the same
+        # attribute order (1, 2, 3) in which the compound term's slots are bound.
         for g in goals_to_wake:
             self.trail.trail_psi(g, 'pending')  # restore pending=True on backtrack
             g.pending = False
-            self.engine.push_goal(g.type, g.a, g.b, g.c)
+            if self._unify_nesting > 0 and self.engine is not None:
+                self._deferred_wakeups.append((g.type, g.a, g.b, g.c))
+            else:
+                self.engine.push_goal(g.type, g.a, g.b, g.c)
 
     def unify_noeval(self, u: PsiTerm, v: PsiTerm) -> bool:
         """評価なしの単一化

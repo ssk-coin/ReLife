@@ -782,6 +782,40 @@ class Engine:
         # ── UNDEFINED or LOOKUP from DEFRULES ──
         rules = rule_or_sentinel
         if rules is _DEFRULES:
+            # Check if the goal term is an unbound free variable.
+            # Free vars have type=wl.top (DefType.TYPE) with no attr_list/value/coref,
+            # OR type=None. In Wild Life, calling a free variable as a goal succeeds
+            # immediately and suspends the prove as a pending residuated goal on the
+            # variable. When the variable is later bound, the woken goal proves the
+            # bound value. The variable displays as @~ (top sort with pending constraint).
+            _goal_is_free_var = (
+                (defn is None or (defn is wl.top)) and
+                not thegoal.attr_list and
+                thegoal.value is None and
+                thegoal.coref is None
+            )
+            if _goal_is_free_var:
+                from wild_life.data_structures import Residuation as _RuVar, SORT_VAR as _SORT_VAR_FV
+                _g_var_pending = Goal(GoalType.PROVE, thegoal, aim.b, aim.c,
+                                      next=None, pending=True)
+                _r_var = _RuVar(goal=_g_var_pending, bestsort=None, value=None,
+                                next=None, pending=True)
+                if thegoal.resid is None:
+                    self.trail.trail_psi(thegoal, 'resid')
+                    thegoal.resid = [_r_var]
+                else:
+                    self.trail.trail_psi(thegoal, 'resid')
+                    thegoal.resid = thegoal.resid + [_r_var]
+                # Set SORT_VAR flag so the Unifier treats this variable as
+                # bindable (not as a ground term) even though resid is non-empty.
+                # Without this flag, Unifier.unify sees `not u.resid` as False
+                # and skips _wakeup_resid when the variable is later bound.
+                if not (thegoal.flags & _SORT_VAR_FV):
+                    self.trail.trail_psi(thegoal, 'flags')
+                    thegoal.flags |= _SORT_VAR_FV
+                self.goal_stack = aim.next
+                self.goal_count += 1
+                return True
             if defn is None:
                 return False
             if defn.type == DefType.PREDICATE:
