@@ -99,6 +99,34 @@ _ARITH_OPS_SET = frozenset((
 ))
 
 
+def _is_complete_arith_expr(t: 'PsiTerm') -> bool:
+    """Return True if t is a complete (non-curried) arithmetic expression.
+
+    Curried arithmetic terms (binary op with only 1 arg) should be treated as
+    regular compound terms, not as arithmetic constraints.
+    Special case: '-' is both unary (FY) and binary (YFX). With one arg '1'
+    it is valid unary negation. All other binary-only ops ('+', '*', '/', etc.)
+    with only 1 arg are curried.
+    """
+    sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
+    if sym not in _ARITH_OPS_SET:
+        return False
+    # Nullary operators are always complete
+    if sym in ('cpu_time', 'real_time', 'genint'):
+        return True
+    # Unary-only operators: need exactly '1' arg
+    _unary_only = frozenset(('abs', 'sqrt', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
+                              'exp', 'log', 'floor', 'ceiling', 'round', 'truncate',
+                              'float', 'integer', 'sign', 'msb', '\\'))
+    if sym in _unary_only:
+        return '1' in t.attr_list
+    # '-' is both unary and binary: valid with 1 arg (unary) or 2 args (binary)
+    if sym == '-':
+        return '1' in t.attr_list
+    # All other ops are binary-only: need BOTH '1' and '2'
+    return '1' in t.attr_list and '2' in t.attr_list
+
+
 def _mark_real_sort(var: 'PsiTerm', wl, eng) -> None:
     """Mark a free variable as constrained to sort real, with no pending constraints.
 
@@ -3243,6 +3271,81 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
             return False
         return _unify(eng, a_d, _attr_cell.deref())
 
+    # Unwrap backtick-quoted terms: `Expr = X → bind X to inner Expr (marked NON_STRICT_TERM).
+    # In Wild Life, `Expr (backtick-quoted) "freezes" the expression to prevent evaluation.
+    # We unwrap here so that subsequent feature unification (e.g. A=@(2=>val)) operates
+    # on the actual arithmetic term rather than the backtick wrapper.
+    from wild_life.data_structures import NON_STRICT_TERM as _BI_BQ_NST  # noqa: F811
+    from wild_life.inference import _mark_arith_non_strict as _BI_MANS  # noqa: F811
+    _bq_sym_check = (lambda td: td.type is not None and td.type.keyword is not None
+                     and td.type.keyword.symbol == '`')
+    if _bq_sym_check(b_d):
+        _bq_inner = b_d.attr_list.get('1')
+        if _bq_inner is not None:
+            _bq_inner_d = _bq_inner.deref()
+            _BI_MANS(_bq_inner_d)  # recursively mark arithmetic sub-terms as NON_STRICT
+            b_d = _bq_inner_d
+    if _bq_sym_check(a_d):
+        _bq_inner = a_d.attr_list.get('1')
+        if _bq_inner is not None:
+            _bq_inner_d = _bq_inner.deref()
+            _BI_MANS(_bq_inner_d)
+            a_d = _bq_inner_d
+
+    # Detect non-frozen arithmetic operator being applied via @(1,2)-style term.
+    # Example: A=(+), A=@(1,2) — without backtick-freeze, `+` is an eager operator,
+    # not a curriable function value; attempting to add args via apply merging is an error.
+    from wild_life.data_structures import NON_STRICT_TERM as _BI_UNI_NST
+    _wl_uni = eng.wl
+    def _is_bare_arith_op(td):
+        sym = td.type.keyword.symbol if (td.type and td.type.keyword) else ''
+        return (sym in _ARITH_OPS_SET
+                and not td.attr_list        # no existing args
+                and not (td.flags & _BI_UNI_NST))  # not frozen
+    # Use symbol-based check for apply type — the parsed @(1,2) may use the '@' symbol
+    # definition rather than wl.apply which is set up later during boot.
+    _b_sym_apply = b_d.type.keyword.symbol if (b_d.type and b_d.type.keyword) else ''
+    _a_sym_apply = a_d.type.keyword.symbol if (a_d.type and a_d.type.keyword) else ''
+    _b_is_apply_type = (b_d.type is not None and
+                        (_b_sym_apply == '@' or b_d.type is _wl_uni.apply))
+    _a_is_apply_type = (a_d.type is not None and
+                        (_a_sym_apply == '@' or a_d.type is _wl_uni.apply))
+    if _is_bare_arith_op(a_d) and _b_is_apply_type and b_d.attr_list:
+        import sys as _sys_uni
+        _sym_uni = a_d.type.keyword.symbol if (a_d.type and a_d.type.keyword) else '?'
+        _sys_uni.stderr.write(f'*** Error: attempt to unify with curried function {_sym_uni}\n')
+        return False
+    if _is_bare_arith_op(b_d) and _a_is_apply_type and a_d.attr_list:
+        import sys as _sys_uni2
+        _sym_uni2 = b_d.type.keyword.symbol if (b_d.type and b_d.type.keyword) else '?'
+        _sys_uni2.stderr.write(f'*** Error: attempt to unify with curried function {_sym_uni2}\n')
+        return False
+
+    # Evaluate === (triple equals) identity function when both args are present.
+    # ===(X, Y) → true  if X and Y are the same pointer after deref,
+    #             false otherwise (even if either is free).
+    def _eval_triple_eq(t_d):
+        sym_te = t_d.type.keyword.symbol if (t_d.type and t_d.type.keyword) else ''
+        if sym_te != '===':
+            return None
+        te1 = t_d.attr_list.get('1')
+        te2 = t_d.attr_list.get('2')
+        if te1 is None or te2 is None:
+            return None  # Partially applied — not ready to evaluate
+        te1d = te1.deref()
+        te2d = te2.deref()
+        if id(te1d) == id(te2d):
+            return eng.wl.make_atom('true')
+        else:
+            return eng.wl.make_atom('false')
+
+    _te_b = _eval_triple_eq(b_d)
+    if _te_b is not None:
+        return _unify(eng, a_d, _te_b)
+    _te_a = _eval_triple_eq(a_d)
+    if _te_a is not None:
+        return _unify(eng, b_d, _te_a)
+
     # Try to evaluate b as a user-defined function call (f -> result style)
     if _is_user_function(b_d):
         result = PsiTerm(type_def=eng.wl.top)
@@ -3357,6 +3460,17 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         _ftype = _functor_val.type
         if _ftype is None:
             return None
+        # If functor is a non-frozen arithmetic operator (no NON_STRICT_TERM), refuse
+        # partial application — it's an eager operator, not a function value.
+        # Frozen operators (`+`, `*`, etc.) carry NON_STRICT_TERM and are allowed.
+        from wild_life.data_structures import NON_STRICT_TERM as _BI_APPLY_NST_CHK  # noqa: F811
+        _fval_sym = _ftype.keyword.symbol if _ftype.keyword else ''
+        if (_fval_sym in _ARITH_OPS_SET
+                and not (_functor_val.flags & _BI_APPLY_NST_CHK)
+                and not _functor_val.attr_list):  # bare arithmetic operator (no args yet)
+            import sys as _sys_apply
+            _sys_apply.stderr.write(f'*** Error: attempt to unify with curried function {_fval_sym}\n')
+            return False
         call_psi = PsiTerm()
         call_psi.type = _ftype
         call_psi.value = None
@@ -3365,6 +3479,15 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         for k, v in rhs.attr_list.items():
             if k != _functor_key:
                 call_psi.attr_list[k] = v
+        # Merge existing features from the bound functor term (curried partial application).
+        # e.g. A=*(23), then B=A(2=>13) → call_psi gets feature '1'=23 from *(23).
+        for _fk, _fv in _functor_val.attr_list.items():
+            if _fk not in call_psi.attr_list:
+                call_psi.attr_list[_fk] = _fv
+        # Propagate NON_STRICT_TERM flag from the functor (preserve non-eval semantics).
+        from wild_life.data_structures import NON_STRICT_TERM as _BI_APPLY_NST  # noqa: F811
+        if _functor_val.flags & _BI_APPLY_NST:
+            call_psi.flags |= _BI_APPLY_NST
         # Now treat lhs = call_psi — first try parse special case
         if _is_parse_func(call_psi):
             r2 = _eval_parse_func(call_psi, eng)
@@ -3397,7 +3520,23 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                         s_var2.flags |= _SV3
                     return True  # lhs stays @
             return False
-        # Fall through to normal unify for other function types
+        # Push a PROVE goal for (lhs = call_psi) so that bi_unify handles it
+        # with full arithmetic constraint logic.  This is needed so that when
+        # call_psi is a complete arithmetic expression (e.g. *(10, X) after
+        # merging functor features), the arithmetic residuation machinery fires
+        # (marking B and X as real~) rather than binding B directly without any
+        # constraint.
+        _wl_ap = eng.wl
+        _eq_defn_ap = getattr(_wl_ap, 'eqsym', None)
+        if _eq_defn_ap is None and hasattr(_wl_ap, 'syntax_module'):
+            _eq_defn_ap = _wl_ap.syntax_module.symbol_table.get('=')
+        if _eq_defn_ap is not None:
+            _eq_term_ap = PsiTerm(type_def=_eq_defn_ap)
+            _eq_term_ap.attr_list['1'] = lhs
+            _eq_term_ap.attr_list['2'] = call_psi
+            eng.push_goal(GoalType.PROVE, _eq_term_ap, None, None)
+            return True
+        # Fallback: direct unification if = symbol not found
         return _unify(eng, lhs, call_psi)
 
     _apply_b = _handle_apply_term(a_d, b_d)
@@ -3711,10 +3850,24 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         # Expression fully evaluated — proceed to unify LHS with result.
         b_d = b_arith
     else:
+        # RHS not fully evaluated. Try evaluating the LHS if it looks like an
+        # arithmetic expression (handles  eval(A) = B  or  3+4 = X  style).
+        if not _b_is_user_fn:
+            _a_sym_lhs = a_d.type.keyword.symbol if (a_d.type and a_d.type.keyword) else ''
+            _a_is_nst_lhs = bool(a_d.flags & _BI_NST)
+            _a_is_ufn_lhs = (a_d.type is not None and a_d.type.type == DefType.FUNCTION)
+            _a_could_eval_lhs = (_a_sym_lhs == 'eval' or
+                                 (_a_sym_lhs in _ARITH_OPS_SET
+                                  and not _a_is_nst_lhs
+                                  and _is_complete_arith_expr(a_d)))
+            if _a_could_eval_lhs and not _a_is_ufn_lhs and not _a_is_nst_lhs:
+                _a_arith_lhs = _try_eval_arith_to_term(a_d, eng)
+                if _a_arith_lhs is not None:
+                    return _unify(eng, _a_arith_lhs, b_d)
         # Arithmetic expression that couldn't be fully evaluated (has variables).
         wl = eng.wl
         b_sym = b_d.type.keyword.symbol if b_d.type and b_d.type.keyword else ''
-        if b_sym in _ARITH_OPS_SET and not _b_is_non_strict:
+        if b_sym in _ARITH_OPS_SET and not _b_is_non_strict and _is_complete_arith_expr(b_d):
             # Mark all free variables in the arithmetic expression (and the LHS
             # if free) as constrained to sort real.  This ensures that even when
             # the constraint is solved immediately (e.g. A=A+0 → trivial) the
