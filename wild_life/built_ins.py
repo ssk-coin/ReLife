@@ -3753,6 +3753,49 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                 eng.push_choice_point(GoalType.UNIFY, a_d, alt, None)
             return _unify(eng, a_d, alts[0])
 
+    # Pre-check: detect concrete non-boolean arguments in and/or expressions.
+    # Wild Life emits "Non-boolean argument or result in '...'." when any direct
+    # argument of an and/or operator is a concrete atom that is neither true nor
+    # false (free variables and nested bool expressions are OK).
+    # This check must run BEFORE _try_eval_bool so that 'true and c' shows
+    # 'true and c' in the error message (not just 'c' after simplification).
+    def _check_nonbool_bool_arg(expr_t):
+        """Return True and print error if expr_t is and/or with a concrete non-boolean arg."""
+        _sym_nb = _get_sym(expr_t)
+        if _sym_nb not in ('and', 'or'):
+            return False
+        _a1_nb = expr_t.attr_list.get('1')
+        _a2_nb = expr_t.attr_list.get('2')
+        if _a1_nb is None or _a2_nb is None:
+            return False
+        _a1_nb = _a1_nb.deref()
+        _a2_nb = _a2_nb.deref()
+        _wl_nb = eng.wl
+        from wild_life.data_structures import SORT_VAR as _SV_NB
+        def _bool_arg_ok(t_ok):
+            t_ok = t_ok.deref()
+            s_ok = _get_sym(t_ok)
+            if s_ok in ('true', 'false'):
+                return True
+            if _is_proper_bool_expr(t_ok):
+                return True
+            # Free variable: no attrs, no value, and top/None/bool/sort-var type
+            _fr = not t_ok.attr_list and t_ok.value is None and t_ok.coref is None
+            return _fr and (t_ok.type is None or t_ok.type is _wl_nb.top
+                            or t_ok.type is _wl_nb.boolean
+                            or bool(t_ok.flags & _SV_NB))
+        if not _bool_arg_ok(_a1_nb) or not _bool_arg_ok(_a2_nb):
+            _ds1 = _get_sym(_a1_nb) or '@'
+            _ds2 = _get_sym(_a2_nb) or '@'
+            import sys as _sys_nb
+            print(f"*** Error: Non-boolean argument or result in "
+                  f"'{_ds1} {_sym_nb} {_ds2}'.",
+                  file=_sys_nb.stderr)
+            return True
+        return False
+    if _check_nonbool_bool_arg(b_d) or _check_nonbool_bool_arg(a_d):
+        return False
+
     # Try to evaluate functional terms before unifying (boolean ops)
     _b_orig_for_bool = b_d   # save original so we can collect vars to mark after eval
     b_evaled = _try_eval_bool(b_d, eng)
