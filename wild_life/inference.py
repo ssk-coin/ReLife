@@ -844,6 +844,53 @@ class Engine:
             self.goal_count += 1
             return False
 
+        # For user-defined FUNCTION calls with free arguments:
+        # Residuate instead of eagerly matching clauses, so that f(X)? with
+        # free X suspends until X is bound, rather than proceeding with an
+        # unbound sort-typed variable (which would print int~ or similar).
+        # This mirrors the residuation check in eval_aim (lines ~1102-1150).
+        if (defn is not None and defn.type == DefType.FUNCTION and
+                thegoal.attr_list and rules):
+            _h0, _b0 = rules[0]
+            _h0d = _h0.deref() if _h0 is not None else None
+            if _h0d is not None and _h0d.attr_list:
+                _fn_free_args = []
+                for _fk_fn, _fv_psi_fn in thegoal.attr_list.items():
+                    _fv_fn = _fv_psi_fn.deref()
+                    _fv_fn_free = (
+                        (_fv_fn.type is None or _fv_fn.type is wl.top) and
+                        not _fv_fn.attr_list and
+                        _fv_fn.value is None and
+                        _fv_fn.coref is None
+                    )
+                    if _fv_fn_free:
+                        _h_arg_fn = _h0d.attr_list.get(_fk_fn)
+                        if _h_arg_fn is not None:
+                            _h_arg_d_fn = _h_arg_fn.deref()
+                            if (_h_arg_d_fn.type is not None and
+                                    _h_arg_d_fn.type is not wl.top):
+                                _fn_free_args.append(_fv_fn)
+                if _fn_free_args:
+                    from wild_life.data_structures import Goal as _FnGoal, Residuation as _FnResid, SORT_VAR as _SV_FN
+                    _pending_prove_fn = _FnGoal(GoalType.PROVE, thegoal, _DEFRULES,
+                                                None, next=None, pending=True)
+                    for _fv_free_fn in _fn_free_args:
+                        if _fv_free_fn.resid is None:
+                            self.trail.trail_psi(_fv_free_fn, 'resid')
+                            _fv_free_fn.resid = [_FnResid(goal=_pending_prove_fn)]
+                        else:
+                            if not any(rv.goal is _pending_prove_fn for rv in _fv_free_fn.resid):
+                                self.trail.trail_copy(_fv_free_fn, 'resid')
+                                _fv_free_fn.resid.append(_FnResid(goal=_pending_prove_fn))
+                        # Set SORT_VAR flag so Unifier treats variable as bindable
+                        # even when resid is non-empty.
+                        if not (_fv_free_fn.flags & _SV_FN):
+                            self.trail.trail_psi(_fv_free_fn, 'flags')
+                            _fv_free_fn.flags |= _SV_FN
+                    self.goal_stack = aim.next
+                    self.goal_count += 1
+                    return True
+
         # Filter out retracted clauses
         active = [(h, b) for (h, b) in (rules if rules else [])
                   if h is not None and b is not None]
