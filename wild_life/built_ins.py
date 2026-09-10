@@ -2955,6 +2955,18 @@ def _try_eval_any_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     return None
 
 
+
+# Built-in predicates whose first argument ('1') should NOT be eagerly evaluated
+# by _eval_embedded_user_funcs.  These predicates treat their first argument as a
+# FUNCTION/PREDICATE NAME (a symbol to look up), not as a value to evaluate.
+# For example, `setq(seed, 99)` should treat `seed` as a name, not call the
+# function `seed` to get 1 and then set the integer-1 definition to 99.
+_NON_STRICT_ARG1_BUILTINS: frozenset = frozenset({
+    'setq', 'dynamic', 'static', 'assert', 'asserta', 'retract',
+    'clause', 'abolish', 'listing',
+})
+
+
 def _eval_embedded_user_funcs(
         t: PsiTerm, eng, _depth: int, visited: set) -> None:
     """Walk t's attribute tree and evaluate any user-function sub-terms.
@@ -2973,7 +2985,17 @@ def _eval_embedded_user_funcs(
     if id(td) in visited:
         return
     visited.add(id(td))
+    # Check if this term is a non-strict-first-arg built-in (e.g. setq, assert).
+    # For these, skip evaluating argument '1' — it is a function/predicate NAME
+    # that should be looked up, not evaluated as a value.
+    _skip_arg1 = (
+        td.type is not None and
+        td.type.keyword is not None and
+        td.type.keyword.symbol in _NON_STRICT_ARG1_BUILTINS
+    )
     for key in list(td.attr_list.keys()):
+        if _skip_arg1 and key == '1':
+            continue  # do not eagerly evaluate function/predicate name arguments
         child = td.attr_list[key].deref()
         evaled = _try_eval_any_func(child, eng)
         if evaled is not None and evaled is not child:
