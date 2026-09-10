@@ -447,6 +447,15 @@ class Unifier:
                             _u_num = _mn(self.engine, _val)
                             self.bind(v, _u_num)
                             self._wakeup_resid(v, _u_num)
+                            # Memoize the evaluated result back into the compound term so
+                            # that any query variable pointing to this compound (e.g. X → 1+2)
+                            # also dereferences to the evaluated number (X → 1+2 → 3).
+                            # This makes the binding display show X=3 instead of X=1+2 after
+                            # a strict predicate evaluates the argument at call time.
+                            # The coref update is trailed so backtracking correctly undoes it.
+                            if u.coref is None and u.value is None and u.attr_list:
+                                self.trail.trail_psi(u, 'coref')
+                                u.coref = _u_num
                             return True
                     except Exception:
                         pass

@@ -39,7 +39,29 @@ def _eval_pure_arith(t: 'PsiTerm', wl, _depth: int = 0):
             return float(t.value)
     # Unbound variable or non-numeric term
     sym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
-    if not sym or not t.attr_list:
+    if not sym:
+        return None
+
+    # 0-arity user-defined function (e.g. `result` after setq/<<-):
+    # Evaluate by looking up the stored rule body.
+    from wild_life.data_structures import DefType as _DefType
+    if (not t.attr_list and t.type is not None and
+            t.type.type == _DefType.FUNCTION and t.type.rule):
+        for _h0, _b0 in t.type.rule:
+            if _h0 is None or _b0 is None:
+                continue
+            _b0d = _b0.deref()
+            # Only evaluate concrete numeric bodies (no recursive calls)
+            if _b0d.value is not None and _b0d.type is not None and wl:
+                if _b0d.type.is_subtype_of(wl.real):
+                    return float(_b0d.value)
+            # Try evaluating the body recursively (handles result -> N-1 etc.)
+            _rv = _eval_pure_arith(_b0d, wl, _depth + 1)
+            if _rv is not None:
+                return _rv
+        return None
+
+    if not t.attr_list:
         return None
 
     def _arg(n):
@@ -832,32 +854,15 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
         return
     t = t.deref()
 
-    # Evaluate pure constant arithmetic expressions (e.g. X bound to 1+2 → show 3).
-    # Only trigger for compound arithmetic terms (no value yet, has attributes, arith op).
-    # Suppressed inside backtick-quoted contexts (no_arith_eval flag).
-    _arith_ops_print = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
-                                  'max', 'min', 'abs', 'sqrt', 'floor', 'ceiling',
-                                  'round', 'truncate', 'exp', 'log', 'sin', 'cos', 'tan',
-                                  'strlen'))
+    # Note: arithmetic evaluation during display is now handled by memoization
+    # in _try_eval_arith_to_term (built_ins.py) during unification.
+    # When a strict predicate evaluates an arithmetic expression, the result is
+    # stored back into the expression's coref so that display via deref shows the
+    # computed value.  Expressions that were never evaluated (e.g. sort constraints
+    # via X:T) stay as structural terms and are displayed unevaluated.
+    # The old _eval_pure_arith block here was removed to avoid evaluating sort-
+    # constraint expressions (assert4: X:(1+2) should show "X = 1 + 2." not "X = 3.").
     _psym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
-    from wild_life.data_structures import NON_STRICT_TERM as _NST_PRINT
-    if (not ps.no_arith_eval and _psym in _arith_ops_print and t.value is None and t.attr_list and wl
-            and not (t.flags & _NST_PRINT)):
-        _pval = _eval_pure_arith(t, wl)
-        if _pval is not None:
-            # Construct a synthetic number term for display only
-            _pt = PsiTerm()
-            if _pval == int(_pval) and wl.integer and wl.integer.is_subtype_of(wl.real):
-                _pt.type = wl.integer
-                _pt.value = int(_pval)
-            elif wl.real:
-                _pt.type = wl.real
-                _pt.value = _pval
-            else:
-                _pt.type = t.type  # fallback
-                _pt.value = _pval
-            _print_value(ps, _pt, wl)
-            return
 
     # Evaluate copy_term(X) functional use during printing
     if (_psym == 'copy_term' and t.value is None and

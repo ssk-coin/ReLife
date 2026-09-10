@@ -534,7 +534,17 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
 
 
 def _try_eval_arith_to_term(t: PsiTerm, eng) -> Optional[PsiTerm]:
-    """Try arithmetic evaluation, returning a PsiTerm or None."""
+    """Try arithmetic evaluation, returning a PsiTerm or None.
+
+    When a compound arithmetic expression (e.g. 1+2) is evaluated to a number,
+    the result is memoized back into the expression term via coref so that future
+    dereferences of any variable pointing to the expression yield the concrete number.
+    This mimics C Wild Life's in-place evaluation: after a strict predicate evaluates
+    an argument expression, the evaluated result propagates back through the variable
+    chain so the binding display shows the computed value (e.g. X = 3. after my_write2
+    evaluated X's binding 1+2 → 3).
+    The coref update is trailed so backtracking correctly undoes it.
+    """
     ok, v = _eval_arith(t, eng)
     if not ok:
         return None
@@ -542,6 +552,7 @@ def _try_eval_arith_to_term(t: PsiTerm, eng) -> Optional[PsiTerm]:
     # (to avoid infinite recursion)
     if t is None:
         return None
+    t_orig = t  # save original for memoization
     t = t.deref()
     if t.value is not None and not (t.type and t.type.keyword and
                                     t.type.keyword.symbol in ('+','-','*','/','//',
@@ -554,6 +565,13 @@ def _try_eval_arith_to_term(t: PsiTerm, eng) -> Optional[PsiTerm]:
     # via the binary * path or literal evaluation). Mark _delay_fired=True so
     # that subsequent unification with a free variable does not re-fire.
     result._delay_fired = True
+    # Memoize the result back into the compound arithmetic term (t) via coref.
+    # This propagates the evaluated value through the variable chain:
+    # after evaluation, any variable that pointed to this expression will deref to
+    # the concrete number.  We trail the old coref so backtracking can undo this.
+    if eng is not None and t.coref is None and t.value is None and t.attr_list:
+        eng.trail.trail_psi(t, 'coref')
+        t.coref = result
     return result
 
 
@@ -1081,13 +1099,18 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
 
     # ── arithmetic evaluation (e.g. 23+23 → 46) ─────────────────────────────
     # Guard against cyclic terms (e.g. X = s(X)) causing infinite recursion.
+    # Skip arithmetic evaluation for terms with NON_STRICT_TERM flag: these are
+    # expressions passed to non-strict predicates (e.g. `write(1+2)` where the
+    # argument was labeled in a non-strict context); they must be printed as-is.
     _arith_binary_ops = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
                                    'max', 'min'))
     _arith_unary_ops = frozenset(('abs', 'sqrt', 'sin', 'cos', 'tan', 'exp',
                                   'log', 'floor', 'ceiling', 'round',
                                   'truncate'))
+    from wild_life.data_structures import NON_STRICT_TERM as _WT_NST
+    _is_nst = bool(t.flags & _WT_NST)
     try:
-        t_eval = _try_eval_arith_to_term(t, eng)
+        t_eval = _try_eval_arith_to_term(t, eng) if not _is_nst else None
         if t_eval is not None:
             t = t_eval
         else:
@@ -1122,6 +1145,14 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
             elif _is_user_function(t) and eng is not None:
                 # User-defined function call: evaluate synchronously for display.
                 # Use a trail mark so pattern-matching bindings don't leak.
+                # NOTE: 0-arity user functions (global variables declared with
+                # setq/persistent) are handled carefully: we only substitute the
+                # evaluated result if it is a concrete numeric value.  If the
+                # stored body is an unevaluated expression with unbound variables
+                # (e.g. after backtracking), we keep the original atom name so
+                # that write(result) prints "result" rather than "@ + 1".
+                _is_zero_arity_fn = not t.attr_list
+                _evaled = None
                 _mark = eng.trail.mark()
                 try:
                     _evaled = _eval_user_func_sync(t, eng, 0)
@@ -1137,7 +1168,16 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
                     # compute any arithmetic ops that involve disjunction operands
                     # (e.g. {1; 1+posint_stream_to(N-1)} → {1;2;3}).
                     _evaled = _evaluate_result_for_display(_evaled, eng, 1)
-                    t = _evaled
+                    if _is_zero_arity_fn:
+                        # For 0-arity globals: only substitute a concrete numeric
+                        # result.  Compound bodies with unbound variables must not
+                        # replace the atom name during display.
+                        _evd = _evaled.deref()
+                        if _evd.value is not None:
+                            t = _evaled
+                        # else: keep original t (print the atom name as-is)
+                    else:
+                        t = _evaled
             elif _is_cond_builtin_local(t) and eng is not None:
                 # Built-in cond(C, T, E) as a functional expression: evaluate
                 # synchronously so write(cond(3<2,{},f(3))) prints the result,
@@ -1448,13 +1488,17 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
             head = copy_term(h0, _vm)
             body = copy_term(b0, _vm)
             body_d = body.deref()
-            # Skip sort-constrained rules: head is a bare variable (no attrs).
-            # These rules are X:sort -> body, designed for eval_aim not direct
-            # arithmetic. Evaluating them causes infinite recursion because the
-            # body typically calls features(X) which can't be resolved here.
+            # Skip sort-constrained rules: head is a bare variable (no attrs)
+            # AND the call term itself has arguments. These rules are
+            # X:sort -> body, designed for eval_aim not direct arithmetic.
+            # Evaluating them causes infinite recursion because the body
+            # typically calls features(X) which can't be resolved here.
+            # EXCEPTION: 0-arity functions like `result -> 4` also have no
+            # head attrs, but they should still be evaluated — they differ
+            # from sort-constrained rules in that the call term has no args.
             head_d = head.deref()
-            if not head_d.attr_list:
-                continue
+            if not head_d.attr_list and t.attr_list:
+                continue  # Sort-constrained rule — skip
             # Handle conditional: body = (value | condition) — skip if conditioned
             if body_d.type is not None and body_d.type is wl.such_that:
                 continue  # Can't evaluate conditionals without engine; skip
@@ -3397,8 +3441,13 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     if _te_a is not None:
         return _unify(eng, b_d, _te_a)
 
-    # Try to evaluate b as a user-defined function call (f -> result style)
-    if _is_user_function(b_d):
+    # Try to evaluate b as a user-defined function call (f -> result style).
+    # EXCEPTION: 0-arity user functions (global variables like `result` declared
+    # with `persistent` or `setq`) are handled later by direct synchronous
+    # evaluation (line ~4061), NOT via an EVAL goal.  Using EVAL goals for them
+    # would create arithmetic constraints when the stored value is an arithmetic
+    # expression with unbound variables, causing spurious `real~` display.
+    if _is_user_function(b_d) and b_d.attr_list:
         result = PsiTerm(type_def=eng.wl.top)
         # LIFO: push UNIFY first, then EVAL on top (EVAL executes first)
         eng.push_goal(GoalType.UNIFY, a_d, result, None)
@@ -3406,7 +3455,7 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         return True
 
     # Try to evaluate a as a user-defined function call
-    if _is_user_function(a_d):
+    if _is_user_function(a_d) and a_d.attr_list:
         result = PsiTerm(type_def=eng.wl.top)
         eng.push_goal(GoalType.UNIFY, result, b_d, None)
         eng.push_goal(GoalType.EVAL, a_d, result, a_d.type.rule)
@@ -4045,11 +4094,43 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     # Skip user-defined function calls here — they are handled by eval_aim,
     # and evaluating them twice creates separate Python objects that each fire
     # delay rules independently, producing double output.
+    # EXCEPTION: 0-arity user functions (e.g. `result` after `result<<-4`)
+    # are NOT handled by eval_aim in this context (no EVAL goal is set up for
+    # them), so we evaluate them directly here.
     # Also skip if the term is tagged NON_STRICT_TERM (bound inside a non-strict
     # predicate — the expression should remain as data, not be evaluated).
     from wild_life.data_structures import NON_STRICT_TERM as _BI_NST
     _b_is_user_fn = (b_d.type is not None and b_d.type.type == DefType.FUNCTION)
     _b_is_non_strict = bool(b_d.flags & _BI_NST)
+    # Evaluate 0-arity user functions (global variables like `result`) directly.
+    # _eval_user_func_sync makes trailed side-effects (unifying the function atom
+    # with its rule head copy).  We save a trail mark, call eval, undo the side
+    # effects, and only keep the VALUE if it turned out to be concrete.
+    # This avoids corrupting `result`'s coref and prevents spurious arithmetic
+    # constraints from unevaluated or self-referential rule bodies.
+    if _b_is_user_fn and not _b_is_non_strict and not b_d.attr_list:
+        _0a_mark = eng.trail.mark()
+        _b_evaled = _eval_user_func_sync(b_d, eng, 0)
+        eng.trail.undo_to(_0a_mark)  # undo coref-linking of atom with rule-head copy
+        if _b_evaled is not None:
+            _b_evaled_d = _b_evaled.deref()
+            # Only accept the evaluation if it produced a CONCRETE numeric value.
+            # If it returned a compound expression (unevaluated or self-referential),
+            # try one more arithmetic evaluation pass.  If that also fails, fall
+            # through to normal unification (treats `result` as a variable).
+            if _b_evaled_d.value is not None:
+                # Concrete numeric result → create a fresh number term (the
+                # original _b_evaled object may reference now-undone bindings).
+                b_d = _make_number(eng, float(_b_evaled_d.value))
+                _b_is_user_fn = False
+            else:
+                # Compound result — try arithmetic evaluation
+                _b_arith2 = _try_eval_arith_to_term(_b_evaled_d, eng)
+                if _b_arith2 is not None:
+                    b_d = _b_arith2
+                    _b_is_user_fn = False
+                # else: keep original b_d (the 0-arity function atom) so that
+                # normal unification treats `result` as a sort variable.
     b_arith = _try_eval_arith_to_term(b_d, eng) if (not _b_is_user_fn and not _b_is_non_strict) else None
     if b_arith is not None:
         # Expression fully evaluated — proceed to unify LHS with result.
@@ -5112,36 +5193,47 @@ def bi_setq(goal: PsiTerm, eng) -> bool:
 
     Retracts all existing X -> @ rules and asserts X -> V.
     Used for global variable assignment:  setq(counter, 5).
+
+    Like <<-, setq evaluates V arithmetically before storing so that the
+    stored value is concrete and survives backtracking.  (If V is not a
+    pure arithmetic expression the raw term is stored instead.)
     """
     args = list(goal.attr_list.values()) if goal.attr_list else []
     if len(args) < 2:
         return False
     x_term = args[0].deref()
-    v_term = args[1].deref()
     wl = eng.wl
 
     defn = x_term.type
     if defn is None:
         return False
 
-    # Make X dynamic if it is not already
+    # Make X dynamic if it is not already; set its type to FUNCTION
     from wild_life.data_structures import DefType
     if defn.rule is None or callable(defn.rule):
         defn.rule = []
+    defn.type = DefType.FUNCTION  # ensure it's recognised as a function
 
     # Remove ALL existing -> rules for X (retract all functional clauses)
-    # A functional rule is stored as (head, body) where head matches x_term
-    rule_list = defn.rule
-    new_rules = [(h, b) for (h, b) in rule_list if h is None]  # keep tombstones? No — clear all
     defn.rule = []  # wipe all rules
 
-    # Assert X -> V  (a single-arg functional rule)
-    # Build head = x_term (fresh copy) with value = v_term
+    # Evaluate V arithmetically if possible (so the stored value is a
+    # concrete number that survives backtracking), otherwise store the
+    # dereffed term directly (like <<- does for global variables).
+    ok_arith, val = _eval_arith(goal.attr_list.get('2'), eng)
+    if ok_arith:
+        v_stored = PsiTerm()
+        v_stored.type = eng.wl.real
+        v_stored.value = val
+    else:
+        v_stored = goal.attr_list.get('2').deref()
+
+    # Build head = x_term (fresh copy) with value = v_stored
     from wild_life.unification import copy_term
     _vm: dict = {}
     head_copy = copy_term(x_term, _vm)
-    # The rule body for -> is the return value directly
-    defn.rule.append((head_copy, v_term))
+    # The rule body for -> is the return value
+    defn.rule.append((head_copy, v_stored))
     return True
 
 
@@ -6861,7 +6953,24 @@ def register_all(wl) -> None:
     _reg('dynamic', _bi_dynamic)
 
     def _bi_persistent(goal, eng):
-        """persistent(P): declare P as persistent. No-op here."""
+        """persistent(P): declare P as a persistent (global) function variable.
+
+        This initializes P's definition as a FUNCTION with an empty rule list
+        so that subsequent `P <<- Value` calls use the global-variable (Mode 1)
+        assignment path in bi_store_arrow — updating the shared Definition's
+        rule list rather than destructively modifying a single PsiTerm instance.
+        """
+        arg = goal.attr_list.get('1')
+        if arg is None:
+            return True
+        arg_d = arg.deref()
+        defn = arg_d.type
+        if defn is not None:
+            # Ensure the definition is typed as FUNCTION with an initialized rule list
+            if defn.rule is None:
+                defn.rule = []
+            if defn.type not in (DefType.FUNCTION, DefType.PREDICATE):
+                defn.type = DefType.FUNCTION
         return True
     _reg('persistent', _bi_persistent)
 
