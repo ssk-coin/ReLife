@@ -782,6 +782,40 @@ class Engine:
         # ── UNDEFINED or LOOKUP from DEFRULES ──
         rules = rule_or_sentinel
         if rules is _DEFRULES:
+            # Check if the goal term is an unbound free variable.
+            # Free vars have type=wl.top (DefType.TYPE) with no attr_list/value/coref,
+            # OR type=None. In Wild Life, calling a free variable as a goal succeeds
+            # immediately and suspends the prove as a pending residuated goal on the
+            # variable. When the variable is later bound, the woken goal proves the
+            # bound value. The variable displays as @~ (top sort with pending constraint).
+            _goal_is_free_var = (
+                (defn is None or (defn is wl.top)) and
+                not thegoal.attr_list and
+                thegoal.value is None and
+                thegoal.coref is None
+            )
+            if _goal_is_free_var:
+                from wild_life.data_structures import Residuation as _RuVar, SORT_VAR as _SORT_VAR_FV
+                _g_var_pending = Goal(GoalType.PROVE, thegoal, aim.b, aim.c,
+                                      next=None, pending=True)
+                _r_var = _RuVar(goal=_g_var_pending, bestsort=None, value=None,
+                                next=None, pending=True)
+                if thegoal.resid is None:
+                    self.trail.trail_psi(thegoal, 'resid')
+                    thegoal.resid = [_r_var]
+                else:
+                    self.trail.trail_psi(thegoal, 'resid')
+                    thegoal.resid = thegoal.resid + [_r_var]
+                # Set SORT_VAR flag so the Unifier treats this variable as
+                # bindable (not as a ground term) even though resid is non-empty.
+                # Without this flag, Unifier.unify sees `not u.resid` as False
+                # and skips _wakeup_resid when the variable is later bound.
+                if not (thegoal.flags & _SORT_VAR_FV):
+                    self.trail.trail_psi(thegoal, 'flags')
+                    thegoal.flags |= _SORT_VAR_FV
+                self.goal_stack = aim.next
+                self.goal_count += 1
+                return True
             if defn is None:
                 return False
             if defn.type == DefType.PREDICATE:
@@ -809,6 +843,53 @@ class Engine:
             self.goal_stack = aim.next
             self.goal_count += 1
             return False
+
+        # For user-defined FUNCTION calls with free arguments:
+        # Residuate instead of eagerly matching clauses, so that f(X)? with
+        # free X suspends until X is bound, rather than proceeding with an
+        # unbound sort-typed variable (which would print int~ or similar).
+        # This mirrors the residuation check in eval_aim (lines ~1102-1150).
+        if (defn is not None and defn.type == DefType.FUNCTION and
+                thegoal.attr_list and rules):
+            _h0, _b0 = rules[0]
+            _h0d = _h0.deref() if _h0 is not None else None
+            if _h0d is not None and _h0d.attr_list:
+                _fn_free_args = []
+                for _fk_fn, _fv_psi_fn in thegoal.attr_list.items():
+                    _fv_fn = _fv_psi_fn.deref()
+                    _fv_fn_free = (
+                        (_fv_fn.type is None or _fv_fn.type is wl.top) and
+                        not _fv_fn.attr_list and
+                        _fv_fn.value is None and
+                        _fv_fn.coref is None
+                    )
+                    if _fv_fn_free:
+                        _h_arg_fn = _h0d.attr_list.get(_fk_fn)
+                        if _h_arg_fn is not None:
+                            _h_arg_d_fn = _h_arg_fn.deref()
+                            if (_h_arg_d_fn.type is not None and
+                                    _h_arg_d_fn.type is not wl.top):
+                                _fn_free_args.append(_fv_fn)
+                if _fn_free_args:
+                    from wild_life.data_structures import Goal as _FnGoal, Residuation as _FnResid, SORT_VAR as _SV_FN
+                    _pending_prove_fn = _FnGoal(GoalType.PROVE, thegoal, _DEFRULES,
+                                                None, next=None, pending=True)
+                    for _fv_free_fn in _fn_free_args:
+                        if _fv_free_fn.resid is None:
+                            self.trail.trail_psi(_fv_free_fn, 'resid')
+                            _fv_free_fn.resid = [_FnResid(goal=_pending_prove_fn)]
+                        else:
+                            if not any(rv.goal is _pending_prove_fn for rv in _fv_free_fn.resid):
+                                self.trail.trail_copy(_fv_free_fn, 'resid')
+                                _fv_free_fn.resid.append(_FnResid(goal=_pending_prove_fn))
+                        # Set SORT_VAR flag so Unifier treats variable as bindable
+                        # even when resid is non-empty.
+                        if not (_fv_free_fn.flags & _SV_FN):
+                            self.trail.trail_psi(_fv_free_fn, 'flags')
+                            _fv_free_fn.flags |= _SV_FN
+                    self.goal_stack = aim.next
+                    self.goal_count += 1
+                    return True
 
         # Filter out retracted clauses
         active = [(h, b) for (h, b) in (rules if rules else [])
@@ -1160,27 +1241,48 @@ class Engine:
 
             _bind_free_sort_vars(body)
 
-        # Now that head args are bound, try arithmetic evaluation of body
+        # Now that head args are bound, try arithmetic evaluation of body.
         body_d2 = body.deref()
         from wild_life.built_ins import _eval_arith, _make_number
+
+        # Body is a user-defined function call — push EVAL so it gets evaluated
+        # (rather than UNIFY which would just structurally bind result to the term).
+        #
+        # IMPORTANT: Check this BEFORE _eval_arith.  _eval_arith can inline-evaluate
+        # user-defined functions (e.g. last([2,3]) → 3.0), but doing so loses the
+        # original psi-term object identity: it returns (True, 3.0) and we then call
+        # _make_number to create a FRESH psi-term.  That fresh term has a different
+        # Python id than the original node in the data structure (e.g. the integer 3
+        # inside list A=[1,2,3]).  The shared-term detection in print_variables uses
+        # Python object identity to detect sharing, so the freshly created term is
+        # NOT seen as the same object as the element of A — breaking "A = [1,2,B]".
+        # Pushing an EVAL goal instead lets the machinery recurse properly and at the
+        # base case (body is a concrete literal, not a user function) preserves the
+        # original term identity.
+        if _is_user_function(body_d2):
+            self.push_goal(GoalType.EVAL, body_d2, result, body_d2.type.rule)
+            return True
+
         arith_ok, arith_val = _eval_arith(body_d2, self)
         if arith_ok:
             # Body evaluated to a number — unify result with it immediately.
             # Mark _delay_fired=True because _eval_arith already fired delay for
             # the result (via the binary * path or pre-eval computed-term firing).
             # This prevents a second delay fire during unification with result.
-            num_term = _make_number(self, arith_val)
-            num_term._delay_fired = True
-            ok2 = self.unifier.unify(result, num_term)
+            #
+            # If the body is already a concrete literal (value is not None), bind
+            # result directly to preserve the original psi-term's Python identity.
+            if body_d2.value is not None:
+                # Concrete literal — bind directly (delay already fired by _eval_arith)
+                ok2 = self.unifier.unify(result, body_d2)
+            else:
+                # Compound arithmetic expression — create a new numeric term
+                num_term = _make_number(self, arith_val)
+                num_term._delay_fired = True
+                ok2 = self.unifier.unify(result, num_term)
             if not ok2:
                 self.trail.undo_to(mark)
                 return False
-            return True
-
-        # Body is a user-defined function call — push EVAL so it gets evaluated
-        # (rather than UNIFY which would just structurally bind result to the term)
-        if _is_user_function(body_d2):
-            self.push_goal(GoalType.EVAL, body_d2, result, body_d2.type.rule)
             return True
 
         # Body is a built-in cond(C, T, E) — evaluate it as a functional conditional

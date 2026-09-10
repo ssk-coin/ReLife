@@ -202,6 +202,27 @@ def _mark_bool_sort(var: 'PsiTerm', wl, eng) -> None:
         var.resid = []
 
 
+def _remove_resid_for_goal(var: 'PsiTerm', goal_psi, eng) -> None:
+    """Remove from var's resid list any entry whose goal.a is goal_psi.
+
+    Used when a boolean constraint is resolved by partial evaluation during a
+    re-fire: the pending Residuation entry is no longer needed and should be
+    removed so the variable does not display as bool~.
+
+    Trails the resid modification for backtracking safety.
+    """
+    var = var.deref()
+    if not var.resid:
+        return
+    new_r = [r for r in var.resid
+             if not (r.goal is not None and
+                     getattr(r.goal, 'a', None) is goal_psi)]
+    if len(new_r) != len(var.resid):
+        if eng is not None:
+            eng.trail.trail_psi(var, 'resid')
+        var.resid = new_r if new_r else []
+
+
 def _collect_arith_vars(t: 'PsiTerm', wl, result: list, seen: set) -> None:
     """Collect all unbound variables in an arithmetic expression.
 
@@ -499,6 +520,14 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if s1 in ('true', 'false') and s2 in ('true', 'false'):
             result = (s1 == 'true') ^ (s2 == 'true')
             return _make_atom(eng, 'true' if result else 'false')
+        # Partial evaluation: 'false' is the identity for xor (false xor X = X)
+        if s1 == 'false':
+            return a2   # false xor X = X
+        if s2 == 'false':
+            return a1   # X xor false = X
+        # Idempotent: X xor X = false (same variable by identity)
+        if id(a1.deref()) == id(a2.deref()):
+            return _make_atom(eng, 'false')
         return None
 
     return None
@@ -2955,6 +2984,18 @@ def _try_eval_any_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     return None
 
 
+
+# Built-in predicates whose first argument ('1') should NOT be eagerly evaluated
+# by _eval_embedded_user_funcs.  These predicates treat their first argument as a
+# FUNCTION/PREDICATE NAME (a symbol to look up), not as a value to evaluate.
+# For example, `setq(seed, 99)` should treat `seed` as a name, not call the
+# function `seed` to get 1 and then set the integer-1 definition to 99.
+_NON_STRICT_ARG1_BUILTINS: frozenset = frozenset({
+    'setq', 'dynamic', 'static', 'assert', 'asserta', 'retract',
+    'clause', 'abolish', 'listing',
+})
+
+
 def _eval_embedded_user_funcs(
         t: PsiTerm, eng, _depth: int, visited: set) -> None:
     """Walk t's attribute tree and evaluate any user-function sub-terms.
@@ -2973,7 +3014,17 @@ def _eval_embedded_user_funcs(
     if id(td) in visited:
         return
     visited.add(id(td))
+    # Check if this term is a non-strict-first-arg built-in (e.g. setq, assert).
+    # For these, skip evaluating argument '1' — it is a function/predicate NAME
+    # that should be looked up, not evaluated as a value.
+    _skip_arg1 = (
+        td.type is not None and
+        td.type.keyword is not None and
+        td.type.keyword.symbol in _NON_STRICT_ARG1_BUILTINS
+    )
     for key in list(td.attr_list.keys()):
+        if _skip_arg1 and key == '1':
+            continue  # do not eagerly evaluate function/predicate name arguments
         child = td.attr_list[key].deref()
         evaled = _try_eval_any_func(child, eng)
         if evaled is not None and evaled is not child:
@@ -3702,6 +3753,49 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                 eng.push_choice_point(GoalType.UNIFY, a_d, alt, None)
             return _unify(eng, a_d, alts[0])
 
+    # Pre-check: detect concrete non-boolean arguments in and/or expressions.
+    # Wild Life emits "Non-boolean argument or result in '...'." when any direct
+    # argument of an and/or operator is a concrete atom that is neither true nor
+    # false (free variables and nested bool expressions are OK).
+    # This check must run BEFORE _try_eval_bool so that 'true and c' shows
+    # 'true and c' in the error message (not just 'c' after simplification).
+    def _check_nonbool_bool_arg(expr_t):
+        """Return True and print error if expr_t is and/or with a concrete non-boolean arg."""
+        _sym_nb = _get_sym(expr_t)
+        if _sym_nb not in ('and', 'or'):
+            return False
+        _a1_nb = expr_t.attr_list.get('1')
+        _a2_nb = expr_t.attr_list.get('2')
+        if _a1_nb is None or _a2_nb is None:
+            return False
+        _a1_nb = _a1_nb.deref()
+        _a2_nb = _a2_nb.deref()
+        _wl_nb = eng.wl
+        from wild_life.data_structures import SORT_VAR as _SV_NB
+        def _bool_arg_ok(t_ok):
+            t_ok = t_ok.deref()
+            s_ok = _get_sym(t_ok)
+            if s_ok in ('true', 'false'):
+                return True
+            if _is_proper_bool_expr(t_ok):
+                return True
+            # Free variable: no attrs, no value, and top/None/bool/sort-var type
+            _fr = not t_ok.attr_list and t_ok.value is None and t_ok.coref is None
+            return _fr and (t_ok.type is None or t_ok.type is _wl_nb.top
+                            or t_ok.type is _wl_nb.boolean
+                            or bool(t_ok.flags & _SV_NB))
+        if not _bool_arg_ok(_a1_nb) or not _bool_arg_ok(_a2_nb):
+            _ds1 = _get_sym(_a1_nb) or '@'
+            _ds2 = _get_sym(_a2_nb) or '@'
+            import sys as _sys_nb
+            print(f"*** Error: Non-boolean argument or result in "
+                  f"'{_ds1} {_sym_nb} {_ds2}'.",
+                  file=_sys_nb.stderr)
+            return True
+        return False
+    if _check_nonbool_bool_arg(b_d) or _check_nonbool_bool_arg(a_d):
+        return False
+
     # Try to evaluate functional terms before unifying (boolean ops)
     _b_orig_for_bool = b_d   # save original so we can collect vars to mark after eval
     b_evaled = _try_eval_bool(b_d, eng)
@@ -3713,17 +3807,27 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         # and idempotent cases (e.g. B and B → B keeps sort bool, resid=[]).
         _bool_free_evaled: list = []
         _collect_bool_free_vars(_b_orig_for_bool, eng.wl, _bool_free_evaled, set())
+        # Check if this is a re-fire of a pending residuated goal. If so,
+        # clear the specific pending resid entry from all affected variables
+        # (constraint resolved by partial eval — no watchdog needed anymore).
+        _bool_is_refire = getattr(goal, '_resid_marker', False)
         for _bv_evaled in _bool_free_evaled:
             _mark_bool_sort(_bv_evaled, eng.wl, eng)
+            if _bool_is_refire:
+                _remove_resid_for_goal(_bv_evaled, goal, eng)
         # Also mark the result itself if it is a free variable
         # (e.g. and(B,B)→B or and(true,X)→X; A = result gives A bool sort)
         _result_evaled = b_evaled.deref()
         _mark_bool_sort(_result_evaled, eng.wl, eng)
+        if _bool_is_refire:
+            _remove_resid_for_goal(_result_evaled, goal, eng)
         # Also mark a_d (LHS) if it is a free variable: when we are about to
         # unify it with b_evaled, a_d should have resid=[] too so it does not
         # display as bool~ if it ends up as the canonical representative.
         _a_d_cur_for_mark = a_d.deref()
         _mark_bool_sort(_a_d_cur_for_mark, eng.wl, eng)
+        if _bool_is_refire:
+            _remove_resid_for_goal(_a_d_cur_for_mark, goal, eng)
         b_d = b_evaled
     else:
         _a_orig_for_bool = a_d
@@ -3798,6 +3902,107 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                     if not _unify(eng, _bv_br, _make_atom(eng, 'false')):
                         return False
                 return True
+            elif _bool_sym_br == 'xor':
+                # xor backward propagation.
+                # Evaluate each arg of the top-level xor to get their effective
+                # simplified values (e.g. xor(xor(false,false), D) → D). This
+                # lets us detect propagatable constraints even when the xor args
+                # are nested sub-expressions whose concrete sub-terms have cancelled.
+                _xor_a1_raw_br = _bool_expr_br.attr_list.get('1')
+                _xor_a2_raw_br = _bool_expr_br.attr_list.get('2')
+                _xor_a1_raw_d = _xor_a1_raw_br.deref() if _xor_a1_raw_br is not None else None
+                _xor_a2_raw_d = _xor_a2_raw_br.deref() if _xor_a2_raw_br is not None else None
+                # Effective arg = simplified via _try_eval_bool, or original deref
+                _xor_a1_eff = ((_try_eval_bool(_xor_a1_raw_d, eng) or _xor_a1_raw_d)
+                               if _xor_a1_raw_d is not None else None)
+                _xor_a2_eff = ((_try_eval_bool(_xor_a2_raw_d, eng) or _xor_a2_raw_d)
+                               if _xor_a2_raw_d is not None else None)
+                _xor_s1_eff = _get_sym(_xor_a1_eff) if _xor_a1_eff is not None else ''
+                _xor_s2_eff = _get_sym(_xor_a2_eff) if _xor_a2_eff is not None else ''
+
+                def _xor_arg_is_free(t):
+                    """True iff t (already deref'd) is an unbound free variable."""
+                    if t is None:
+                        return False
+                    t = t.deref()
+                    return (not t.attr_list and t.coref is None and t.value is None
+                            and _get_sym(t) not in ('true', 'false'))
+
+                _a1_eff_free = _xor_arg_is_free(_xor_a1_eff)
+                _a2_eff_free = _xor_arg_is_free(_xor_a2_eff)
+
+                if _other_sym_br == 'false':
+                    if _a1_eff_free and _a2_eff_free:
+                        # false = xor(D, E) with both D and E free → D = E
+                        if not _unify(eng, _xor_a1_eff.deref(), _xor_a2_eff.deref()):
+                            return False
+                        _canon_xor_br = _xor_a1_eff.deref()
+                        _mark_bool_sort(_canon_xor_br, eng.wl, eng)
+                        if _canon_xor_br.resid:
+                            eng.trail.trail_psi(_canon_xor_br, 'resid')
+                            _canon_xor_br.resid = []
+                        return True
+                    elif _a1_eff_free and _xor_s2_eff in ('true', 'false'):
+                        # false = xor(D, concrete) → D = concrete
+                        if not _unify(eng, _xor_a1_eff.deref(),
+                                      _make_atom(eng, _xor_s2_eff)):
+                            return False
+                        return True
+                    elif _a2_eff_free and _xor_s1_eff in ('true', 'false'):
+                        # false = xor(concrete, E) → E = concrete
+                        if not _unify(eng, _xor_a2_eff.deref(),
+                                      _make_atom(eng, _xor_s1_eff)):
+                            return False
+                        return True
+                elif _other_sym_br == 'true':
+                    # true = xor(B, C) → B and C must differ (complement)
+                    if _a1_eff_free and _xor_s2_eff in ('true', 'false'):
+                        _comp = 'false' if _xor_s2_eff == 'true' else 'true'
+                        if not _unify(eng, _xor_a1_eff.deref(), _make_atom(eng, _comp)):
+                            return False
+                        return True
+                    elif _a2_eff_free and _xor_s1_eff in ('true', 'false'):
+                        _comp = 'false' if _xor_s1_eff == 'true' else 'true'
+                        if not _unify(eng, _xor_a2_eff.deref(), _make_atom(eng, _comp)):
+                            return False
+                        return True
+                # For true=xor(both free), fall through to suspend
+
+                # Self-referential xor: LHS free var appears in xor args.
+                # E.g. C = B xor C → (C xor C) = B → false = B → B = false.
+                # Also handles symmetric: C = C xor B, B = B xor C, etc.
+                # Check if LHS is a free/unbound variable (possibly bool-sorted).
+                # NOTE: _get_sym returns 'bool' for bool-sorted free vars (type=wl.boolean),
+                # so we cannot use `_other_sym_br is None`; instead check the actual state.
+                _other_deref_sr = _other_br.deref()
+                _other_is_free_sr = (
+                    not _other_deref_sr.attr_list and
+                    _other_deref_sr.coref is None and
+                    _other_deref_sr.value is None and
+                    _other_sym_br not in ('true', 'false')
+                )
+                if _other_is_free_sr:
+                    _other_d_selfref = _other_deref_sr
+                    # Check using both raw and effective args for self-reference
+                    _xor_arg_pairs = [
+                        (_xor_a1_raw_d, _xor_a2_eff),
+                        (_xor_a2_raw_d, _xor_a1_eff),
+                    ]
+                    for _xarg_self, _xarg_other_self in _xor_arg_pairs:
+                        if (_xarg_self is not None and
+                                id(_xarg_self.deref()) == id(_other_d_selfref)):
+                            # Self-reference: LHS = LHS xor other → other = false
+                            if _xarg_other_self is not None:
+                                _xother_d = _xarg_other_self.deref()
+                                if not _unify(eng, _xother_d,
+                                              _make_atom(eng, 'false')):
+                                    return False
+                            # Mark LHS as bool, clear its pending goals
+                            _mark_bool_sort(_other_d_selfref, eng.wl, eng)
+                            if _other_d_selfref.resid:
+                                eng.trail.trail_psi(_other_d_selfref, 'resid')
+                                _other_d_selfref.resid = []
+                            return True
 
             # --- Non-deterministic or free-LHS case: suspend ---
             from wild_life.data_structures import Goal as _BoolGoal

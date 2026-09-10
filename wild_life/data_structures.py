@@ -499,13 +499,15 @@ class Residuation:
     """残留ゴール - 変数が束縛されたときに覚醒するゴール
     C版の struct wl_residuation に対応
     """
-    def __init__(self, goal: Optional[Goal], bestsort=None,
-                 value=None, next: Optional['Residuation'] = None):
+    def __init__(self, goal: Optional[Goal] = None, bestsort=None,
+                 value=None, next: Optional['Residuation'] = None,
+                 pending: bool = False):
         self.sortflag: bool = True  # bestsortがDefinitionかどうか
         self.bestsort = bestsort     # 最良ソート
         self.value = value
         self.goal = goal
         self.next = next
+        self.pending = pending  # True when this residuation is "pending" (display ~)
 
 
 # ==================== 特性比較関数 ====================
