@@ -461,17 +461,35 @@ def _opcheck(t: 'PsiTerm') -> Tuple[int, int, OperatorType]:
     numarg = _check_opargs(t.attr_list)
     if numarg not in (1, 3):
         return NOTOP, 0, OperatorType.NOP
+
+    if numarg == 1:
+        # Postfix: check first
+        op_data = defn.op_data
+        while op_data is not None:
+            op = op_data.type if hasattr(op_data, 'type') else OperatorType.NOP
+            if op in (OperatorType.XF, OperatorType.YF):
+                return POSTFIX, op_data.precedence, op
+            op_data = op_data.next if hasattr(op_data, 'next') else None
+
+        # Prefix: only FY qualifies as a genuine unary prefix.
+        # FX-only prefix (e.g. arithmetic '+' at the same prec as its infix form)
+        # is treated as a curried infix → function-call display (NOTOP).
+        op_data = defn.op_data
+        while op_data is not None:
+            op = op_data.type if hasattr(op_data, 'type') else OperatorType.NOP
+            if op is OperatorType.FY:
+                return PREFIX, op_data.precedence, op
+            op_data = op_data.next if hasattr(op_data, 'next') else None
+
+        # Has FX prefix but no FY: curried infix → NOTOP (function-call display).
+        return NOTOP, 0, OperatorType.NOP
+
+    # numarg == 3 (infix)
     op_data = defn.op_data
     while op_data is not None:
         op = op_data.type if hasattr(op_data, 'type') else OperatorType.NOP
-        if numarg == 1:
-            if op in (OperatorType.XF, OperatorType.YF):
-                return POSTFIX, op_data.precedence, op
-            if op in (OperatorType.FX, OperatorType.FY):
-                return PREFIX, op_data.precedence, op
-        if numarg == 3:
-            if op in (OperatorType.XFX, OperatorType.XFY, OperatorType.YFX):
-                return INFIX, op_data.precedence, op
+        if op in (OperatorType.XFX, OperatorType.XFY, OperatorType.YFX):
+            return INFIX, op_data.precedence, op
         op_data = op_data.next if hasattr(op_data, 'next') else None
     return NOTOP, 0, OperatorType.NOP
 
