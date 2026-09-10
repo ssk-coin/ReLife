@@ -3701,8 +3701,12 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     # Skip user-defined function calls here — they are handled by eval_aim,
     # and evaluating them twice creates separate Python objects that each fire
     # delay rules independently, producing double output.
+    # Also skip if the term is tagged NON_STRICT_TERM (bound inside a non-strict
+    # predicate — the expression should remain as data, not be evaluated).
+    from wild_life.data_structures import NON_STRICT_TERM as _BI_NST
     _b_is_user_fn = (b_d.type is not None and b_d.type.type == DefType.FUNCTION)
-    b_arith = _try_eval_arith_to_term(b_d, eng) if not _b_is_user_fn else None
+    _b_is_non_strict = bool(b_d.flags & _BI_NST)
+    b_arith = _try_eval_arith_to_term(b_d, eng) if (not _b_is_user_fn and not _b_is_non_strict) else None
     if b_arith is not None:
         # Expression fully evaluated — proceed to unify LHS with result.
         b_d = b_arith
@@ -3710,7 +3714,7 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         # Arithmetic expression that couldn't be fully evaluated (has variables).
         wl = eng.wl
         b_sym = b_d.type.keyword.symbol if b_d.type and b_d.type.keyword else ''
-        if b_sym in _ARITH_OPS_SET:
+        if b_sym in _ARITH_OPS_SET and not _b_is_non_strict:
             # Mark all free variables in the arithmetic expression (and the LHS
             # if free) as constrained to sort real.  This ensures that even when
             # the constraint is solved immediately (e.g. A=A+0 → trivial) the
