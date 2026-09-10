@@ -1296,6 +1296,32 @@ def bi_read_term(goal: PsiTerm, eng) -> bool:
     return bi_read(goal, eng)  # simplified: ignore options
 
 
+def bi_parse(goal: PsiTerm, eng) -> bool:
+    """parse([Result,] String[, Status[, Vars]]) — parse a LIFE string.
+
+    Called when parse(...) appears as a PREDICATE goal (not in functional
+    position).  The 'result' is the first argument of the goal term itself
+    in that case, so the arity varies:
+
+      parse(String)?            → just parse the string; no binding (rare)
+      parse(String, Status)?    → parse + Status
+      Result = parse(String)?   → handled by bi_unify + _eval_parse_func
+
+    As a predicate the common forms are:
+      parse(S)      — 1-arg: S is parsed; this form rarely makes sense alone
+      parse(S, St)  — 2-arg: S is parsed, St = status
+      parse(S, St, V) — 3-arg: also binds V = true
+    """
+    a1 = goal.attr_list.get('1')
+    if a1 is None:
+        return False
+    a1d = a1.deref()
+
+    # Evaluate the parse function (which also binds Status/Vars side-args)
+    result = _eval_parse_func(goal, eng)
+    return result is not None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Arithmetic
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2342,6 +2368,142 @@ def _is_asc_func(t: 'PsiTerm') -> bool:
             '1' in t.attr_list and '2' not in t.attr_list)
 
 
+def _is_parse_func(t: 'PsiTerm') -> bool:
+    """Return True if t is parse(String[, Status[, Vars]]) (functional use)."""
+    if t is None or t.type is None or t.type.keyword is None:
+        return False
+    return t.type.keyword.symbol == 'parse' and '1' in t.attr_list
+
+
+def _eval_parse_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
+    """Evaluate parse(String[, Status[, Vars]]) → parsed psi-term.
+
+    In C Wild Life, parse(S) parses the LIFE string S and returns the
+    resulting psi-term.  Variables in S are shared by name with the current
+    query scope (eng._last_var_tree).
+
+    Two- and three-argument forms:
+      parse(String, Status)       — also unify Status with declaration/query/error
+      parse(String, Status, Vars) — Status same; Vars is unified with true (stub)
+
+    Returns the parsed term, or None if the string argument is not yet
+    concrete (delay evaluation until the string is available).
+    """
+    from wild_life.parser_ import parse_string
+    from wild_life.data_structures import FACT, QUERY, ERROR
+
+    a1 = t.attr_list.get('1')
+    if a1 is None:
+        return None
+    a1d = a1.deref()
+    wl = eng.wl if eng is not None else None
+
+    # Reject unbound variables (type=top, no value, no attrs) — can't parse yet.
+    # Without this check, an unbound var with type=top would be misread as the
+    # atom '@' (wl.top.keyword.symbol) and parsed incorrectly.
+    if a1d.value is None and not a1d.attr_list:
+        if a1d.type is None or (wl is not None and a1d.type is wl.top):
+            return None  # unbound variable — delay until bound
+
+    # Get the string content
+    if wl is not None and a1d.type is not None and a1d.type.is_subtype_of(wl.quoted_string):
+        if a1d.value is None:
+            return None  # string not yet concrete
+        s = str(a1d.value)
+    elif a1d.type is not None and a1d.type.keyword is not None:
+        # Atom used as string
+        s = a1d.type.keyword.symbol
+    else:
+        return None  # not a string — can't parse yet
+
+    # Add terminator if missing so the parser can classify it
+    s_for_parse = s
+    stripped = s.rstrip()
+    has_terminator = stripped.endswith('.') or stripped.endswith('?')
+    if not has_terminator:
+        s_for_parse = s + '.'  # treat as declaration for partial parse
+
+    # Parse using the current query's variable scope so names are shared.
+    # Variables in the string whose names exist in the current scope are
+    # unified with the existing psi-terms; new names get fresh psi-terms.
+    inherited = getattr(eng, '_last_var_tree', None) or {}
+    try:
+        term, kind, new_vt = parse_string(s_for_parse, inherited_vars=inherited or None)
+    except Exception:
+        term, kind, new_vt = None, ERROR, {}
+
+    # Merge newly created variables back into the engine's var_tree so that
+    # subsequent queries (at depth+1) can inherit them by name.  In C Wild
+    # Life the interactive shell keeps a global variable table; this replicates
+    # that behaviour by extending eng._last_var_tree.
+    if eng is not None and new_vt:
+        lv = getattr(eng, '_last_var_tree', None)
+        if lv is not None:
+            for k, v in new_vt.items():
+                if k not in lv:
+                    lv[k] = v
+
+    # Determine status atom
+    if not has_terminator:
+        # No proper terminator → error status, but term may still be returned
+        status_sym = 'error'
+    elif kind == FACT:
+        status_sym = 'declaration'
+    elif kind == QUERY:
+        status_sym = 'query'
+    else:
+        status_sym = 'error'
+
+    # Bind Status argument if present (arg 2)
+    a2 = t.attr_list.get('2')
+    if a2 is not None and eng is not None:
+        status_term = _make_atom(eng, status_sym)
+        _unify(eng, a2.deref(), status_term)
+
+    # Bind Vars argument if present (arg 3) — stub: unify with 'true'
+    a3 = t.attr_list.get('3')
+    if a3 is not None and eng is not None:
+        true_term = _make_atom(eng, 'true')
+        _unify(eng, a3.deref(), true_term)
+
+    if term is None:
+        # Parse failed; return a top-sort unbound variable so the caller can
+        # still see the result (consistent with C Wild Life partial parse)
+        fresh = PsiTerm()
+        if wl is not None:
+            fresh.type = wl.top
+        return fresh
+
+    # Mark all compound arithmetic nodes in the parse result as NON_STRICT_TERM
+    # so they are displayed as structure (e.g. 1+2) rather than evaluated to a
+    # number (3) during printing.  This matches C Wild Life behaviour where
+    # parse() returns structural terms, not computed values.
+    from wild_life.data_structures import NON_STRICT_TERM as _NST_P
+    _arith_syms_p = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+                               'max', 'min', 'abs', 'sqrt', 'floor', 'ceiling',
+                               'round', 'truncate', 'exp', 'log', 'sin', 'cos', 'tan'))
+
+    def _mark_nst(node, _visited=None):
+        if node is None:
+            return
+        if _visited is None:
+            _visited = set()
+        nd = node.deref()
+        nid = id(nd)
+        if nid in _visited:
+            return
+        _visited.add(nid)
+        sym = nd.type.keyword.symbol if nd.type and nd.type.keyword else ''
+        if sym in _arith_syms_p and nd.attr_list:
+            nd.flags |= _NST_P
+        for v in nd.attr_list.values():
+            _mark_nst(v, _visited)
+
+    _mark_nst(term)
+
+    return term
+
+
 def _eval_glb_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
     """Evaluate glb(X, Y) → GLB (unification) of X and Y, or None on failure.
 
@@ -3020,6 +3182,171 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     if _is_children_func(a_d):
         return _unify(eng, b_d, _eval_children_func(a_d, eng))
 
+    # Handle apply(Args, functor=>F) functional use: X = F(Args).
+    # When the parser sees a variable F used as a functor (e.g. A(Q)), it creates
+    # an apply term: apply{1: Q, functor: A}.  We need to intercept this in
+    # bi_unify so that once A is bound we can reconstruct F(Args) and proceed.
+    def _handle_apply_term(lhs, rhs):
+        """Try to handle lhs = apply{..., functor: F} by reconstructing F(Args).
+        Returns True/False on success/failure, or None if rhs is not an apply term."""
+        wl_a = eng.wl
+        if not (hasattr(wl_a, 'apply') and wl_a.apply is not None):
+            return None
+        if rhs.type is not wl_a.apply:
+            return None
+        _functor_key = wl_a.functor.symbol if (hasattr(wl_a, 'functor') and wl_a.functor and wl_a.functor.keyword) else 'functor'
+        _functor_arg = rhs.attr_list.get(_functor_key)
+        if _functor_arg is None:
+            return None
+        _functor_val = _functor_arg.deref()
+        if _term_is_unbound(_functor_val, eng):
+            # Functor is unbound — residuate on functor_val so that when A=parse
+            # fires, the pending goal X=A(Q) is re-evaluated.
+            from wild_life.data_structures import Goal, Residuation, SORT_VAR as _SV2
+            wl_p2 = eng.wl
+            eq_defn2 = getattr(wl_p2, 'eqsym', None)
+            if eq_defn2 is None and hasattr(wl_p2, 'syntax_module'):
+                eq_defn2 = wl_p2.syntax_module.symbol_table.get('=')
+            eq_term2 = PsiTerm(type_def=eq_defn2)
+            eq_term2.attr_list['1'] = lhs
+            eq_term2.attr_list['2'] = rhs
+            eq_term2._resid_marker = True
+            pending_goal2 = Goal(GoalType.PROVE, eq_term2, None, None, pending=True)
+            if _functor_val.resid is None:
+                eng.trail.trail_psi(_functor_val, 'resid')
+                _functor_val.resid = [Residuation(goal=pending_goal2)]
+            else:
+                if not any(rv.goal is pending_goal2 for rv in _functor_val.resid):
+                    eng.trail.trail_copy(_functor_val, 'resid')
+                    _functor_val.resid.append(Residuation(goal=pending_goal2))
+            if not (_functor_val.flags & _SV2):
+                eng.trail.trail_psi(_functor_val, 'flags')
+                _functor_val.flags |= _SV2
+            return True  # lhs stays unbound (@); functor var shows as @~
+        # Functor is bound to an atom — reconstruct call_psi with type=functor_type
+        _ftype = _functor_val.type
+        if _ftype is None:
+            return None
+        call_psi = PsiTerm()
+        call_psi.type = _ftype
+        call_psi.value = None
+        call_psi.coref = None
+        call_psi.resid = None
+        for k, v in rhs.attr_list.items():
+            if k != _functor_key:
+                call_psi.attr_list[k] = v
+        # Now treat lhs = call_psi — first try parse special case
+        if _is_parse_func(call_psi):
+            r2 = _eval_parse_func(call_psi, eng)
+            if r2 is not None:
+                return _unify(eng, lhs, r2)
+            # String arg is unbound — residuate on it
+            s_arg2 = call_psi.attr_list.get('1')
+            if s_arg2 is not None:
+                s_var2 = s_arg2.deref()
+                if _term_is_unbound(s_var2, eng):
+                    from wild_life.data_structures import Goal, Residuation, SORT_VAR as _SV3
+                    wl_p3 = eng.wl
+                    eq_defn3 = getattr(wl_p3, 'eqsym', None)
+                    if eq_defn3 is None and hasattr(wl_p3, 'syntax_module'):
+                        eq_defn3 = wl_p3.syntax_module.symbol_table.get('=')
+                    eq_term3 = PsiTerm(type_def=eq_defn3)
+                    eq_term3.attr_list['1'] = lhs
+                    eq_term3.attr_list['2'] = call_psi
+                    eq_term3._resid_marker = True
+                    pending_goal3 = Goal(GoalType.PROVE, eq_term3, None, None, pending=True)
+                    if s_var2.resid is None:
+                        eng.trail.trail_psi(s_var2, 'resid')
+                        s_var2.resid = [Residuation(goal=pending_goal3)]
+                    else:
+                        if not any(rv.goal is pending_goal3 for rv in s_var2.resid):
+                            eng.trail.trail_copy(s_var2, 'resid')
+                            s_var2.resid.append(Residuation(goal=pending_goal3))
+                    if not (s_var2.flags & _SV3):
+                        eng.trail.trail_psi(s_var2, 'flags')
+                        s_var2.flags |= _SV3
+                    return True  # lhs stays @
+            return False
+        # Fall through to normal unify for other function types
+        return _unify(eng, lhs, call_psi)
+
+    _apply_b = _handle_apply_term(a_d, b_d)
+    if _apply_b is not None:
+        return _apply_b
+    _apply_a = _handle_apply_term(b_d, a_d)
+    if _apply_a is not None:
+        return _apply_a
+
+    # Handle parse(String[, Status[, Vars]]) functional use.
+    # parse is EAGER in LIFE: evaluate immediately if the string is bound.
+    # If the string argument is unbound, residuate: attach a pending PROVE goal
+    # on the string variable so that once it gets bound, the parse is triggered
+    # and the result is unified with the LHS.
+    if _is_parse_func(b_d):
+        r = _eval_parse_func(b_d, eng)
+        if r is not None:
+            return _unify(eng, a_d, r)
+        # String is unbound — attach a residuated goal on the string variable.
+        s_arg = b_d.attr_list.get('1')
+        if s_arg is not None:
+            s_var = s_arg.deref()
+            if _term_is_unbound(s_var, eng):
+                from wild_life.data_structures import Goal, Residuation, SORT_VAR
+                wl_p = eng.wl
+                eq_defn = getattr(wl_p, 'eqsym', None)
+                if eq_defn is None and hasattr(wl_p, 'syntax_module'):
+                    eq_defn = wl_p.syntax_module.symbol_table.get('=')
+                eq_term = PsiTerm(type_def=eq_defn)
+                eq_term.attr_list['1'] = a_d
+                eq_term.attr_list['2'] = b_d
+                eq_term._resid_marker = True
+                pending_goal = Goal(GoalType.PROVE, eq_term, None, None, pending=True)
+                if s_var.resid is None:
+                    eng.trail.trail_psi(s_var, 'resid')
+                    s_var.resid = [Residuation(goal=pending_goal)]
+                else:
+                    if not any(rv.goal is pending_goal for rv in s_var.resid):
+                        eng.trail.trail_copy(s_var, 'resid')
+                        s_var.resid.append(Residuation(goal=pending_goal))
+                # Mark as constrained so it shows as @~
+                if not (s_var.flags & SORT_VAR):
+                    eng.trail.trail_psi(s_var, 'flags')
+                    s_var.flags |= SORT_VAR
+                return True  # a_d stays unbound (shown as @)
+        return False
+    if _is_parse_func(a_d):
+        r = _eval_parse_func(a_d, eng)
+        if r is not None:
+            return _unify(eng, b_d, r)
+        # String is unbound — attach a residuated goal on the string variable.
+        s_arg = a_d.attr_list.get('1')
+        if s_arg is not None:
+            s_var = s_arg.deref()
+            if _term_is_unbound(s_var, eng):
+                from wild_life.data_structures import Goal, Residuation, SORT_VAR
+                wl_p = eng.wl
+                eq_defn = getattr(wl_p, 'eqsym', None)
+                if eq_defn is None and hasattr(wl_p, 'syntax_module'):
+                    eq_defn = wl_p.syntax_module.symbol_table.get('=')
+                eq_term = PsiTerm(type_def=eq_defn)
+                eq_term.attr_list['1'] = b_d
+                eq_term.attr_list['2'] = a_d
+                eq_term._resid_marker = True
+                pending_goal = Goal(GoalType.PROVE, eq_term, None, None, pending=True)
+                if s_var.resid is None:
+                    eng.trail.trail_psi(s_var, 'resid')
+                    s_var.resid = [Residuation(goal=pending_goal)]
+                else:
+                    if not any(rv.goal is pending_goal for rv in s_var.resid):
+                        eng.trail.trail_copy(s_var, 'resid')
+                        s_var.resid.append(Residuation(goal=pending_goal))
+                from wild_life.data_structures import SORT_VAR
+                if not (s_var.flags & SORT_VAR):
+                    eng.trail.trail_psi(s_var, 'flags')
+                    s_var.flags |= SORT_VAR
+                return True
+        return False
+
     # Handle chr(N) functional use: C = chr(N) → character string for ASCII code N
     if _is_chr_func(b_d):
         r = _try_eval_string_func(b_d, eng)
@@ -3544,17 +3871,47 @@ def bi_not_unify(goal: PsiTerm, eng) -> bool:
     return not ok
 
 
+def _term_is_unbound(t: Optional[PsiTerm], eng) -> bool:
+    """Return True if t dereferences to an unbound (top/free) variable."""
+    if t is None:
+        return True
+    t = t.deref()
+    wl = eng.wl
+    return (t.value is None and not t.attr_list
+            and (t.type is None or t.type is wl.top))
+
+
 def bi_identical(goal: PsiTerm, eng) -> bool:
-    """X == Y — structural identity."""
+    """X == Y — structural identity.
+
+    In Wild Life, == requires both sides to be ground (no free variables).
+    If either side is unbound, the predicate fails — you cannot assert
+    identity of unknowns in a constraint-logic setting.
+    """
     a, b = _get_two_args(goal)
+    if a is None or b is None:
+        return False
+    if _term_is_unbound(a, eng) or _term_is_unbound(b, eng):
+        return False
     s1 = _term_to_str(a, eng)
     s2 = _term_to_str(b, eng)
     return s1 == s2
 
 
 def bi_not_identical(goal: PsiTerm, eng) -> bool:
-    """X \\== Y."""
+    """X \\== Y — structural non-identity.
+
+    In Wild Life, \\== requires both sides to be ground (no free variables).
+    If either side is unbound, the predicate fails — you cannot assert
+    definitive non-identity of unknowns in a constraint-logic setting.
+    For example, if Flag is unbound, Flag:\\==error fails because Flag
+    could potentially be unified with error.
+    """
     a, b = _get_two_args(goal)
+    if a is None or b is None:
+        return False
+    if _term_is_unbound(a, eng) or _term_is_unbound(b, eng):
+        return False
     s1 = _term_to_str(a, eng)
     s2 = _term_to_str(b, eng)
     return s1 != s2
@@ -5798,6 +6155,7 @@ def register_all(wl) -> None:
     _reg('get', bi_get_char)
     _reg('read', bi_read)
     _reg('read_term', bi_read_term)
+    _reg('parse', bi_parse)
     _reg('format', bi_format)
     _reg('nl_err', bi_nl_err)
     _reg('with_output_to', bi_with_output_to)
@@ -5830,6 +6188,7 @@ def register_all(wl) -> None:
     _reg('\\=', bi_not_unify)
     _reg('==', bi_identical)
     _reg('\\==', bi_not_identical)
+    _reg(':\\==', bi_not_identical)   # Flag:\==error colon-form alias
     _reg('compare', bi_compare)
     _reg('<-', bi_store_arrow)      # destructive assignment
     _reg('<<-', bi_store_arrow)     # strict destructive assignment (same semantics)

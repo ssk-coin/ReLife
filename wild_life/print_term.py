@@ -250,6 +250,9 @@ class PrintState:
         # When True, suppress arithmetic evaluation during printing
         # (set inside backtick-quoted term contexts)
         self.no_arith_eval: bool = False
+        # Track psi-term ids that were first seen as structural components
+        # (i.e. inside another term's attr_list), used by forbid_variables.
+        self._structural_ids: Set[int] = set()
 
     # ─── output helpers ────────────────────────────────────────────────────
 
@@ -303,17 +306,23 @@ class PrintState:
             var_tree = {}
         self._go_through_term(t)
 
-    def _go_through_term(self, t: Optional['PsiTerm']) -> None:
+    def _go_through_term(self, t: Optional['PsiTerm'],
+                         is_structural: bool = False) -> None:
         if t is None:
             return
         t = t.deref()
         tid = id(t)
+        # Record structural membership BEFORE the early-return check so that a
+        # term seen first as a top-level var binding and later as a structural
+        # component inside another term's attrs still gets recorded.
+        if is_structural:
+            self._structural_ids.add(tid)
         if tid in self.pointer_names:
             self.pointer_names[tid] = 'SHARED'  # needs a name
             return
         self.pointer_names[tid] = None  # seen once
         for val in t.attr_list.values():
-            self._go_through_term(val)
+            self._go_through_term(val, is_structural=True)
 
     def insert_variables(self, var_tree: dict, force: bool) -> None:
         """Map variable names from var_tree into pointer_names."""
@@ -363,11 +372,15 @@ class PrintState:
             coref = getattr(pterm, 'coref', None)
             pid = id(pterm)
             # Skip variables directly bound to a concrete value when no other
-            # query variable aliases to them.  They will print their concrete
-            # value directly, without registering an alias entry.
+            # query variable aliases to them AND the deref'd node is not a
+            # structural component inside another term's attrs.
+            # If the node IS structural, it must be pre-registered so that
+            # when it appears inside another term (e.g. A = W+E where W=34)
+            # it prints as the variable name "W" rather than "W: 34".
             if (coref is not None
                     and coref.value is not None
-                    and pid not in aliased_to):
+                    and pid not in aliased_to
+                    and id(pterm.deref()) not in self._structural_ids):
                 continue
             t = pterm.deref()
             tid = id(t)
