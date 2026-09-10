@@ -1055,7 +1055,11 @@ def _maybe_resid(ps: PrintState, t: 'PsiTerm') -> None:
     """
     if t.resid and t.value is None and not t.attr_list:
         for r in t.resid:
+            # Pending via a Goal object (arithmetic/eval residuation)
             if getattr(r, 'goal', None) and getattr(r.goal, 'pending', False):
+                ps.write("~")
+            # Pending via the Residuation's own flag (bi_residuate built-in)
+            elif getattr(r, 'pending', False) and r.goal is None:
                 ps.write("~")
 
 
