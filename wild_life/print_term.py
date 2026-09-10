@@ -318,7 +318,15 @@ class PrintState:
         if is_structural:
             self._structural_ids.add(tid)
         if tid in self.pointer_names:
-            self.pointer_names[tid] = 'SHARED'  # needs a name
+            # Concrete primitive values (integers, floats, atoms with a non-None
+            # value but NO attributes) can always be printed inline — they don't
+            # need a variable name even when shared across multiple terms.  Marking
+            # them as SHARED causes spurious `_A: 23` output when the same PsiTerm
+            # object for an integer is referenced from two compound terms (e.g.
+            # A=*(23) and B=*(23,13) sharing the same psi_23 object after a partial
+            # application merge).  Skip marking them SHARED; they will print fine.
+            if t.value is None or t.attr_list:
+                self.pointer_names[tid] = 'SHARED'  # needs a name
             return
         self.pointer_names[tid] = None  # seen once
         for val in t.attr_list.values():
