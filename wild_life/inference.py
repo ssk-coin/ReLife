@@ -22,6 +22,43 @@ from wild_life.unification import (
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Non-strict predicate helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ARITH_OPS_NON_STRICT = frozenset((
+    '+', '-', '*', '/', '//', 'mod', '**', '^',
+    'max', 'min', 'abs', 'sqrt', 'floor', 'ceiling',
+    'round', 'truncate', 'exp', 'log', 'sin', 'cos', 'tan',
+))
+
+def _mark_arith_non_strict(t: PsiTerm, visited: set = None) -> None:
+    """Recursively mark arithmetic operator psiterms with NON_STRICT_TERM.
+
+    Called after head unification for a non-strict predicate so that
+    arithmetic sub-expressions in the bound result are not eagerly
+    evaluated during printing.
+    """
+    from wild_life.data_structures import NON_STRICT_TERM
+    if visited is None:
+        visited = set()
+    if t is None:
+        return
+    # Follow coref chain to the actual bound psiterm, then deduplicate
+    td = t.deref()
+    if td is None:
+        return
+    tdid = id(td)
+    if tdid in visited:
+        return
+    visited.add(tdid)
+    sym = td.type.keyword.symbol if (td.type and td.type.keyword) else ''
+    if sym in _ARITH_OPS_NON_STRICT and td.value is None:
+        td.flags |= NON_STRICT_TERM
+    for v in td.attr_list.values():
+        _mark_arith_non_strict(v, visited)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Disjunction expansion helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -842,6 +879,8 @@ class Engine:
         ok = self.unifier.unify(thegoal, head)
         if _non_strict:
             self.no_arith_eval = _prev_no_arith
+            if ok:
+                _mark_arith_non_strict(head)
         if not ok:
             self.trail.undo_to(mark)
             # Try next clause if any
