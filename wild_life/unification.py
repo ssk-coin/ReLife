@@ -516,10 +516,16 @@ class Unifier:
         # same canonical term and show e.g. "Y = X" instead of "Y = !".
         # Only do this for non-numeric atoms (numbers are primitive values that
         # should remain separate; ChoicePoint values in '!' terms are OK to merge).
-        from wild_life.data_structures import ChoicePoint as _CP_merge
+        from wild_life.data_structures import ChoicePoint as _CP_merge, NON_STRICT_TERM as _NST_merge
         _u_prim = isinstance(u.value, (int, float, str)) if u.value is not None else False
         _v_prim = isinstance(v.value, (int, float, str)) if v.value is not None else False
         if not _u_prim and not _v_prim and v.coref is None:
+            # Propagate NON_STRICT_TERM from v to u before binding: if v is a frozen
+            # arithmetic term (e.g. `+(23) with NST) and u is the new canonical
+            # representative, the freeze must survive on u too.
+            if (v.flags & _NST_merge) and not (u.flags & _NST_merge):
+                self.trail.trail_psi(u, 'flags')
+                u.flags |= _NST_merge
             # Bind v → u so deref(v) returns u (the canonical psi-term).
             self.bind(v, u)
 
@@ -550,9 +556,23 @@ class Unifier:
         # サブタイプ関係: より特殊な型 (GLB) を採用
         if du.is_subtype_of(dv):
             self.bind_type(v, du)   # v の型を du (より特殊) に引き上げ
+            # Numeric value compatibility: if v has a concrete numeric value,
+            # verify that it is compatible with the narrowed type (du).
+            # e.g. narrowing real(3.3) to integer must fail because 3.3 is not
+            # an integer.  Without this check, f(3.3) incorrectly matches f(int).
+            if v.value is not None and isinstance(v.value, float) and WL.integer is not None and du.is_subtype_of(WL.integer):
+                import math as _math_ut
+                if not _math_ut.isfinite(v.value) or v.value != int(v.value):
+                    return False
             return True
         if dv.is_subtype_of(du):
             self.bind_type(u, dv)   # u の型を dv (より特殊) に引き上げ
+            # Numeric value compatibility: if u has a concrete numeric value,
+            # verify that it is compatible with the narrowed type (dv).
+            if u.value is not None and isinstance(u.value, float) and WL.integer is not None and dv.is_subtype_of(WL.integer):
+                import math as _math_ut
+                if not _math_ut.isfinite(u.value) or u.value != int(u.value):
+                    return False
             return True
 
         # 直交した型 (どちらもサブタイプでない) → 互換性チェック

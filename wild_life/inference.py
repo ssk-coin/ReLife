@@ -944,10 +944,21 @@ class Engine:
                     return False
             return False
 
+        # Whether this EVAL was woken from a residuation (see curry3 residuation setup).
+        # When all rules fail for a residuated call, we fall back to binding result
+        # to the original (unevaluated) compound funct — the function "returns itself"
+        # when no matching rule is found (LIFE's lazy/constructor semantics).
+        # Also check funct._resid_refire so the flag survives across choice-point firings
+        # (choice points store funct by reference, not aim).
+        _is_resid_refire = getattr(aim, '_resid_marker', False) or getattr(funct, '_resid_refire', False)
+
         # User-defined function: find first active rule
         active = [(h, b) for (h, b) in (rules if rules else [])
                   if h is not None and b is not None]
         if not active:
+            if _is_resid_refire:
+                # No rules at all — return the compound as-is
+                return self.unifier.unify(result, funct)
             return False
 
         head_orig, body_orig = active[0]
@@ -1037,11 +1048,82 @@ class Engine:
                 head = copy_term(head_orig, _vm)
                 body = copy_term(body_orig, _vm)
 
+        # Arity check: if head has feature keys not present in funct, this rule
+        # requires arguments that the call doesn't provide.  Skip the rule —
+        # adding extra features to a function call is wrong semantics (unlike
+        # sort unification where adding features is fine).
+        _head_d_arity = head.deref()
+        _funct_keys_set = set(funct.attr_list.keys())
+        _head_only_keys = set(_head_d_arity.attr_list.keys()) - _funct_keys_set
+        if _head_only_keys:
+            # Funct has fewer args than this rule requires — partial application.
+            # In Wild Life, calling a function with fewer args than its head needs
+            # is always a partial application: return funct as a constructor term.
+            if len(active) == 1:
+                # Last rule: return funct as partial application (constructor semantics).
+                return self.unifier.unify(result, funct)
+            # More rules exist; skip this one (try next via choice point).
+            return False
+
+        # Residuation check: if funct has completely free (unbound) arguments,
+        # don't eagerly bind them to sorts just to match a head pattern.
+        # Instead, suspend (residuate) on those free variables so that when they
+        # get bound (by a later goal), the function is re-evaluated.
+        # "Completely free" = type is top, no attrs, no value, no sort constraint.
+        _free_args_for_resid = []
+        for _fk_r, _fv_r_psi in funct.attr_list.items():
+            _fv_r = _fv_r_psi.deref()
+            _fv_r_is_free = (
+                (_fv_r.type is None or _fv_r.type is wl.top) and
+                not _fv_r.attr_list and
+                _fv_r.value is None
+            )
+            if _fv_r_is_free:
+                # Check if the corresponding head arg is a non-top constraint.
+                _head_r_arg = _head_d_arity.attr_list.get(_fk_r)
+                if _head_r_arg is not None:
+                    _head_r_d = _head_r_arg.deref()
+                    _head_r_is_constrained = (
+                        _head_r_d.type is not None and _head_r_d.type is not wl.top
+                    )
+                    if _head_r_is_constrained:
+                        _free_args_for_resid.append(_fv_r)
+        if _free_args_for_resid:
+            # Set up residuation: attach a pending EVAL goal to each free variable.
+            # When the variable gets bound, _wakeup_resid will push the EVAL goal
+            # back onto the goal stack and f(bound_val) will be re-evaluated.
+            from wild_life.data_structures import Goal as _ResidGoal, Residuation as _ResidR, SORT_VAR as _SV_R
+            _pending_eval = _ResidGoal(GoalType.EVAL, funct, result, rules, pending=True)
+            _pending_eval._resid_marker = True  # mark as residuation so re-fire knows
+            # Mark funct so eval_aim can detect resid re-fire even from a freshly pushed Goal.
+            # _wakeup_resid calls push_goal(g.type, g.a, g.b, g.c) which creates a new Goal
+            # without _resid_marker, so we propagate via funct (which is g.a and is preserved).
+            funct._resid_refire = True
+            for _fv_r in _free_args_for_resid:
+                if _fv_r.resid is None:
+                    self.trail.trail_psi(_fv_r, 'resid')
+                    _fv_r.resid = [_ResidR(goal=_pending_eval)]
+                else:
+                    if not any(rv.goal is _pending_eval for rv in _fv_r.resid):
+                        self.trail.trail_copy(_fv_r, 'resid')
+                        _fv_r.resid.append(_ResidR(goal=_pending_eval))
+                # Mark with SORT_VAR-like flag so display shows @~
+                if not (_fv_r.flags & _SV_R):
+                    self.trail.trail_psi(_fv_r, 'flags')
+                    _fv_r.flags |= _SV_R
+            # result (and hence A) stays unbound — return True so the UNIFY(A,result)
+            # goal fires and merges A with the free result variable.
+            return True
+
         # Unify head with funct first (to bind head arguments)
         mark = self.trail.mark()
         ok = self.unifier.unify(funct, head)
         if not ok:
             self.trail.undo_to(mark)
+            # If this is the last rule in a resid re-fire, fall back to returning
+            # the compound as-is (function can't reduce, acts as constructor).
+            if _is_resid_refire and len(active) == 1:
+                return self.unifier.unify(result, funct)
             return False
 
         # Sort-constrained computation rule fix:
@@ -1119,12 +1201,36 @@ class Engine:
         # This ensures the fresh variables are bound before UNIFY fires.
         eval_goals = _collect_embedded_func_goals(body_d2, self, set())
 
-        # Push UNIFY first (runs LAST — body_d2 has fresh vars for embedded calls)
-        self.push_goal(GoalType.UNIFY, body_d2, result, None)
+        # Choose how to bind result to body_d2:
+        # - Arithmetic expressions: go through bi_unify (PROVE via '=') so that the
+        #   arithmetic constraint machinery (real~ marking, residuation on free vars)
+        #   fires correctly.  A plain UNIFY goal bypasses bi_unify entirely.
+        # - Everything else: use a plain UNIFY goal (faster, avoids bi_unify overhead).
+        from wild_life.built_ins import _is_complete_arith_expr as _is_cae
+        _body_sym = body_d2.type.keyword.symbol if (body_d2.type and body_d2.type.keyword) else ''
+        from wild_life.built_ins import _ARITH_OPS_SET as _AOS
+        _body_is_arith = (_body_sym in _AOS and _is_cae(body_d2))
 
-        # Push each EVAL goal (runs FIRST — binds the fresh vars before UNIFY)
-        for ft, rv, rl in eval_goals:
-            self.push_goal(GoalType.EVAL, ft, rv, rl)
+        if _body_is_arith and not eval_goals:
+            # Arithmetic body with no embedded user-function calls:
+            # push via bi_unify (PROVE) so arithmetic constraints fire properly.
+            _eq_defn_ei = getattr(wl, 'eqsym', None)
+            if _eq_defn_ei is None and hasattr(wl, 'syntax_module'):
+                _eq_defn_ei = wl.syntax_module.symbol_table.get('=')
+            if _eq_defn_ei is not None:
+                _eq_term_ei = PsiTerm(type_def=_eq_defn_ei)
+                _eq_term_ei.attr_list['1'] = result
+                _eq_term_ei.attr_list['2'] = body_d2
+                self.push_goal(GoalType.PROVE, _eq_term_ei, None, None)
+            else:
+                self.push_goal(GoalType.UNIFY, body_d2, result, None)
+        else:
+            # Push UNIFY first (runs LAST — body_d2 has fresh vars for embedded calls)
+            self.push_goal(GoalType.UNIFY, body_d2, result, None)
+
+            # Push each EVAL goal (runs FIRST — binds the fresh vars before UNIFY)
+            for ft, rv, rl in eval_goals:
+                self.push_goal(GoalType.EVAL, ft, rv, rl)
 
         return True
 
