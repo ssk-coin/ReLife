@@ -1160,27 +1160,48 @@ class Engine:
 
             _bind_free_sort_vars(body)
 
-        # Now that head args are bound, try arithmetic evaluation of body
+        # Now that head args are bound, try arithmetic evaluation of body.
         body_d2 = body.deref()
         from wild_life.built_ins import _eval_arith, _make_number
+
+        # Body is a user-defined function call — push EVAL so it gets evaluated
+        # (rather than UNIFY which would just structurally bind result to the term).
+        #
+        # IMPORTANT: Check this BEFORE _eval_arith.  _eval_arith can inline-evaluate
+        # user-defined functions (e.g. last([2,3]) → 3.0), but doing so loses the
+        # original psi-term object identity: it returns (True, 3.0) and we then call
+        # _make_number to create a FRESH psi-term.  That fresh term has a different
+        # Python id than the original node in the data structure (e.g. the integer 3
+        # inside list A=[1,2,3]).  The shared-term detection in print_variables uses
+        # Python object identity to detect sharing, so the freshly created term is
+        # NOT seen as the same object as the element of A — breaking "A = [1,2,B]".
+        # Pushing an EVAL goal instead lets the machinery recurse properly and at the
+        # base case (body is a concrete literal, not a user function) preserves the
+        # original term identity.
+        if _is_user_function(body_d2):
+            self.push_goal(GoalType.EVAL, body_d2, result, body_d2.type.rule)
+            return True
+
         arith_ok, arith_val = _eval_arith(body_d2, self)
         if arith_ok:
             # Body evaluated to a number — unify result with it immediately.
             # Mark _delay_fired=True because _eval_arith already fired delay for
             # the result (via the binary * path or pre-eval computed-term firing).
             # This prevents a second delay fire during unification with result.
-            num_term = _make_number(self, arith_val)
-            num_term._delay_fired = True
-            ok2 = self.unifier.unify(result, num_term)
+            #
+            # If the body is already a concrete literal (value is not None), bind
+            # result directly to preserve the original psi-term's Python identity.
+            if body_d2.value is not None:
+                # Concrete literal — bind directly (delay already fired by _eval_arith)
+                ok2 = self.unifier.unify(result, body_d2)
+            else:
+                # Compound arithmetic expression — create a new numeric term
+                num_term = _make_number(self, arith_val)
+                num_term._delay_fired = True
+                ok2 = self.unifier.unify(result, num_term)
             if not ok2:
                 self.trail.undo_to(mark)
                 return False
-            return True
-
-        # Body is a user-defined function call — push EVAL so it gets evaluated
-        # (rather than UNIFY which would just structurally bind result to the term)
-        if _is_user_function(body_d2):
-            self.push_goal(GoalType.EVAL, body_d2, result, body_d2.type.rule)
             return True
 
         # Body is a built-in cond(C, T, E) — evaluate it as a functional conditional

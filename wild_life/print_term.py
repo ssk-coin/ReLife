@@ -318,15 +318,12 @@ class PrintState:
         if is_structural:
             self._structural_ids.add(tid)
         if tid in self.pointer_names:
-            # Concrete primitive values (integers, floats, atoms with a non-None
-            # value but NO attributes) can always be printed inline — they don't
-            # need a variable name even when shared across multiple terms.  Marking
-            # them as SHARED causes spurious `_A: 23` output when the same PsiTerm
-            # object for an integer is referenced from two compound terms (e.g.
-            # A=*(23) and B=*(23,13) sharing the same psi_23 object after a partial
-            # application merge).  Skip marking them SHARED; they will print fine.
-            if t.value is None or t.attr_list:
-                self.pointer_names[tid] = 'SHARED'  # needs a name
+            # Mark as SHARED on second visit so shared sub-terms (even concrete
+            # values like integers) get variable names when printed.  The C
+            # Wild Life reference does give names to all shared psi-terms,
+            # including integers (e.g. s(X:1,X) when both slots share the
+            # same integer node).
+            self.pointer_names[tid] = 'SHARED'  # needs a name
             return
         self.pointer_names[tid] = None  # seen once
         for val in t.attr_list.values():
@@ -1060,7 +1057,6 @@ def _maybe_resid(ps: PrintState, t: 'PsiTerm') -> None:
         for r in t.resid:
             if getattr(r, 'goal', None) and getattr(r.goal, 'pending', False):
                 ps.write("~")
-                return  # Only write one tilde max
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1142,6 +1138,7 @@ def print_variables(var_tree: dict, outfile: IO = None,
             ps._go_through_term(pterm.deref())
     ps.insert_variables(var_tree, True)
     ps.forbid_variables(var_tree)
+
 
     sorted_names = [n for n in sorted(var_tree.keys()) if var_tree[n] is not None]
     if not sorted_names:
