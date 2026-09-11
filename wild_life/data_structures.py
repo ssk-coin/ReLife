@@ -184,6 +184,8 @@ class Definition:
         # 型エンコード (推移閉包による高速な型チェック)
         self._type_code: Optional[set] = None
 
+        # 生成順序 ID (GLB 列挙の順序付けに使用)
+        self.creation_id: int = len(Definition.all_definitions)
         Definition.all_definitions.append(self)
 
     @property

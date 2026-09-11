@@ -229,6 +229,10 @@ def compute_all_glbs(d1: Definition, d2: Definition) -> List[Definition]:
     for d in common:
         if not any(other is not d and d.is_subtype_of(other) for other in common):
             maximal.append(d)
+
+    # C版 Wild Life の実装に合わせ、GLB を型の生成順 (creation_id) でソートする。
+    # 型は最初に参照された宣言の順に生成されるため、宣言順に基づく安定した順序が得られる。
+    maximal.sort(key=lambda d: getattr(d, 'creation_id', 0))
     return maximal
 
 
