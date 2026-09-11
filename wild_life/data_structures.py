@@ -121,7 +121,7 @@ class Keyword:
     C版の struct wl_keyword に対応
     """
     def __init__(self, symbol: str, module: Optional[Module] = None,
-                 public: bool = True, private_feature: bool = False):
+                 public: bool = False, private_feature: bool = False):
         self.symbol = symbol
         self.module = module
         self.public = public

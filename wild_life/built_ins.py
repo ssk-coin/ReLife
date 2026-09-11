@@ -5943,6 +5943,10 @@ def bi_load(goal: PsiTerm, eng) -> bool:
     delay_count_before = len(wl.delay_rules)
     result = eng.load_file(filename)
 
+    # C版 Wild Life は .lf ファイルのロード後にカレントモジュールを
+    # user モジュールへ戻す。Python 版でも同じ動作を再現する。
+    wl.current_module = wl.user_module
+
     # In C Wild Life, load(X) is implemented via user-defined predicates in
     # built_ins.lf: features(X) and load_2/2.  After loading and encode_types(),
     # load_2([], X) is proved; the nil term in load_2([]) gets eval_copy'd with
