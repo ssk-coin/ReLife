@@ -522,22 +522,26 @@ def featcmp_key(key: str):
     """featcmp の Python版ソートキー
 
     C版の featcmp 関数に対応:
-      整数文字列は文字列より小さい (整数順序)
-      整数文字列同士は数値順
+      非整数文字列は整数より小さい (文字列が先)
       非整数文字列同士は辞書順
+      整数文字列同士は数値順
 
     例:
-      "1" < "2" < "10" < "a" < "b"
+      "" < "a" < "b" < "0" < "1" < "2" < "10"
+
+    注意: 元のWild Life Cでは named features が positional features より
+    前に表示される。feature.refout の '' => A が 0 => 22 より前に
+    くることから確認済み。
     """
     # 整数かどうかを判定
     s = key.lstrip('-') if key.startswith('-') else key
     if s and s.isdigit():
         try:
             n = int(key)
-            return (0, n, '')  # 整数は先に来る
+            return (1, n, '')  # 整数は後に来る
         except ValueError:
             pass
-    return (1, 0, key)  # 非整数は後に来る
+    return (0, 0, key)  # 非整数は先に来る
 
 
 def featcmp(s1: str, s2: str) -> int:

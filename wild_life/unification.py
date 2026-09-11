@@ -425,9 +425,21 @@ class Unifier:
                 if (_v_canon.type is not None and _v_canon.type is not WL.top
                         and getattr(_v_canon.type, 'prototype_attrs', None)):
                     _proto = _v_canon.type.prototype_attrs
-                    for _pk, _pv in _proto.items():
-                        if _pk not in _v_canon.attr_list:
-                            self.set_attr(_v_canon, _pk, _pv.deref())
+                    # Create fresh copies of ALL prototype attrs using a single
+                    # shared var_map so variables shared across attrs (e.g. L in
+                    # both length=>L and area=>L*S) remain consistently shared.
+                    _var_map: dict = {}
+                    _proto_copies = {k: copy_term(pv, _var_map)
+                                     for k, pv in _proto.items()}
+                    for _pk, _pc in _proto_copies.items():
+                        if _pk in _v_canon.attr_list:
+                            # Unify existing attr value with prototype copy to
+                            # propagate constraints (e.g. width=4 → S=4 → L*4=16 → L=4)
+                            _existing_ref = _v_canon.attr_list[_pk]
+                            self.unify(_existing_ref, _pc)
+                        else:
+                            # Add missing attr from fresh prototype copy
+                            self.set_attr(_v_canon, _pk, _pc)
                 # Fire global delay rules for the sort of the term being bound to.
                 # e.g. :: C:cons | write(C.1), nl. fires when a plain var is bound to a cons.
                 if WL.delay_rules and self.engine is not None and _v_canon.type is not None and _v_canon.type is not WL.top:
@@ -637,6 +649,18 @@ class Unifier:
                         return self.unify(u, v2)
             except Exception:
                 pass  # evaluation failed, proceed with structural unification
+            # Arithmetic narrowing: if evaluation failed (one var unbound), try to
+            # solve for the unbound variable using inverse arithmetic.
+            # e.g. 16 = L * 4 → L = 16/4 = 4  (prototype attr constraint solving)
+            try:
+                if u_is_num and not v_is_num:
+                    if self._try_arith_narrow(v, u):
+                        return True
+                elif v_is_num and not u_is_num:
+                    if self._try_arith_narrow(u, v):
+                        return True
+            except Exception:
+                pass
 
         # 型の単一化
         if not self._unify_types(u, v):
@@ -827,6 +851,69 @@ class Unifier:
 
         return True
 
+    def _try_arith_narrow(self, expr: PsiTerm, val: PsiTerm) -> bool:
+        """Arithmetic narrowing: solve for an unbound variable in `expr` given
+        concrete `val`.
+
+        Handles binary ops (+, -, *, /) where exactly one arg is an unbound
+        sort-constrained variable and the other is concrete.  Uses inverse
+        arithmetic to bind the unbound variable.
+
+        For prototype attr constraints like ``:: rectangle(area => L*S)``:
+          - After S=4: unify(16, L*4) → L = 16/4 = 4.
+        """
+        from wild_life.built_ins import _eval_arith as _ea, _make_number as _mn
+        expr = expr.deref()
+        val = val.deref()
+        if expr.type is None or expr.type.keyword is None:
+            return False
+        sym = expr.type.keyword.symbol
+        if sym not in ('+', '-', '*', '/'):
+            return False
+        a1_ref = expr.attr_list.get('1')
+        a2_ref = expr.attr_list.get('2')
+        if a1_ref is None or a2_ref is None:
+            return False
+        a1 = a1_ref.deref()
+        a2 = a2_ref.deref()
+        eng = self.engine
+        ok1, v1 = _ea(a1, eng)
+        ok2, v2 = _ea(a2, eng)
+        target = val.value
+        if target is None:
+            return False
+        # Need exactly one side evaluable, the other being an unbound variable
+        if ok1 and not ok2:
+            # arg2 is the unknown: solve val = arg1 <op> arg2
+            if sym == '+':      result = target - v1       # v1 + arg2 = target
+            elif sym == '-':    result = v1 - target       # v1 - arg2 = target → arg2 = v1-target
+            elif sym == '*':
+                if v1 == 0:
+                    return False
+                result = target / v1
+            elif sym == '/':
+                if target == 0:
+                    return False
+                result = v1 / target                       # v1 / arg2 = target → arg2 = v1/target
+            else:
+                return False
+            result_term = _mn(eng, int(result) if result == int(result) else result)
+            return self.unify(a2, result_term)
+        elif ok2 and not ok1:
+            # arg1 is the unknown: solve val = arg1 <op> arg2
+            if sym == '+':      result = target - v2
+            elif sym == '-':    result = target + v2       # arg1 - v2 = target
+            elif sym == '*':
+                if v2 == 0:
+                    return False
+                result = target / v2
+            elif sym == '/':    result = target * v2       # arg1 / v2 = target
+            else:
+                return False
+            result_term = _mn(eng, int(result) if result == int(result) else result)
+            return self.unify(a1, result_term)
+        return False
+
     def _try_sort_narrowing(self, u: PsiTerm) -> bool:
         """ソートプロトタイプに基づいて u のソートを絞り込む試み。
 
@@ -993,22 +1080,26 @@ class Unifier:
                 pre_unify_literals: list = []
                 self._collect_literal_integers(goal_copy, pre_unify_literals, set())
 
+            # TENTATIVE UNIFICATION: take a trail mark before pattern unification.
+            # If the goal fails, we undo back here and the added attrs are removed.
+            # This implements C Wild Life's "delay rule semantics": pattern attrs are
+            # only committed when the delay goal succeeds (e.g. manual7: best_friend
+            # is added only when get_along(P,Q) succeeds).
+            _trial_mark = self.trail.mark()
+
             # Unify pattern_d_copy with u (e.g. person(best_friend=>Q) with cleopatra_pt)
-            # This binds u's attrs from the pattern (adds best_friend=Q_fresh)
+            # This binds u's attrs from the pattern (adds best_friend=Q_fresh).
             unify_ok = self.unify(pattern_d_copy, u)
             if not unify_ok:
+                self.trail.undo_to(_trial_mark)
                 continue
 
-            # Prove the goal (e.g. get_along(P, Q)) by pushing it onto the goal stack.
-            # The engine will process it in the next iteration, after the current
-            # unification step completes.
+            # Build a materialised goal copy (resolved current bindings) before
+            # proving so that if the proof undoes partial bindings, the goal term
+            # still contains the values visible at this point.
             from wild_life.data_structures import GoalType as _GT
             from wild_life.inference import _DEFRULES as _defrules_sentinel
             goal_d_copy = goal_copy.deref()
-            # Create a trail-independent concrete copy of the goal by materialising all
-            # current trail bindings.  This ensures that if the caller later undoes its
-            # trail (as _eval_arith does after testing a function-rule head), the pushed
-            # goal still contains the concrete integer values rather than unbound sort-vars.
             goal_materialized = copy_term(goal_d_copy, {})
 
             # Fire integer literal delays BEFORE the goal so they appear first in output.
@@ -1026,10 +1117,29 @@ class Unifier:
                 finally:
                     self.engine._in_fire_delay = True
 
-            # Execute the goal synchronously so delay outputs appear in
-            # triggering order (FIFO) rather than LIFO stack order.
-            _exec_delay_goal_sync(goal_materialized, self.engine)
-            # (Do NOT extend deferred_literal_fires — literals are fired above.)
+            # Prove the goal synchronously via a nested inner run.
+            # Saves and restores engine goal/choice stacks so the nested proof
+            # is isolated from the outer computation.
+            try:
+                from wild_life.inference import _INNER_RUN_BARRIER as _IRB
+            except ImportError:
+                _IRB = object()
+            _eng = self.engine
+            _cp_save = _eng.choice_stack
+            _gs_save = _eng.goal_stack
+            _eng.goal_stack = None
+            _eng.push_goal(_GT.PROVE, goal_materialized, _defrules_sentinel, None)
+            _old_main_ok = _eng.main_loop_ok
+            _barrier = _cp_save if _cp_save is not None else _IRB
+            _goal_ok = _eng.run(cs_barrier=_barrier)
+            _eng.main_loop_ok = _old_main_ok
+            _eng.choice_stack = _cp_save
+            _eng.goal_stack = _gs_save
+
+            if not _goal_ok:
+                # Goal failed: undo pattern unification (tentative semantics).
+                # Remove attrs added by the pattern (e.g. best_friend => Q_fresh).
+                self.trail.undo_to(_trial_mark)
 
     def _fire_delay_rules_for_subterms(self, t: PsiTerm, visited: set = None) -> None:
         """Fire delay rules recursively for all typed sub-terms of t.

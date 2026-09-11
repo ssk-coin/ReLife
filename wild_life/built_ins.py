@@ -771,12 +771,37 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             child_atoms.append(wl.make_atom(child_defn.keyword.symbol, wl.bi_module))
         return wl.make_list(child_atoms)
 
+    elif sym == 'local_time':
+        # local_time is a 0-ary built-in sort with attributes:
+        # day, hour, minute, month, second, weekday, year
+        import datetime as _datetime
+        _now = _datetime.datetime.now()
+        wl = eng.wl
+        lt = PsiTerm()
+        lt.type = t.type
+        lt.status = 4
+        # Insert in alphabetical order (preserved by Python dict)
+        lt.attr_list = {
+            'day':     wl.make_integer(_now.day),
+            'hour':    wl.make_integer(_now.hour),
+            'minute':  wl.make_integer(_now.minute),
+            'month':   wl.make_integer(_now.month),
+            'second':  wl.make_integer(_now.second),
+            'weekday': wl.make_integer(_now.weekday()),
+            'year':    wl.make_integer(_now.year),
+        }
+        return lt
+
     elif sym == 'features':
         # features(T) -> list of attribute labels
         a1 = t.attr_list.get('1')
         if a1 is None:
             return None
         a1 = a1.deref()
+        # Try to evaluate a1 first (e.g. local_time built-in)
+        _a1_ev = _try_eval_string_func(a1, eng)
+        if _a1_ev is not None:
+            a1 = _a1_ev
         keys = list(a1.attr_list.keys())
         wl = eng.wl
         lst = PsiTerm(type_def=wl.nil)
@@ -784,7 +809,13 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         for key in reversed(keys):
             try:
                 n = int(key)
-                kterm = wl.make_integer(n)
+                # Negative integer feature names must be returned as atoms
+                # (quoted when printed, e.g. '-34'), not as integer values,
+                # because they are identifiers, not numbers.
+                if n >= 0:
+                    kterm = wl.make_integer(n)
+                else:
+                    kterm = _make_atom(eng, key)
             except (ValueError, TypeError):
                 kterm = _make_atom(eng, key)
             pair = PsiTerm()
@@ -811,7 +842,9 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             if fsym in ('integer', 'real', 'int', 'float', 'number'):
                 fkey = str(int(feat.value))
             else:
-                fkey = fsym
+                # For string types and other value-bearing non-numeric types,
+                # use the actual value as the key (e.g. "" -> '', not 'string')
+                fkey = str(feat.value)
         elif feat.type and feat.type.keyword:
             fkey = feat.type.keyword.symbol
         else:
@@ -3337,7 +3370,9 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng) -> 'Optional[PsiTerm]':
         if fsym in ('integer', 'real', 'int', 'float', 'number'):
             fkey = str(int(feat.value))
         else:
-            fkey = fsym
+            # For string types and other value-bearing non-numeric types,
+            # use the actual value as the key (e.g. "" -> '', not 'string')
+            fkey = str(feat.value)
     elif feat.type and feat.type.keyword:
         fkey = feat.type.keyword.symbol
     else:
@@ -4410,7 +4445,36 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                         if ok_eval:
                             b_d = _make_number(eng, v_eval)
                         else:
-                            # Concrete but unevaluable (e.g. division by zero). Fail.
+                            # Concrete but unevaluable (e.g. division by zero, non-numeric
+                            # atom argument).  Check if any immediate arg is a concrete
+                            # non-numeric atom — if so, emit the standard Wild Life warning.
+                            _b_sym_fail = (b_d.type.keyword.symbol
+                                           if (b_d.type and b_d.type.keyword) else '')
+                            if _b_sym_fail in _ARITH_OPS_SET:
+                                _fa1, _fa2 = _get_two_args(b_d)
+                                # Evaluate each arg to its concrete form (resolving dot
+                                # accesses, feature lookups, etc.) for the display message.
+                                def _eval_arg_for_warn(a_ref):
+                                    if a_ref is None:
+                                        return None
+                                    a_d_w = a_ref.deref()
+                                    _ev_w = _try_eval_string_func(a_d_w, eng)
+                                    return _ev_w if _ev_w is not None else a_d_w
+                                _fa1_ev = _eval_arg_for_warn(_fa1)
+                                _fa2_ev = _eval_arg_for_warn(_fa2)
+                                # Build a normalised copy of b_d with evaluated args.
+                                _b_norm_w = PsiTerm()
+                                _b_norm_w.type = b_d.type
+                                _b_norm_w.attr_list = {}
+                                if _fa1_ev is not None:
+                                    _b_norm_w.attr_list['1'] = _fa1_ev
+                                if _fa2_ev is not None:
+                                    _b_norm_w.attr_list['2'] = _fa2_ev
+                                if _has_concrete_non_numeric_arg(_b_norm_w, eng):
+                                    import sys as _sys_w
+                                    _expr_str_w = _term_to_str(_b_norm_w, eng, quoted=True)
+                                    print(f"*** Warning: non-numeric argument(s) in "
+                                          f"'{_expr_str_w}'.", file=_sys_w.stderr)
                             return False
                     else:
                         from wild_life.data_structures import Goal, Residuation
@@ -7352,16 +7416,25 @@ def register_all(wl) -> None:
         if a1 is None:
             return False
         t = a1.deref()
+        # Try to evaluate t first (e.g. local_time built-in)
+        _t_ev = _try_eval_string_func(t, eng)
+        if _t_ev is not None:
+            t = _t_ev
         # Build list of attribute keys
         keys = list(t.attr_list.keys())
         # Build WL list from keys
         wl = eng.wl
         lst = wl.nil
         for key in reversed(keys):
-            # Key may be numeric ("1","2") or named
+            # Key may be numeric ("1","2") or named.
+            # Negative integer keys (e.g. "-34") must be returned as atoms
+            # (they display with quotes like '-34'), not as integer values.
             try:
                 n = int(key)
-                kterm = wl.make_integer(n)
+                if n >= 0:
+                    kterm = wl.make_integer(n)
+                else:
+                    kterm = wl.make_atom(key, wl.user_module)
             except (ValueError, TypeError):
                 kterm = wl.make_atom(key, wl.user_module)
             pair = PsiTerm()
