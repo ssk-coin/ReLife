@@ -6611,6 +6611,92 @@ def bi_type_of(goal: PsiTerm, eng) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# substitute/3 — sort substitution in a psi-term
+# ─────────────────────────────────────────────────────────────────────────────
+
+def bi_substitute(goal: PsiTerm, eng) -> bool:
+    """substitute(A, B, X) — In psi-term X, replace every occurrence of sort A with sort B.
+
+    Traverses X recursively. For each node:
+      - If the node is a *sort atom* (no .value) whose sort matches A's sort,
+        change its sort to B's sort. Integer/float/string values (.value is not
+        None) are left untouched even when their sort matches.
+      - Feature labels (attribute-dict keys) equal to A's sort symbol are renamed
+        to B's sort symbol. When the renamed label already exists, keep the
+        existing feature value and discard the renamed one.
+
+    All modifications are trailed so backtracking restores the original structure.
+    Always succeeds (returns True) even when no changes are made.
+    """
+    a1 = goal.attr_list.get('1')
+    a2 = goal.attr_list.get('2')
+    a3 = goal.attr_list.get('3')
+    if a1 is None or a2 is None or a3 is None:
+        return False
+
+    d_a = a1.deref()
+    d_b = a2.deref()
+    d_x = a3.deref()
+
+    if d_a.type is None or d_b.type is None:
+        return False
+
+    sort_a_kw = d_a.type.keyword
+    sort_b_def = d_b.type
+    sort_b_kw = sort_b_def.keyword
+
+    sort_a_sym = sort_a_kw.symbol if sort_a_kw else None
+    sort_b_sym = sort_b_kw.symbol if sort_b_kw else None
+
+    if sort_a_sym is None or sort_b_sym is None:
+        return True  # unknown sorts — vacuous success
+
+    # No-op when A and B are the same sort
+    if sort_a_sym == sort_b_sym:
+        return True
+
+    visited: set = set()
+
+    def _subst(t: PsiTerm) -> None:
+        t = t.deref()
+        t_id = id(t)
+        if t_id in visited:
+            return
+        visited.add(t_id)
+
+        # Change sort if this node is a sort atom (no value) matching A
+        if (t.type is not None and t.type.keyword is not None
+                and t.value is None
+                and t.type.keyword.symbol == sort_a_sym):
+            eng.trail.trail_psi(t, 'type')
+            t.type = sort_b_def
+
+        # Rename matching feature label A → B
+        if t.attr_list and sort_a_sym in t.attr_list:
+            val_a = t.attr_list[sort_a_sym]
+            if sort_b_sym not in t.attr_list:
+                # No conflict: rename the feature label
+                eng.trail.trail_copy(t, 'attr_list')
+                del t.attr_list[sort_a_sym]
+                t.attr_list[sort_b_sym] = val_a
+                # val_a is now accessible under sort_b_sym; will be processed below
+            else:
+                # Conflict: keep existing sort_b_sym value, discard renamed one.
+                # Still recursively process val_a in case it's referenced elsewhere.
+                eng.trail.trail_copy(t, 'attr_list')
+                del t.attr_list[sort_a_sym]
+                _subst(val_a)
+
+        # Recursively process current attribute values
+        if t.attr_list:
+            for v in list(t.attr_list.values()):
+                _subst(v)
+
+    _subst(d_x)
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # alias/2 — sort alias
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -7228,6 +7314,7 @@ def register_all(wl) -> None:
     _reg('functor_of', bi_functor_of)
 
     # Alias / sort manipulation
+    _reg('substitute', bi_substitute)   # substitute(A,B,X): replace sort A with B in X
     _reg('alias', bi_alias)
 
     # ── LIFE meta-predicates (no-ops or minimal stubs) ─────────────────────
