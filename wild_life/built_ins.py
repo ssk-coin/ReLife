@@ -7749,6 +7749,7 @@ def register_all(wl) -> None:
 
     def _bi_open(goal, eng):
         """open("Mod", ...) — add named module(s) to current module's open list."""
+        import sys as _sys
         mod = wl.current_module
         if mod is None:
             return True
@@ -7759,14 +7760,19 @@ def register_all(wl) -> None:
                 break
             name = _get_string_or_atom(a, eng)
             if name:
-                target = wl.create_module(name)
-                # Ensure target itself opens bi/syntax
-                if wl.bi_module not in target.open_modules:
-                    target.open_modules.append(wl.bi_module)
-                if wl.syntax_module not in target.open_modules:
-                    target.open_modules.append(wl.syntax_module)
-                if target not in mod.open_modules:
-                    mod.open_modules.append(target)
+                # Check whether the module was already defined.
+                # If not, report the error (like the C interpreter) but continue.
+                if name not in wl.module_table:
+                    print(f'*** Error: module "{name}" not found', file=_sys.stderr)
+                else:
+                    target = wl.create_module(name)
+                    # Ensure target itself opens bi/syntax
+                    if wl.bi_module not in target.open_modules:
+                        target.open_modules.append(wl.bi_module)
+                    if wl.syntax_module not in target.open_modules:
+                        target.open_modules.append(wl.syntax_module)
+                    if target not in mod.open_modules:
+                        mod.open_modules.append(target)
             i += 1
         return True
     _reg('open', _bi_open)
