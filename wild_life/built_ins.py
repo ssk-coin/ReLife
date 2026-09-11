@@ -3374,7 +3374,14 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng) -> 'Optional[PsiTerm]':
             # use the actual value as the key (e.g. "" -> '', not 'string')
             fkey = str(feat.value)
     elif feat.type and feat.type.keyword:
-        fkey = feat.type.keyword.symbol
+        # Try to evaluate arithmetic expressions like -N, N-1, etc. as feature keys.
+        # This handles cases like Y.(-N) when N is bound to a number, so -N evaluates
+        # to a negative integer atom key like '-3'.
+        _ok, _v = _eval_arith(feat, eng)
+        if _ok:
+            fkey = str(int(_v))
+        else:
+            fkey = feat.type.keyword.symbol
     else:
         return None
     existing = host.attr_list.get(fkey)
