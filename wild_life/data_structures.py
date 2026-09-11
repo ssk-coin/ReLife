@@ -521,23 +521,38 @@ class Residuation:
 def featcmp_key(key: str):
     """featcmp の Python版ソートキー
 
-    C版の featcmp 関数に対応:
-      整数文字列は文字列より小さい (整数順序)
-      整数文字列同士は数値順
-      非整数文字列同士は辞書順
+    Wild Life 1.02 C版の featcmp に合わせた5カテゴリ順序:
+      0: 空文字列 ''  (最初)
+      1: 純負整数文字列 '-N' (Nは数字のみ)  → 絶対値昇順: -1, -2, ..., -13
+      2: 単独マイナス '-'
+      3: 非負整数文字列 '0', '1', ..., '16' → 数値昇順
+      4: その他の文字列 → 辞書順
 
     例:
-      "1" < "2" < "10" < "a" < "b"
+      '' < '-1' < '-2' < ... < '-13' < '-' < '0' < '1' < ... < '16'
+           < '-1a' < '1a' < 'a' < 'aa' < ... < 'zz'
+
+    feature.refout では '' => A が 0 => 22 より前に来ることを確認。
+    feat_order.refout では 0 => "0" が a => "a" より前に来ることを確認。
     """
-    # 整数かどうかを判定
-    s = key.lstrip('-') if key.startswith('-') else key
-    if s and s.isdigit():
-        try:
-            n = int(key)
-            return (0, n, '')  # 整数は先に来る
-        except ValueError:
-            pass
-    return (1, 0, key)  # 非整数は後に来る
+    # カテゴリ0: 空文字列は常に最初
+    if key == '':
+        return (0, 0, '')
+
+    # カテゴリ1: 純負整数文字列 '-N' (Nが数字のみ、非空)
+    if key.startswith('-') and len(key) > 1 and key[1:].isdigit():
+        return (1, int(key[1:]), '')  # 絶対値昇順
+
+    # カテゴリ2: 単独マイナス
+    if key == '-':
+        return (2, 0, '')
+
+    # カテゴリ3: 非負整数文字列 (数字のみ)
+    if key.isdigit():
+        return (3, int(key), '')
+
+    # カテゴリ4: その他 → 辞書順
+    return (4, 0, key)
 
 
 def featcmp(s1: str, s2: str) -> int:

@@ -771,12 +771,37 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             child_atoms.append(wl.make_atom(child_defn.keyword.symbol, wl.bi_module))
         return wl.make_list(child_atoms)
 
+    elif sym == 'local_time':
+        # local_time is a 0-ary built-in sort with attributes:
+        # day, hour, minute, month, second, weekday, year
+        import datetime as _datetime
+        _now = _datetime.datetime.now()
+        wl = eng.wl
+        lt = PsiTerm()
+        lt.type = t.type
+        lt.status = 4
+        # Insert in alphabetical order (preserved by Python dict)
+        lt.attr_list = {
+            'day':     wl.make_integer(_now.day),
+            'hour':    wl.make_integer(_now.hour),
+            'minute':  wl.make_integer(_now.minute),
+            'month':   wl.make_integer(_now.month),
+            'second':  wl.make_integer(_now.second),
+            'weekday': wl.make_integer(_now.weekday()),
+            'year':    wl.make_integer(_now.year),
+        }
+        return lt
+
     elif sym == 'features':
         # features(T) -> list of attribute labels
         a1 = t.attr_list.get('1')
         if a1 is None:
             return None
         a1 = a1.deref()
+        # Try to evaluate a1 first (e.g. local_time built-in)
+        _a1_ev = _try_eval_string_func(a1, eng)
+        if _a1_ev is not None:
+            a1 = _a1_ev
         keys = list(a1.attr_list.keys())
         wl = eng.wl
         lst = PsiTerm(type_def=wl.nil)
@@ -784,7 +809,13 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         for key in reversed(keys):
             try:
                 n = int(key)
-                kterm = wl.make_integer(n)
+                # Negative integer feature names must be returned as atoms
+                # (quoted when printed, e.g. '-34'), not as integer values,
+                # because they are identifiers, not numbers.
+                if n >= 0:
+                    kterm = wl.make_integer(n)
+                else:
+                    kterm = _make_atom(eng, key)
             except (ValueError, TypeError):
                 kterm = _make_atom(eng, key)
             pair = PsiTerm()
@@ -811,7 +842,9 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             if fsym in ('integer', 'real', 'int', 'float', 'number'):
                 fkey = str(int(feat.value))
             else:
-                fkey = fsym
+                # For string types and other value-bearing non-numeric types,
+                # use the actual value as the key (e.g. "" -> '', not 'string')
+                fkey = str(feat.value)
         elif feat.type and feat.type.keyword:
             fkey = feat.type.keyword.symbol
         else:
@@ -3337,9 +3370,18 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng) -> 'Optional[PsiTerm]':
         if fsym in ('integer', 'real', 'int', 'float', 'number'):
             fkey = str(int(feat.value))
         else:
-            fkey = fsym
+            # For string types and other value-bearing non-numeric types,
+            # use the actual value as the key (e.g. "" -> '', not 'string')
+            fkey = str(feat.value)
     elif feat.type and feat.type.keyword:
-        fkey = feat.type.keyword.symbol
+        # Try to evaluate arithmetic expressions like -N, N-1, etc. as feature keys.
+        # This handles cases like Y.(-N) when N is bound to a number, so -N evaluates
+        # to a negative integer atom key like '-3'.
+        _ok, _v = _eval_arith(feat, eng)
+        if _ok:
+            fkey = str(int(_v))
+        else:
+            fkey = feat.type.keyword.symbol
     else:
         return None
     existing = host.attr_list.get(fkey)
@@ -3389,18 +3431,22 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     from wild_life.inference import _mark_arith_non_strict as _BI_MANS  # noqa: F811
     _bq_sym_check = (lambda td: td.type is not None and td.type.keyword is not None
                      and td.type.keyword.symbol == '`')
+    _b_was_backtick = False
     if _bq_sym_check(b_d):
         _bq_inner = b_d.attr_list.get('1')
         if _bq_inner is not None:
             _bq_inner_d = _bq_inner.deref()
             _BI_MANS(_bq_inner_d)  # recursively mark arithmetic sub-terms as NON_STRICT
             b_d = _bq_inner_d
+            _b_was_backtick = True
+    _a_was_backtick = False
     if _bq_sym_check(a_d):
         _bq_inner = a_d.attr_list.get('1')
         if _bq_inner is not None:
             _bq_inner_d = _bq_inner.deref()
             _BI_MANS(_bq_inner_d)
             a_d = _bq_inner_d
+            _a_was_backtick = True
 
     # Detect non-frozen arithmetic operator being applied via @(1,2)-style term.
     # Example: A=(+), A=@(1,2) — without backtick-freeze, `+` is an eager operator,
@@ -4123,7 +4169,7 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     # effects, and only keep the VALUE if it turned out to be concrete.
     # This avoids corrupting `result`'s coref and prevents spurious arithmetic
     # constraints from unevaluated or self-referential rule bodies.
-    if _b_is_user_fn and not _b_is_non_strict and not b_d.attr_list:
+    if _b_is_user_fn and not _b_is_non_strict and not b_d.attr_list and not _b_was_backtick:
         _0a_mark = eng.trail.mark()
         _b_evaled = _eval_user_func_sync(b_d, eng, 0)
         eng.trail.undo_to(_0a_mark)  # undo coref-linking of atom with rule-head copy
@@ -4410,7 +4456,36 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                         if ok_eval:
                             b_d = _make_number(eng, v_eval)
                         else:
-                            # Concrete but unevaluable (e.g. division by zero). Fail.
+                            # Concrete but unevaluable (e.g. division by zero, non-numeric
+                            # atom argument).  Check if any immediate arg is a concrete
+                            # non-numeric atom — if so, emit the standard Wild Life warning.
+                            _b_sym_fail = (b_d.type.keyword.symbol
+                                           if (b_d.type and b_d.type.keyword) else '')
+                            if _b_sym_fail in _ARITH_OPS_SET:
+                                _fa1, _fa2 = _get_two_args(b_d)
+                                # Evaluate each arg to its concrete form (resolving dot
+                                # accesses, feature lookups, etc.) for the display message.
+                                def _eval_arg_for_warn(a_ref):
+                                    if a_ref is None:
+                                        return None
+                                    a_d_w = a_ref.deref()
+                                    _ev_w = _try_eval_string_func(a_d_w, eng)
+                                    return _ev_w if _ev_w is not None else a_d_w
+                                _fa1_ev = _eval_arg_for_warn(_fa1)
+                                _fa2_ev = _eval_arg_for_warn(_fa2)
+                                # Build a normalised copy of b_d with evaluated args.
+                                _b_norm_w = PsiTerm()
+                                _b_norm_w.type = b_d.type
+                                _b_norm_w.attr_list = {}
+                                if _fa1_ev is not None:
+                                    _b_norm_w.attr_list['1'] = _fa1_ev
+                                if _fa2_ev is not None:
+                                    _b_norm_w.attr_list['2'] = _fa2_ev
+                                if _has_concrete_non_numeric_arg(_b_norm_w, eng):
+                                    import sys as _sys_w
+                                    _expr_str_w = _term_to_str(_b_norm_w, eng, quoted=True)
+                                    print(f"*** Warning: non-numeric argument(s) in "
+                                          f"'{_expr_str_w}'.", file=_sys_w.stderr)
                             return False
                     else:
                         from wild_life.data_structures import Goal, Residuation
@@ -6536,6 +6611,92 @@ def bi_type_of(goal: PsiTerm, eng) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# substitute/3 — sort substitution in a psi-term
+# ─────────────────────────────────────────────────────────────────────────────
+
+def bi_substitute(goal: PsiTerm, eng) -> bool:
+    """substitute(A, B, X) — In psi-term X, replace every occurrence of sort A with sort B.
+
+    Traverses X recursively. For each node:
+      - If the node is a *sort atom* (no .value) whose sort matches A's sort,
+        change its sort to B's sort. Integer/float/string values (.value is not
+        None) are left untouched even when their sort matches.
+      - Feature labels (attribute-dict keys) equal to A's sort symbol are renamed
+        to B's sort symbol. When the renamed label already exists, keep the
+        existing feature value and discard the renamed one.
+
+    All modifications are trailed so backtracking restores the original structure.
+    Always succeeds (returns True) even when no changes are made.
+    """
+    a1 = goal.attr_list.get('1')
+    a2 = goal.attr_list.get('2')
+    a3 = goal.attr_list.get('3')
+    if a1 is None or a2 is None or a3 is None:
+        return False
+
+    d_a = a1.deref()
+    d_b = a2.deref()
+    d_x = a3.deref()
+
+    if d_a.type is None or d_b.type is None:
+        return False
+
+    sort_a_kw = d_a.type.keyword
+    sort_b_def = d_b.type
+    sort_b_kw = sort_b_def.keyword
+
+    sort_a_sym = sort_a_kw.symbol if sort_a_kw else None
+    sort_b_sym = sort_b_kw.symbol if sort_b_kw else None
+
+    if sort_a_sym is None or sort_b_sym is None:
+        return True  # unknown sorts — vacuous success
+
+    # No-op when A and B are the same sort
+    if sort_a_sym == sort_b_sym:
+        return True
+
+    visited: set = set()
+
+    def _subst(t: PsiTerm) -> None:
+        t = t.deref()
+        t_id = id(t)
+        if t_id in visited:
+            return
+        visited.add(t_id)
+
+        # Change sort if this node is a sort atom (no value) matching A
+        if (t.type is not None and t.type.keyword is not None
+                and t.value is None
+                and t.type.keyword.symbol == sort_a_sym):
+            eng.trail.trail_psi(t, 'type')
+            t.type = sort_b_def
+
+        # Rename matching feature label A → B
+        if t.attr_list and sort_a_sym in t.attr_list:
+            val_a = t.attr_list[sort_a_sym]
+            if sort_b_sym not in t.attr_list:
+                # No conflict: rename the feature label
+                eng.trail.trail_copy(t, 'attr_list')
+                del t.attr_list[sort_a_sym]
+                t.attr_list[sort_b_sym] = val_a
+                # val_a is now accessible under sort_b_sym; will be processed below
+            else:
+                # Conflict: keep existing sort_b_sym value, discard renamed one.
+                # Still recursively process val_a in case it's referenced elsewhere.
+                eng.trail.trail_copy(t, 'attr_list')
+                del t.attr_list[sort_a_sym]
+                _subst(val_a)
+
+        # Recursively process current attribute values
+        if t.attr_list:
+            for v in list(t.attr_list.values()):
+                _subst(v)
+
+    _subst(d_x)
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # alias/2 — sort alias
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -7153,6 +7314,7 @@ def register_all(wl) -> None:
     _reg('functor_of', bi_functor_of)
 
     # Alias / sort manipulation
+    _reg('substitute', bi_substitute)   # substitute(A,B,X): replace sort A with B in X
     _reg('alias', bi_alias)
 
     # ── LIFE meta-predicates (no-ops or minimal stubs) ─────────────────────
@@ -7352,16 +7514,25 @@ def register_all(wl) -> None:
         if a1 is None:
             return False
         t = a1.deref()
+        # Try to evaluate t first (e.g. local_time built-in)
+        _t_ev = _try_eval_string_func(t, eng)
+        if _t_ev is not None:
+            t = _t_ev
         # Build list of attribute keys
         keys = list(t.attr_list.keys())
         # Build WL list from keys
         wl = eng.wl
         lst = wl.nil
         for key in reversed(keys):
-            # Key may be numeric ("1","2") or named
+            # Key may be numeric ("1","2") or named.
+            # Negative integer keys (e.g. "-34") must be returned as atoms
+            # (they display with quotes like '-34'), not as integer values.
             try:
                 n = int(key)
-                kterm = wl.make_integer(n)
+                if n >= 0:
+                    kterm = wl.make_integer(n)
+                else:
+                    kterm = wl.make_atom(key, wl.user_module)
             except (ValueError, TypeError):
                 kterm = wl.make_atom(key, wl.user_module)
             pair = PsiTerm()
