@@ -658,13 +658,13 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None or a2 is None:
             return None
         a1, a2 = a1.deref(), a2.deref()
-        # Only evaluate when both arguments are concrete strings
+        # Only evaluate when BOTH arguments are concrete strings
         if eng is not None:
             wl = eng.wl
             def _is_string(x):
                 return (x.value is not None and x.type is not None
                         and x.type.is_subtype_of(wl.quoted_string))
-            if not (_is_string(a1) or _is_string(a2)):
+            if not (_is_string(a1) and _is_string(a2)):
                 return None
         # Recursively evaluate if needed
         a1e = _try_eval_string_func(a1, eng)
@@ -676,6 +676,19 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         s1 = str(a1.value) if (a1.value is not None) else ''
         s2 = str(a2.value) if (a2.value is not None) else ''
         return _make_string(eng, s1 + s2)
+
+    elif sym == 'strlen':
+        # strlen(String) -> integer length of String
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return None
+        a1d = a1.deref()
+        if eng is None or a1d.value is None:
+            return None
+        wl = eng.wl
+        if a1d.type is None or not a1d.type.is_subtype_of(wl.quoted_string):
+            return None
+        return wl.make_integer(len(str(a1d.value)))
 
     elif sym == 'substr':
         # substr(String, Start, Length) -> substring (1-indexed, returns "" if out of range)
@@ -4424,7 +4437,69 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                         else:
                             _attach_arith_resid(a_d_final, wl, pending_goal, eng)
                         return True
-    # Try string function evaluation on RHS (psi2str, str2psi, strcon)
+    # Try string function evaluation on RHS (psi2str, str2psi, strcon, substr, strlen)
+    # String functions that should delay when key arguments are unbound:
+    _DELAY_STRING_FUNCS = frozenset(('strcon', 'substr', 'strlen', 'str2psi'))
+    _b_sym_str = _get_sym(b_d)
+    _a_sym_str = _get_sym(a_d)
+
+    def _str_func_delay(func_t, target_t, eng):
+        """Try to evaluate a string function; delay on blocking free vars if needed.
+
+        Returns True when successfully evaluated or suspended (delay registered).
+        Returns None when this is not a delayable string function situation.
+        """
+        sym_f = _get_sym(func_t)
+        if sym_f not in _DELAY_STRING_FUNCS:
+            return None
+        # Try to evaluate immediately
+        result = _try_eval_string_func(func_t, eng)
+        if result is not None:
+            return _unify(eng, target_t, result)
+        # Evaluation failed — find blocking unbound variables
+        blocking = []
+        for val in func_t.attr_list.values():
+            v = val.deref()
+            if _term_is_unbound(v, eng):
+                blocking.append(v)
+        if not blocking:
+            return None  # no unbound vars — fall through to structural unify
+        # Register a pending PROVE goal on each blocking variable
+        from wild_life.data_structures import Goal, Residuation, SORT_VAR
+        wl_sf = eng.wl
+        eq_defn = getattr(wl_sf, 'eqsym', None)
+        if eq_defn is None and hasattr(wl_sf, 'syntax_module'):
+            eq_defn = wl_sf.syntax_module.symbol_table.get('=')
+        eq_term = PsiTerm(type_def=eq_defn)
+        eq_term.attr_list['1'] = target_t
+        eq_term.attr_list['2'] = func_t
+        eq_term._resid_marker = True
+        pending_goal = Goal(GoalType.PROVE, eq_term, None, None, pending=True)
+        for s_var in blocking:
+            if s_var.resid is None:
+                eng.trail.trail_psi(s_var, 'resid')
+                s_var.resid = [Residuation(goal=pending_goal)]
+            else:
+                if not any(rv.goal is pending_goal for rv in s_var.resid):
+                    eng.trail.trail_copy(s_var, 'resid')
+                    s_var.resid.append(Residuation(goal=pending_goal))
+            if not (s_var.flags & SORT_VAR):
+                eng.trail.trail_psi(s_var, 'flags')
+                s_var.flags |= SORT_VAR
+        return True  # successfully suspended
+
+    # Check RHS first
+    if _b_sym_str in _DELAY_STRING_FUNCS and eng is not None:
+        _r = _str_func_delay(b_d, a_d, eng)
+        if _r is not None:
+            return _r
+    # Check LHS
+    if _a_sym_str in _DELAY_STRING_FUNCS and eng is not None:
+        _r = _str_func_delay(a_d, b_d, eng)
+        if _r is not None:
+            return _r
+
+    # Non-delaying string functions (psi2str, root_sort, children, chr evaluated already above)
     b_str = _try_eval_string_func(b_d, eng)
     if b_str is not None:
         b_d = b_str
