@@ -270,6 +270,11 @@ class Unifier:
         # 3) rather than in reversed LIFO order.
         self._unify_nesting = 0      # depth counter for nested unify calls
         self._deferred_wakeups: list = []  # list of (gtype, ga, gb, gc) tuples
+        # Cycle detection for rational-tree (cyclic) unification.
+        # Stores frozensets of {id(u), id(v)} pairs currently being unified.
+        # If we encounter the same pair again (via circular attrs), we return True
+        # immediately (the rational-tree assumption: cyclic terms can be unified).
+        self._unifying_pairs: set = set()
 
     def bind(self, var: PsiTerm, val: PsiTerm):
         """変数 var を val に束縛する (バックトラック可能)
@@ -330,6 +335,46 @@ class Unifier:
 
         if u is v:
             return True  # 同一オブジェクト
+
+        # Cycle detection for rational-tree (cyclic) unification.
+        # If we are already in the process of unifying this exact pair of
+        # canonical psi-terms (via a circular attr chain), assume they can be
+        # unified and return True immediately to break the cycle.
+        _pair_key = frozenset((id(u), id(v)))
+        if _pair_key in self._unifying_pairs:
+            return True
+        self._unifying_pairs.add(_pair_key)
+        try:
+            return self._unify_impl_inner(u, v)
+        finally:
+            self._unifying_pairs.discard(_pair_key)
+
+    def _unify_impl_inner(self, u: PsiTerm, v: PsiTerm) -> bool:
+        """Actual unification body (called by _unify_impl after cycle detection)."""
+        # Dot-access expression resolution: when either term is a dot-projection
+        # (type.keyword.symbol == '.'), resolve it to the actual feature cell
+        # before unification.  This handles cases like s(A.B, A.C) = s(A.D, A.E)
+        # where the dot-terms appear as sub-terms inside a compound.
+        _dot_check = (lambda t: (t.type is not None and t.type.keyword is not None
+                                 and t.type.keyword.symbol == '.'))
+        if _dot_check(u) or _dot_check(v):
+            if self.engine is not None:
+                from wild_life.built_ins import _resolve_dot_feat as _rdf
+                if _dot_check(u):
+                    _cell_u = _rdf(u, self.engine)
+                    if _cell_u is None:
+                        return False
+                    u = _cell_u.deref()
+                if _dot_check(v):
+                    _cell_v = _rdf(v, self.engine)
+                    if _cell_v is None:
+                        return False
+                    v = _cell_v.deref()
+                if u is v:
+                    return True
+            else:
+                # No engine: cannot set up residuations; treat as compound unification
+                pass
 
         # 変数の処理
         u_is_var = (u.type is WL.top and not u.attr_list and not u.resid)
@@ -414,7 +459,33 @@ class Unifier:
                     self._wakeup_resid(u, v)
                     return True
                 self.bind(u, v)
-                self._wakeup_resid(u, v)
+                # Fix B: SORT_VAR daemon transfer.
+                # When a SORT_VAR variable u has daemon residuations (from
+                # such_that `val | cond`), and v is itself a free variable
+                # (plain atom with no attrs yet), transfer the daemon resids to v
+                # instead of firing them immediately. The daemon fires when v
+                # is later unified with the sort-constraint term (Fix C).
+                from wild_life.data_structures import SORT_VAR as _SV_B
+                _u_has_daemon_b = (
+                    bool(u.flags & _SV_B) and u.resid and
+                    any(getattr(r, 'daemon', False) for r in u.resid)
+                )
+                if _u_has_daemon_b:
+                    _v_deref_b = v.deref()
+                    _daemon_resids_b = [r for r in u.resid if getattr(r, 'daemon', False)]
+                    _other_resids_b = [r for r in u.resid if not getattr(r, 'daemon', False)]
+                    # Transfer daemon resids to v (the newly bound target)
+                    if _v_deref_b.resid is None:
+                        self.trail.trail_psi(_v_deref_b, 'resid')
+                        _v_deref_b.resid = list(_daemon_resids_b)
+                    else:
+                        self.trail.trail_copy(_v_deref_b, 'resid')
+                        _v_deref_b.resid = list(_v_deref_b.resid) + list(_daemon_resids_b)
+                    # Fire non-daemon resids immediately
+                    if _other_resids_b:
+                        self._wakeup_resid(u, v)
+                else:
+                    self._wakeup_resid(u, v)
                 # Sort narrowing: when a plain variable is bound to a term with
                 # attributes, check if the term's sort can be narrowed based on
                 # :: Sort(attrs) prototype declarations (e.g. @(nose=>pretty) → cleopatra).
@@ -690,15 +761,22 @@ class Unifier:
         from wild_life.data_structures import ChoicePoint as _CP_merge, NON_STRICT_TERM as _NST_merge
         _u_prim = isinstance(u.value, (int, float, str)) if u.value is not None else False
         _v_prim = isinstance(v.value, (int, float, str)) if v.value is not None else False
-        if not _u_prim and not _v_prim and v.coref is None:
-            # Propagate NON_STRICT_TERM from v to u before binding: if v is a frozen
-            # arithmetic term (e.g. `+(23) with NST) and u is the new canonical
-            # representative, the freeze must survive on u too.
-            if (v.flags & _NST_merge) and not (u.flags & _NST_merge):
-                self.trail.trail_psi(u, 'flags')
-                u.flags |= _NST_merge
-            # Bind v → u so deref(v) returns u (the canonical psi-term).
-            self.bind(v, u)
+        # Bind u → v so deref(u) returns v (the canonical psi-term).
+        # This matches C Wild Life's convention: the second argument (v) is preferred
+        # as the canonical representative. For example, when unifying A.c (T_c) with A,
+        # we bind T_c → A so A remains canonical and A.c = A shows the circular reference.
+        if not _u_prim and not _v_prim and u.coref is None:
+            # Propagate NON_STRICT_TERM from u to v before binding: if u is a frozen
+            # arithmetic term (e.g. `+(23) with NST) and v is the new canonical
+            # representative, the freeze must survive on v too.
+            if (u.flags & _NST_merge) and not (v.flags & _NST_merge):
+                self.trail.trail_psi(v, 'flags')
+                v.flags |= _NST_merge
+            self.bind(u, v)
+            # Fix C: fire pending daemon resids after compound-compound unification.
+            # When a psi-term u has daemon resids (from such_that), and u is
+            # merged into v (compound-compound), wake them now so the daemon fires.
+            self._wakeup_resid(u, v)
 
         return True
 

@@ -944,6 +944,78 @@ class Engine:
         head = copy_term(head_orig, _vm)
         body = copy_term(body_orig, _vm)
 
+        # Fix A: such_that daemon setup for FUNCTION rules.
+        # When the body is `val | cond` (such_that), and the call has free
+        # arguments that correspond to sort-constrained head parameters
+        # (X:@(set=>true)), set up `cond` as a daemon residuation on those
+        # free variables instead of eagerly running the clause.
+        # The daemon fires later when the sort constraint is satisfied.
+        _body_d_fx = body.deref() if body is not None else None
+        if (defn is not None and defn.type == DefType.FUNCTION
+                and _body_d_fx is not None and _body_d_fx.type is wl.such_that
+                and thegoal.attr_list):
+            _head_d_fx = head.deref() if head is not None else None
+            _daemon_pairs_fx = []  # list of (actual_free_var, head_param_deref)
+            if _head_d_fx is not None and _head_d_fx.attr_list:
+                for _k_fx, _actual_psi_fx in thegoal.attr_list.items():
+                    _actual_fx = _actual_psi_fx.deref()
+                    _is_free_fx = (
+                        (_actual_fx.type is None or _actual_fx.type is wl.top)
+                        and not _actual_fx.attr_list
+                        and _actual_fx.value is None
+                        and _actual_fx.coref is None
+                    )
+                    if _is_free_fx:
+                        _hp_psi_fx = _head_d_fx.attr_list.get(_k_fx)
+                        if _hp_psi_fx is not None:
+                            _hp_d_fx = _hp_psi_fx.deref()
+                            # Sort constraint if head param has attrs or non-top type
+                            _has_constraint_fx = (
+                                _hp_d_fx.attr_list or
+                                (_hp_d_fx.type is not None and _hp_d_fx.type is not wl.top)
+                            )
+                            if _has_constraint_fx:
+                                _daemon_pairs_fx.append((_actual_fx, _hp_psi_fx, _k_fx))
+            if _daemon_pairs_fx:
+                from wild_life.data_structures import (
+                    Goal as _DGfx, Residuation as _DRfx, SORT_VAR as _SVfx
+                )
+                _cond_psi_fx = _body_d_fx.attr_list.get('2')
+                _val_psi_fx = _body_d_fx.attr_list.get('1')
+                for (_act_fx, _hp_psi_fx_ref, _k_fx_ref) in _daemon_pairs_fx:
+                    # Build a var_map copy that maps the head-param's deref
+                    # (the sort-constraint psi-term) back to the actual free var.
+                    # This gives us cond(X_actual) so write(X') → write(X_actual).
+                    _vm_dae: dict = {}
+                    _hp_d_ref = _hp_psi_fx_ref.deref()
+                    _vm_dae[id(_hp_d_ref)] = _act_fx
+                    _cond_copy_fx = copy_term(
+                        _cond_psi_fx.deref() if _cond_psi_fx else None,
+                        _vm_dae
+                    ) if _cond_psi_fx is not None else None
+                    if _cond_copy_fx is not None:
+                        _pending_g = _DGfx(GoalType.PROVE, _cond_copy_fx,
+                                           _DEFRULES, None, pending=True)
+                        _dr_fx = _DRfx(goal=_pending_g, daemon=True)
+                        if _act_fx.resid is None:
+                            self.trail.trail_psi(_act_fx, 'resid')
+                            _act_fx.resid = [_dr_fx]
+                        else:
+                            self.trail.trail_copy(_act_fx, 'resid')
+                            _act_fx.resid = list(_act_fx.resid) + [_dr_fx]
+                    # Mark as SORT_VAR so unification treats it as bindable variable
+                    if not (_act_fx.flags & _SVfx):
+                        self.trail.trail_psi(_act_fx, 'flags')
+                        _act_fx.flags |= _SVfx
+                # Push PROVE(val) – typically 'true'/succeed, skip if succeed
+                if _val_psi_fx is not None:
+                    _val_d_fx = _val_psi_fx.deref()
+                    if _val_d_fx.type is not wl.succeed:
+                        self.push_goal(GoalType.PROVE, _val_d_fx, _DEFRULES, None)
+                self.goal_stack = aim.next
+                self.goal_count += 1
+                return True
+
         # Unify head with goal
         if body.type != wl.succeed:
             # Patch cut atoms in the body copy so they respect the cut barrier.
