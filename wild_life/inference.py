@@ -825,9 +825,11 @@ class Engine:
             elif defn.type == DefType.UNDEF:
                 if defn.rule is None:
                     # Never declared (not via dynamic/assert) → error + abort
-                    name = defn.keyword.symbol if defn.keyword else '?'
+                    # フルターム表現 (例: 'b(@)') を表示する
+                    from wild_life.print_term import term_to_string as _t2s
+                    term_str = _t2s(thegoal, quoted=True, wl=wl)
                     sys.stderr.write(
-                        f"*** Error: '{name}' is not a predicate or a function.\n"
+                        f"*** Error: '{term_str}' is not a predicate or a function.\n"
                         f"\n*** Abort\n"
                     )
                     raise AbortException(hook_called=True)

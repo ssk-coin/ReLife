@@ -251,7 +251,13 @@ class WildLifeRuntime:
         if module:
             for open_mod in module.open_modules:
                 if name in open_mod.symbol_table:
-                    return open_mod.symbol_table[name]
+                    defn = open_mod.symbol_table[name]
+                    # bi_module / syntax_module は常にアクセス可能
+                    if open_mod is self.bi_module or open_mod is self.syntax_module:
+                        return defn
+                    # ユーザモジュール: public 宣言されたシンボルのみアクセス可能
+                    if defn.keyword and defn.keyword.public:
+                        return defn
 
         # 新規作成
         kw = Keyword(name, module)

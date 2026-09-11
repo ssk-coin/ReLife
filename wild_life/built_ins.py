@@ -5943,6 +5943,10 @@ def bi_load(goal: PsiTerm, eng) -> bool:
     delay_count_before = len(wl.delay_rules)
     result = eng.load_file(filename)
 
+    # C版 Wild Life は .lf ファイルのロード後にカレントモジュールを
+    # user モジュールへ戻す。Python 版でも同じ動作を再現する。
+    wl.current_module = wl.user_module
+
     # In C Wild Life, load(X) is implemented via user-defined predicates in
     # built_ins.lf: features(X) and load_2/2.  After loading and encode_types(),
     # load_2([], X) is proved; the nil term in load_2([]) gets eval_copy'd with
@@ -6100,10 +6104,66 @@ def bi_statistics(goal: PsiTerm, eng) -> bool:
     return True
 
 
-def _bi_listing_one(defn, wl) -> None:
-    """Helper: list clauses for a single Definition."""
+def _rule_to_string(h, b, wl):
+    """ルール (head, body) を共有 PrintState で文字列化する。
+
+    body 中の conjunction ','( left, right ) を個々のゴールに分解し、
+    head_str と goal_str のリストを返す。
+    同一 PsiTerm を head/body で共有する変数は同じ名前 (_A, _B, ...) で表示。
+    """
+    import io
+    from wild_life.print_term import (
+        PrintState, _pretty_tag_or_psi_term, MAX_PRECEDENCE
+    )
+
+    def split_conj(t):
+        """Recursively split conjunction into list of individual goals."""
+        if t is None:
+            return []
+        t = t.deref()
+        # Conjunction operator ','  (no functor-style extra attr)
+        if (t.type and t.type.keyword and t.type.keyword.symbol == ','
+                and '1' in t.attr_list and '2' in t.attr_list
+                and 'functor' not in t.attr_list):
+            return split_conj(t.attr_list['1']) + split_conj(t.attr_list['2'])
+        return [t]
+
+    body_goals = split_conj(b) if b is not None else []
+
+    # 共有 PrintState: head / body ゴール全体をまとめてスキャン
+    ps = PrintState(outfile=io.StringIO())
+    ps.const_quote = True
+    ps.indent = False
+
+    ps.go_through(h)
+    for g in body_goals:
+        ps.go_through(g)
+    ps.insert_variables({}, False)
+
+    # head を出力
+    _pretty_tag_or_psi_term(ps, h, MAX_PRECEDENCE + 1, 0, wl)
+    head_str = ps.outfile.getvalue()
+
+    # body ゴールを個別に出力 (outfile を切り替えて再利用)
+    goal_strs = []
+    for g in body_goals:
+        ps.outfile = io.StringIO()
+        _pretty_tag_or_psi_term(ps, g, MAX_PRECEDENCE + 1, 0, wl)
+        goal_strs.append(ps.outfile.getvalue())
+
+    return head_str, goal_strs
+
+
+def _bi_listing_one(defn, wl, imported: bool = False) -> None:
+    """Helper: list clauses for a single Definition.
+
+    imported=True  : 別モジュールからインポートされた述語。
+                     dynamic ヘッダなし、常に ':-' ボディ付きで表示。
+                     body ゴールは ',' で改行区切り。
+    imported=False : 現在のモジュール所有の述語。
+                     'dynamic(name)?' ヘッダ付き、succeed ボディは省略。
+    """
     from wild_life.data_structures import DefType
-    from wild_life.print_term import term_to_string
 
     if defn is None or defn.keyword is None:
         return
@@ -6111,23 +6171,36 @@ def _bi_listing_one(defn, wl) -> None:
     if not active_rules:
         return
     func_name = defn.keyword.symbol
-    print(f"\ndynamic({func_name})?")
     is_function = (defn.type == DefType.FUNCTION)
     succeed_sym = wl.succeed.keyword.symbol if wl.succeed and wl.succeed.keyword else 'succeed'
+
+    if not imported:
+        # 自モジュール述語: dynamic 宣言ヘッダを表示
+        print(f"\ndynamic({func_name})?")
+
     for h, b in active_rules:
-        hs = term_to_string(h, wl=wl)
+        head_str, goal_strs = _rule_to_string(h, b, wl)
+
         if is_function:
-            vs = term_to_string(b, wl=wl) if b is not None else 'true'
-            print(f"{hs} -> {vs}.")
+            vs = goal_strs[0] if goal_strs else 'true'
+            print(f"{head_str} -> {vs}.")
+        elif imported:
+            # インポート述語: 常に ':-' ボディ付きで表示 (各ゴール改行)
+            if goal_strs:
+                bs = ',\n        '.join(goal_strs)
+            else:
+                bs = 'succeed'
+            print(f"{head_str} :-\n        {bs}.")
         else:
+            # 自モジュール述語: succeed ボディは省略
             has_body = (b is not None and b.type is not None
                         and b.type.keyword is not None
                         and b.type.keyword.symbol != succeed_sym)
             if has_body:
-                bs = term_to_string(b, wl=wl)
-                print(f"{hs} :-\n        {bs}.")
+                bs = ',\n        '.join(goal_strs) if goal_strs else 'succeed'
+                print(f"{head_str} :-\n        {bs}.")
             else:
-                print(f"{hs}.")
+                print(f"{head_str}.")
 
 
 def _bi_listing_all(eng, wl) -> None:
@@ -6146,63 +6219,83 @@ def _bi_listing_all(eng, wl) -> None:
 
 
 def bi_listing(goal: PsiTerm, eng) -> bool:
-    """listing(F) — list clauses for functor F.
+    """listing(F, ...) — list clauses for one or more functors.
 
-    Expected output format (matching original Wild Life):
-      - Empty predicate: % 'NAME' is a user-defined predicate with an empty definition.\\n
-      - Non-empty predicate:
+    引数なし: 全ユーザ定義述語/関数を列挙。
+    引数あり: 指定したシンボルの節を列挙。複数引数可 (例: listing(aa,bb)?)。
+
+    表示形式:
+      - 自モジュール述語 (PREDICATE/FUNCTION):
           \\ndynamic(NAME)?
-          HEAD :-
-                  BODY.
-      - Functional rules:
-          \\ndynamic(NAME)?
-          HEAD -> VALUE.
+          HEAD :- BODY.   (succeed ボディは省略して HEAD. のみ)
+      - インポート述語 (別モジュール由来):
+          HEAD :- BODY.   (dynamic ヘッダなし、succeed でも表示)
+          エントリ間は空行で区切る
+      - 空定義 (自モジュール): % 'NAME' is a user-defined predicate...
+      - UNDEF / 衝突ブロック済: 無出力で成功
     """
     from wild_life.data_structures import DefType
-    from wild_life.print_term import term_to_string
 
     wl = eng.wl
-    arg = _get_one_arg(goal)
-    if arg is None:
-        # listing with no args: list all user-defined predicates/functions
+
+    # 引数なし: 全ユーザ述語を列挙
+    if not goal.attr_list:
         _bi_listing_all(eng, wl)
         return True
-    defn = arg.type if arg.type else None
-    if defn is None:
-        return False
 
-    func_name = defn.keyword.symbol if defn.keyword else '?'
+    # 全引数を順に処理
+    # imported_pending: 連続するインポート述語をまとめて空行区切りで出力
+    imported_pending = []   # list of defn (imported, with rules)
 
-    # Collect non-deleted rules
-    active_rules = [(h, b) for h, b in (defn.rule or []) if h is not None]
+    def flush_imported():
+        """collected imported entries を空行区切りで出力してリセット"""
+        for k, d in enumerate(imported_pending):
+            # k==0: プロンプト直後なので改行1つでプロンプト行を終わらせる
+            # k>0 : 前エントリの末尾 \n に続く空行区切り
+            print()
+            _bi_listing_one(d, wl, imported=True)
+        imported_pending.clear()
 
-    if not active_rules:
-        # Empty definition
-        print(f"% '{func_name}' is a user-defined predicate with an empty definition.\n")
-        return True
+    i = 1
+    while True:
+        a = goal.attr_list.get(str(i))
+        if a is None:
+            break
+        a_deref = a.deref() if hasattr(a, 'deref') else a
+        defn = a_deref.type if a_deref.type else None
 
-    # Print dynamic declaration header (with leading blank line)
-    print(f"\ndynamic({func_name})?")
+        if defn is not None and defn.type in (DefType.PREDICATE, DefType.FUNCTION):
+            is_imported = (defn.keyword and defn.keyword.module is not None
+                           and defn.keyword.module != wl.user_module)
+            active_rules = [(h, b) for h, b in (defn.rule or []) if h is not None]
 
-    is_function = (defn.type == DefType.FUNCTION)
-    succeed_sym = wl.succeed.keyword.symbol if wl.succeed and wl.succeed.keyword else 'succeed'
-
-    for h, b in active_rules:
-        hs = term_to_string(h, wl=wl)
-        if is_function:
-            # Functional rule: HEAD -> VALUE.
-            vs = term_to_string(b, wl=wl) if b is not None else 'true'
-            print(f"{hs} -> {vs}.")
-        else:
-            # Regular predicate clause
-            has_body = (b is not None and b.type is not None
-                        and b.type.keyword is not None
-                        and b.type.keyword.symbol != succeed_sym)
-            if has_body:
-                bs = term_to_string(b, wl=wl)
-                print(f"{hs} :-\n        {bs}.")
+            if is_imported:
+                if active_rules:
+                    imported_pending.append(defn)
+                # インポート述語で節なし: 無出力で成功
             else:
-                print(f"{hs}.")
+                # 自モジュール述語が来たらインポート分を先に出力
+                flush_imported()
+                func_name = defn.keyword.symbol if defn.keyword else '?'
+                if not active_rules:
+                    print(f"% '{func_name}' is a user-defined predicate with an empty definition.\n")
+                else:
+                    _bi_listing_one(defn, wl, imported=False)
+        elif defn is not None and defn.type == DefType.UNDEF:
+            # UNDEF の場合:
+            #   clash_blocked スタブ → 衝突検出で作成済みのブロック → 無音成功
+            #   それ以外 (未定義/非公開) → "% 'name' is undefined." を表示
+            if not getattr(defn, 'clash_blocked', False):
+                func_name = defn.keyword.symbol if defn.keyword else '?'
+                flush_imported()
+                print()   # プロンプト行の末尾に改行を入れる
+                print(f"% '{func_name}' is undefined.")
+        # else: defn が None など → 無出力で成功
+
+        i += 1
+
+    # 残留インポート述語を出力
+    flush_imported()
 
     return True
 
@@ -7726,7 +7819,10 @@ def register_all(wl) -> None:
     _reg('public', _bi_public)
 
     def _bi_private_feature(goal, eng):
-        """private_feature(F, ...) — mark features as private to current module."""
+        """private_feature(F, ...) — mark features as private to current module.
+        public 宣言済みの特性を private_feature にする場合は警告を出す。
+        """
+        import sys as _sys
         mod = wl.current_module
         if mod is None:
             return True
@@ -7742,6 +7838,14 @@ def register_all(wl) -> None:
             if name:
                 defn = wl.update_symbol(mod, name)
                 if defn.keyword:
+                    if defn.keyword.public:
+                        # 既に public 宣言された特性を private にする → 警告
+                        print(
+                            f"*** Warning: feature '{defn.keyword.combined_name}'"
+                            f" is now private, but was also declared public",
+                            file=_sys.stderr,
+                        )
+                        defn.keyword.public = False
                     defn.keyword.private_feature = True
             i += 1
         return True
@@ -7773,6 +7877,47 @@ def register_all(wl) -> None:
                         target.open_modules.append(wl.syntax_module)
                     if target not in mod.open_modules:
                         mod.open_modules.append(target)
+                        # 公開シンボルのモジュール名衝突を検出する。
+                        # target より前に開かれているユーザモジュールの public シンボルと
+                        # target の public シンボルが同名の場合はエラーを報告し、
+                        # 衝突したシンボル名を現在のモジュールで UNDEF スタブとしてブロックする。
+                        from wild_life.data_structures import (
+                            Keyword as _Kw, Definition as _Def, DefType as _DT
+                        )
+                        prior_user_mods = [
+                            m for m in mod.open_modules[:-1]
+                            if m not in (wl.bi_module, wl.syntax_module) and m is not mod
+                        ]
+                        for existing_mod in prior_user_mods:
+                            for sym_name, defn_t in list(target.symbol_table.items()):
+                                if not (defn_t.keyword and defn_t.keyword.public):
+                                    continue
+                                if sym_name not in existing_mod.symbol_table:
+                                    continue
+                                defn_e = existing_mod.symbol_table[sym_name]
+                                if not (defn_e.keyword and defn_e.keyword.public):
+                                    continue
+                                # 衝突検出: target の sym_name と existing_mod の sym_name が衝突
+                                line_no = getattr(wl, 'line_count', 0) + 1
+                                print(
+                                    f'*** Error: serious module name clash: '
+                                    f'"{target.module_name}#{sym_name}" and '
+                                    f'"{existing_mod.module_name}#{sym_name}"',
+                                    file=_sys.stderr
+                                )
+                                print(
+                                    f'*** Syntax error: Module violation '
+                                    f'(near line {line_no}).',
+                                    file=_sys.stderr
+                                )
+                                # 現在のモジュールに UNDEF スタブを挿入して衝突シンボルをブロック
+                                if sym_name not in mod.symbol_table:
+                                    stub_kw = _Kw(sym_name, mod, public=False)
+                                    stub_defn = _Def(stub_kw)
+                                    stub_defn.type = _DT.UNDEF
+                                    stub_defn.clash_blocked = True  # listing で無音成功
+                                    stub_kw.definition = stub_defn
+                                    mod.symbol_table[sym_name] = stub_defn
             i += 1
         return True
     _reg('open', _bi_open)

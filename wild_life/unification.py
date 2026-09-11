@@ -419,6 +419,15 @@ class Unifier:
                 # attributes, check if the term's sort can be narrowed based on
                 # :: Sort(attrs) prototype declarations (e.g. @(nose=>pretty) → cleopatra).
                 _v_canon = v.deref()
+                # Apply prototype attrs: if the bound term's sort has prototype_attrs
+                # (declared with :: Sort(attrs).), merge them into the term.
+                # e.g. module "a" has :: p(aha=>1). → A=p gives A = p(aha => 1).
+                if (_v_canon.type is not None and _v_canon.type is not WL.top
+                        and getattr(_v_canon.type, 'prototype_attrs', None)):
+                    _proto = _v_canon.type.prototype_attrs
+                    for _pk, _pv in _proto.items():
+                        if _pk not in _v_canon.attr_list:
+                            self.set_attr(_v_canon, _pk, _pv.deref())
                 # Fire global delay rules for the sort of the term being bound to.
                 # e.g. :: C:cons | write(C.1), nl. fires when a plain var is bound to a cons.
                 if WL.delay_rules and self.engine is not None and _v_canon.type is not None and _v_canon.type is not WL.top:

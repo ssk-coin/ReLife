@@ -121,7 +121,7 @@ class Keyword:
     C版の struct wl_keyword に対応
     """
     def __init__(self, symbol: str, module: Optional[Module] = None,
-                 public: bool = True, private_feature: bool = False):
+                 public: bool = False, private_feature: bool = False):
         self.symbol = symbol
         self.module = module
         self.public = public
@@ -187,6 +187,10 @@ class Definition:
         # 生成順序 ID (GLB 列挙の順序付けに使用)
         self.creation_id: int = len(Definition.all_definitions)
         Definition.all_definitions.append(self)
+
+        # モジュール clash 検出時に作成されたブロックスタブ
+        # listing 等で "is undefined" を表示しないようにするフラグ
+        self.clash_blocked: bool = False
 
     @property
     def symbol(self) -> str:
