@@ -507,13 +507,14 @@ class Residuation:
     """
     def __init__(self, goal: Optional[Goal] = None, bestsort=None,
                  value=None, next: Optional['Residuation'] = None,
-                 pending: bool = False):
+                 pending: bool = False, daemon: bool = False):
         self.sortflag: bool = True  # bestsortがDefinitionかどうか
         self.bestsort = bestsort     # 最良ソート
         self.value = value
         self.goal = goal
         self.next = next
         self.pending = pending  # True when this residuation is "pending" (display ~)
+        self.daemon = daemon  # True for such_that daemon (transfer on var binding)
 
 
 # ==================== 特性比較関数 ====================

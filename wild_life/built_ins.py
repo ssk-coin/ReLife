@@ -3364,6 +3364,44 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng) -> 'Optional[PsiTerm]':
         return None
     host = a1.deref()
     feat = a2.deref()
+    # If the host is itself a dot-access expression (nested chain like A.a.b.c.d),
+    # resolve it recursively to get the actual psi-term that holds the feature.
+    if (host.type is not None and host.type.keyword is not None
+            and host.type.keyword.symbol == '.'):
+        host = _resolve_dot_feat(host, eng)
+        if host is None:
+            return None
+        host = host.deref()
+    # If the feature label is an unbound variable, we cannot eagerly create a
+    # feature with key '@'.  Suspend: register a pending residuated goal so
+    # that when the label is later bound the dot-access is re-evaluated.
+    _feat_is_free = (eng is not None and
+                     (feat.type is None or feat.type is eng.wl.top) and
+                     feat.value is None and not feat.attr_list)
+    if _feat_is_free:
+        from wild_life.data_structures import Goal as _DotGoal, Residuation as _DotResid, SORT_VAR as _DOT_SV
+        wl_dr = eng.wl
+        _fresh_dr = PsiTerm()
+        _fresh_dr.type = wl_dr.top
+        _eq_defn_dr = getattr(wl_dr, 'eqsym', None)
+        if _eq_defn_dr is None and hasattr(wl_dr, 'syntax_module'):
+            _eq_defn_dr = wl_dr.syntax_module.symbol_table.get('=')
+        _eq_term_dr = PsiTerm(type_def=_eq_defn_dr)
+        _eq_term_dr.attr_list['1'] = _fresh_dr
+        _eq_term_dr.attr_list['2'] = dot_term
+        _eq_term_dr._resid_marker = True
+        _pg_dr = _DotGoal(GoalType.PROVE, _eq_term_dr, None, None, pending=True)
+        if feat.resid is None:
+            eng.trail.trail_psi(feat, 'resid')
+            feat.resid = [_DotResid(goal=_pg_dr)]
+        else:
+            if not any(_r.goal is _pg_dr for _r in feat.resid):
+                eng.trail.trail_copy(feat, 'resid')
+                feat.resid.append(_DotResid(goal=_pg_dr))
+        if not (feat.flags & _DOT_SV):
+            eng.trail.trail_psi(feat, 'flags')
+            feat.flags |= _DOT_SV
+        return _fresh_dr
     # Compute feature key string
     if feat.value is not None and feat.type and feat.type.keyword:
         fsym = feat.type.keyword.symbol
@@ -3395,6 +3433,10 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng) -> 'Optional[PsiTerm]':
     new_attrs = dict(host.attr_list)
     new_attrs[fkey] = fresh
     host.attr_list = new_attrs
+    # Fix D: fire pending daemon resids on host after a new attribute is added.
+    # e.g. X.set = true? fires the daemon write(X) that was set by such_that.
+    if host.resid and eng is not None and getattr(eng, 'unifier', None) is not None:
+        eng.unifier._wakeup_resid(host, fresh)
     return fresh
 
 
@@ -3416,6 +3458,13 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         _attr_cell = _resolve_dot_feat(a_d, eng)
         if _attr_cell is None:
             return False
+        # If the right side is also a dot-term, resolve it too so that an
+        # unbound label on the right also gets its pending residuation set up.
+        if _dot_sym_check(b_d):
+            _attr_cell_b = _resolve_dot_feat(b_d, eng)
+            if _attr_cell_b is None:
+                return False
+            return _unify(eng, _attr_cell.deref(), _attr_cell_b.deref())
         return _unify(eng, _attr_cell.deref(), b_d)
     if _dot_sym_check(b_d):
         _attr_cell = _resolve_dot_feat(b_d, eng)

@@ -22,6 +22,13 @@ import io
 from collections import namedtuple
 from typing import Optional
 
+# Increase Python's recursion limit to accommodate deep psi-term structures.
+# The C Wild Life interpreter uses C-stack recursion which is far deeper than
+# Python's default 1000-frame limit. Deep queries (e.g. project1's 24
+# permutation paths creating circular psi-term structures) can exceed 1000
+# frames during printing.
+sys.setrecursionlimit(10000)
+
 # ---------------------------------------------------------------------------
 # Title / version banner
 # ---------------------------------------------------------------------------

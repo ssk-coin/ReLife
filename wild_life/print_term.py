@@ -330,26 +330,35 @@ class PrintState:
 
     def _go_through_term(self, t: Optional['PsiTerm'],
                          is_structural: bool = False) -> None:
+        """Iterative traversal to find shared sub-terms (avoids Python stack overflow
+        for deeply-nested or circular psi-term structures)."""
         if t is None:
             return
-        t = t.deref()
-        tid = id(t)
-        # Record structural membership BEFORE the early-return check so that a
-        # term seen first as a top-level var binding and later as a structural
-        # component inside another term's attrs still gets recorded.
-        if is_structural:
-            self._structural_ids.add(tid)
-        if tid in self.pointer_names:
-            # Mark as SHARED on second visit so shared sub-terms (even concrete
-            # values like integers) get variable names when printed.  The C
-            # Wild Life reference does give names to all shared psi-terms,
-            # including integers (e.g. s(X:1,X) when both slots share the
-            # same integer node).
-            self.pointer_names[tid] = 'SHARED'  # needs a name
-            return
-        self.pointer_names[tid] = None  # seen once
-        for val in t.attr_list.values():
-            self._go_through_term(val, is_structural=True)
+        # Use an explicit stack to avoid recursive calls.
+        # Each entry is (psi_term, is_structural_flag).
+        stack = [(t, is_structural)]
+        while stack:
+            cur, cur_is_struct = stack.pop()
+            if cur is None:
+                continue
+            cur = cur.deref()
+            tid = id(cur)
+            # Record structural membership BEFORE the early-return check so that a
+            # term seen first as a top-level var binding and later as a structural
+            # component inside another term's attrs still gets recorded.
+            if cur_is_struct:
+                self._structural_ids.add(tid)
+            if tid in self.pointer_names:
+                # Mark as SHARED on second visit so shared sub-terms (even concrete
+                # values like integers) get variable names when printed.  The C
+                # Wild Life reference does give names to all shared psi-terms,
+                # including integers (e.g. s(X:1,X) when both slots share the
+                # same integer node).
+                self.pointer_names[tid] = 'SHARED'  # needs a name
+                continue
+            self.pointer_names[tid] = None  # seen once
+            for val in cur.attr_list.values():
+                stack.append((val, True))
 
     def insert_variables(self, var_tree: dict, force: bool) -> None:
         """Map variable names from var_tree into pointer_names."""
