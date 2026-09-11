@@ -473,6 +473,38 @@ class Unifier:
             if v_is_sort_var:
                 if not self._unify_types(v, u):
                     return False
+            # If both u and v are disjunctions, compute cross-product intersection:
+            # {u1;u2;...} vs {v1;v2;...} — try each pair (ui, vj) and collect
+            # the successfully unified ui elements, then push choice points.
+            if (u.type is WL.disjunction and v.type is WL.disjunction and
+                    self.engine is not None):
+                from wild_life.built_ins import _collect_disjunction as _cdisj2
+                _u_elems = _cdisj2(u, self.engine)
+                _v_elems = _cdisj2(v, self.engine)
+                _successful = []
+                for _ue in _u_elems:
+                    _ue_d = _ue.deref()
+                    for _ve in _v_elems:
+                        _ve_d = _ve.deref()
+                        _mark = self.trail.mark()
+                        if self._unify_impl(_ue_d, _ve_d):
+                            # Record the v-element (concrete, unchanged by undo)
+                            _successful.append(_ve_d)
+                        self.trail.undo_to(_mark)
+                if not _successful:
+                    return False
+                # Push choice points for alternatives (reverse so first ends on top)
+                for _alt in reversed(_successful[1:]):
+                    self.engine.push_choice_point(GoalType.UNIFY, u, _alt, None)
+                # Bind u (the disjunction cell) to the first successful element,
+                # and bind v to u so that deref(v) → u → element
+                self.trail.trail_psi(u, 'coref')
+                u.coref = _successful[0]
+                self.trail.trail_psi(v, 'coref')
+                v.coref = u
+                self._wakeup_resid(u, u)
+                return True
+
             # If u is a disjunction psi-term, expand into UNIFY choice points.
             # Same logic as in the u_is_var+else branch above: bind u (the disjunction)
             # to elem[0] and bind v to u, so body refs deref correctly.
@@ -500,6 +532,74 @@ class Unifier:
                     self._fire_delay_rules(_u_canon, _u_canon.type)
             if _u_canon.attr_list and _u_canon.type is not None and self.engine is not None:
                 self._try_sort_narrowing(_u_canon)
+            return True
+
+        # Disjunction × Disjunction: compute cross-product semantic intersection.
+        # e.g. {1;2;3} vs {real;int} inside a({1;2;3})=a({real;int}) or reversed.
+        # Try each pair (concrete_i, abstract_j); collect successful concrete elements.
+        # Push choice points on the "concrete" disjunction so that variable display
+        # (via deref of the attr_list entry) updates correctly on each backtrack.
+        if (u.type is WL.disjunction and v.type is WL.disjunction and
+                self.engine is not None):
+            from wild_life.built_ins import _collect_disjunction as _cdisj_cross
+            _u_elems = _cdisj_cross(u, self.engine)
+            _v_elems = _cdisj_cross(v, self.engine)
+            # Identify the "concrete" side (elements with numeric/string values)
+            # vs the "abstract" side (sort atoms like real, int).  We make the
+            # concrete side the outer loop so the results appear in the natural
+            # order: 1,1,2,2,3,3 for {1;2;3}×{real;int} regardless of u/v order.
+            _u0 = _u_elems[0].deref() if _u_elems else None
+            _v0 = _v_elems[0].deref() if _v_elems else None
+            _v_is_concrete = (
+                _v0 is not None and _v0.value is not None and
+                (_u0 is None or _u0.value is None)
+            )
+            # Swap so that the concrete side is always "outer" (= _c_elems),
+            # abstract side is "inner" (= _a_elems).  Track which psi-term is which.
+            if _v_is_concrete:
+                _c_elems, _a_elems = _v_elems, _u_elems  # v=concrete, u=abstract
+                _c_disj, _a_disj = v, u
+            else:
+                _c_elems, _a_elems = _u_elems, _v_elems  # u=concrete (or fallback)
+                _c_disj, _a_disj = u, v
+            _cross_ok = []
+            for _ce in _c_elems:
+                _ce_d = _ce.deref()
+                for _ae in _a_elems:
+                    _ae_d = _ae.deref()
+                    _mark_cross = self.trail.mark()
+                    # Trial: unify concrete element with abstract element
+                    # (order matters for _unify_types GLB — keep concrete as u)
+                    if self._unify_impl(_ce_d, _ae_d):
+                        # _ce_d is concrete (value ≠ None) and is unchanged by undo
+                        _cross_ok.append(_ce_d)
+                    self.trail.undo_to(_mark_cross)
+            if not _cross_ok:
+                return False
+            # Push choice points on _c_disj (the concrete disjunction).
+            # When they fire, unify(_c_disj, alt) binds _c_disj.coref directly,
+            # so any enclosing sort-var whose attr_list contains _c_disj updates.
+            for _alt_cross in reversed(_cross_ok[1:]):
+                self.engine.push_choice_point(GoalType.UNIFY, _c_disj, _alt_cross, None)
+            self.trail.trail_psi(_c_disj, 'coref')
+            _c_disj.coref = _cross_ok[0]
+            self.trail.trail_psi(_a_disj, 'coref')
+            _a_disj.coref = _c_disj
+            self._wakeup_resid(_c_disj, _c_disj)
+            return True
+
+        # Disjunction × concrete: a choice point from disjunction×disjunction
+        # expansion fires with unify(u_disj, element).  The element was already
+        # vetted during cross-product computation, so just bind u to it directly.
+        if u.type is WL.disjunction and self.engine is not None:
+            self.trail.trail_psi(u, 'coref')
+            u.coref = v
+            self._wakeup_resid(u, u)
+            return True
+        if v.type is WL.disjunction and self.engine is not None:
+            self.trail.trail_psi(v, 'coref')
+            v.coref = u
+            self._wakeup_resid(v, v)
             return True
 
         # Arithmetic evaluation: if one term is a concrete number and the other
