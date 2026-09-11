@@ -69,10 +69,12 @@ class OperatorData:
     C版の struct wl_operator_data に対応
     """
     def __init__(self, op_type: OperatorType, precedence: int,
-                 next: Optional['OperatorData'] = None):
+                 next: Optional['OperatorData'] = None,
+                 enumerable: bool = True):
         self.type = op_type
         self.precedence = precedence
         self.next = next  # 同名で複数の演算子定義が可能
+        self.enumerable = enumerable  # False → op/3 の列挙に含めない
 
     def __repr__(self):
         return f"OpData({self.type.name}, prec={self.precedence})"

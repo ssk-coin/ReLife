@@ -5178,7 +5178,7 @@ def _collect_solutions(template: PsiTerm, g: PsiTerm, eng) -> list:
         result = eng.run()
         if result:
             # Copy template_copy with current bindings resolved
-            collected.insert(0, copy_term(template_copy))
+            collected.append(copy_term(template_copy))
             if not eng.choice_stack or eng.choice_stack is cp_save:
                 break
             eng.backtrack()
@@ -6096,7 +6096,14 @@ def bi_load(goal: PsiTerm, eng) -> bool:
 
 
 def bi_op(goal: PsiTerm, eng) -> bool:
-    """op(Prec, Type, Name) — declare operator."""
+    """op(Prec, Type, Name) — declare, query, or enumerate operators.
+
+    全引数が束縛されている場合: バリデーション + 演算子宣言モード。
+    少なくとも1引数が自由変数の場合: 列挙/クエリモード (バックトラック対応)。
+    """
+    import sys
+    from wild_life.data_structures import OperatorType, GoalType, Goal, ChoicePoint
+
     wl = eng.wl
     a1 = goal.attr_list.get('1')
     a2 = goal.attr_list.get('2')
@@ -6104,23 +6111,150 @@ def bi_op(goal: PsiTerm, eng) -> bool:
     if not (a1 and a2 and a3):
         return False
     prec = a1.deref()
-    typ = a2.deref()
+    typ  = a2.deref()
     name = a3.deref()
-    if prec.value is None:
-        return False
-    p = int(float(prec.value))
-    op_name = typ.type.keyword.symbol if typ.type and typ.type.keyword else ''
-    sym = name.type.keyword.symbol if name.type and name.type.keyword else ''
-    from wild_life.data_structures import OperatorType
-    op_map = {
-        'fx': OperatorType.FX, 'fy': OperatorType.FY,
-        'xf': OperatorType.XF, 'yf': OperatorType.YF,
-        'xfx': OperatorType.XFX, 'xfy': OperatorType.XFY,
-        'yfx': OperatorType.YFX,
+
+    prec_is_var = _is_var(prec, eng)
+    typ_is_var  = _is_var(typ,  eng)
+    name_is_var = _is_var(name, eng)
+
+    op_type_names = {
+        OperatorType.FX: 'fx', OperatorType.FY: 'fy',
+        OperatorType.XF: 'xf', OperatorType.YF: 'yf',
+        OperatorType.XFX: 'xfx', OperatorType.XFY: 'xfy',
+        OperatorType.YFX: 'yfx',
     }
-    if op_name not in op_map:
+    valid_op_kinds = set(op_type_names.values())
+    op_map = {v: k for k, v in op_type_names.items()}
+
+    # ─── ヘルパー: エラーメッセージ用の項を文字列化 ──────────────────────────
+    def _fmt(t):
+        """PSI項をエラーメッセージ用に文字列化する。"""
+        if (t.type is not None and
+                hasattr(wl, 'quoted_string') and
+                t.type is not None and
+                getattr(t.type, 'is_subtype_of', None) is not None and
+                t.type.is_subtype_of(wl.quoted_string) and
+                t.value is not None):
+            return f'"{t.value}"'
+        if t.value is not None:
+            v = t.value
+            if isinstance(v, float) and v == int(v):
+                return str(int(v))
+            return str(v)
+        if t.type and t.type.keyword:
+            return t.type.keyword.symbol
+        return '?'
+
+    # ─── 宣言/バリデーションモード (全引数が束縛されている) ─────────────────
+    if not prec_is_var and not typ_is_var and not name_is_var:
+        # 名前が文字列か数値でないか確認
+        name_is_string = (
+            name.type is not None and
+            hasattr(wl, 'quoted_string') and
+            getattr(name.type, 'is_subtype_of', None) is not None and
+            name.type.is_subtype_of(wl.quoted_string) and
+            name.value is not None
+        )
+        name_is_number = (name.value is not None and not name_is_string)
+
+        if name_is_string or name_is_number:
+            sys.stderr.write(
+                f"*** Error: numbers or strings may not be operators"
+                f" in c_op({_fmt(prec)},{_fmt(typ)},{_fmt(name)}).\n"
+            )
+            return False
+
+        # 演算子種別が有効か確認
+        typ_sym = typ.type.keyword.symbol if (typ.type and typ.type.keyword) else ''
+        if typ_sym not in valid_op_kinds:
+            sys.stderr.write(f"*** Error: bad operator kind '{typ_sym}'.\n")
+            return False
+
+        # 優先度が数値か確認
+        if prec.value is None:
+            sys.stderr.write(
+                f"*** Error: precedence must be a positive integer"
+                f" in c_op({_fmt(prec)},{typ_sym},{_fmt(name)}).\n"
+            )
+            return False
+
+        p = int(float(prec.value))
+        if p < 1 or p > 1200:
+            sys.stderr.write(
+                f"*** Error: precedence must range from 1 to 1200"
+                f" in c_op({p},{typ_sym},{_fmt(name)}).\n"
+            )
+            return False
+
+        # 有効: 演算子を宣言
+        name_sym = name.type.keyword.symbol if (name.type and name.type.keyword) else ''
+        wl.add_operator(p, op_map[typ_sym], name_sym)
+
+        # Wild Life の REPL はこの宣言クエリが "depth" に入るよう
+        # ダミーの choice point を積む (バックトラック時は即失敗)。
+        # goal_stack.type が EVAL/EVAL_CUT 以外なら REPL が has_new_choices=True と判断する。
+        from wild_life.data_structures import Goal, GoalType, ChoicePoint
+        mark = eng.trail.mark()
+        # UNIFY(nil, integer(0)) — 確実に失敗するダミーゴール
+        dummy_lhs = wl.make_atom('@')
+        dummy_rhs = wl.make_integer(0)
+        sentinel = Goal(GoalType.UNIFY, dummy_lhs, dummy_rhs, None, next=None)
+        cp = ChoicePoint(undo_point=mark, goal_stack=sentinel, next=eng.choice_stack)
+        eng.choice_stack = cp
+        return True
+
+    # ─── 列挙/クエリモード (少なくとも1引数が自由変数) ──────────────────────
+    # _enumerable_ops リストを使って順序通りに列挙する
+    # (symbol_table の挿入順に依存しないため、期待する列挙順序が保証される)
+    solutions = list(getattr(wl, '_enumerable_ops', []))
+
+    # 束縛済み引数でフィルタリング
+    def _matches(p, t, n):
+        if not prec_is_var:
+            if prec.value is None:
+                return False
+            if int(float(prec.value)) != p:
+                return False
+        if not typ_is_var:
+            ts = typ.type.keyword.symbol if (typ.type and typ.type.keyword) else ''
+            if ts != t:
+                return False
+        if not name_is_var:
+            ns = name.type.keyword.symbol if (name.type and name.type.keyword) else ''
+            if ns != n:
+                return False
+        return True
+
+    filtered = [(p, t, n) for (p, t, n) in solutions if _matches(p, t, n)]
+    if not filtered:
         return False
-    wl.add_operator(p, op_map[op_name], sym)
+
+    # 最初の解以外を選択点としてスタックに積む (逆順で積む → 先頭が次の解)
+    for (p, t, n) in reversed(filtered[1:]):
+        p_term = wl.make_integer(p)
+        t_term = wl.make_atom(t)
+        n_term = wl.make_atom(n)
+        # UNIFY ゴールを3つ連結: prec → typ → name → 現在のゴールスタック
+        g_name = Goal(GoalType.UNIFY, name, n_term, None, next=eng.goal_stack)
+        g_typ  = Goal(GoalType.UNIFY, typ,  t_term, None, next=g_name)
+        g_prec = Goal(GoalType.UNIFY, prec, p_term, None, next=g_typ)
+        mark = eng.trail.mark()
+        cp = ChoicePoint(undo_point=mark, goal_stack=g_prec, next=eng.choice_stack)
+        eng.choice_stack = cp
+
+    # 最初の解を試みる
+    p0, t0, n0 = filtered[0]
+    p0_term = wl.make_integer(p0)
+    t0_term = wl.make_atom(t0)
+    n0_term = wl.make_atom(n0)
+    mark0 = eng.trail.mark()
+    ok = (_unify(eng, prec, p0_term) and
+          _unify(eng, typ,  t0_term) and
+          _unify(eng, name, n0_term))
+    if not ok:
+        eng.trail.undo_to(mark0)
+        return False
     return True
 
 

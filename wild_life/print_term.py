@@ -215,7 +215,7 @@ _SINGLE_CHARS = set("!;,|[]{}()")
 def _is_single(c: str) -> bool:
     return c in _SINGLE_CHARS
 
-_SYMBOL_CHARS = set("#&*+-./:<=>?@\\^`~|")
+_SYMBOL_CHARS = set("#$&*+-./:<=>?@\\^`~|")
 
 def _is_symbol(c: str) -> bool:
     return c in _SYMBOL_CHARS
