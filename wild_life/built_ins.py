@@ -7015,6 +7015,7 @@ def register_all(wl) -> None:
 
     # System
     _reg('halt', bi_halt)
+    _reg('quit', bi_halt)   # alias for halt (not in original Wild Life)
     _reg('abort', bi_abort)
     # gc — garbage collection (memory management).  In Wild Life, heap
     # compaction discards choice points that contain stale retract (DEL_CLAUSE)
