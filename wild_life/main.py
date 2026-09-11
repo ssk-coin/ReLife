@@ -362,6 +362,8 @@ def run_repl(
                     # Pass cs_before as barrier so this fresh query does NOT
                     # backtrack into choice points from enclosing (outer) queries.
                     # At depth=0 cs_before is None (no barrier), which is fine.
+                    # 現在の行番号をランタイムに保存 (エラーメッセージで "near line N" に使用)
+                    WL.line_count = repl_line_number
                     success = engine.prove(term, cs_barrier=cs_before)
                 except HaltException:
                     return 0

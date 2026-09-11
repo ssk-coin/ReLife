@@ -6181,6 +6181,9 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
     active_rules = [(h, b) for h, b in (defn.rule or []) if h is not None]
 
     if not active_rules:
+        # UNDEF の場合 (モジュール衝突でブロックされたシンボルなど): 無出力で成功
+        if defn.type not in (DefType.PREDICATE, DefType.FUNCTION):
+            return True
         # Empty definition
         print(f"% '{func_name}' is a user-defined predicate with an empty definition.\n")
         return True
@@ -7777,6 +7780,46 @@ def register_all(wl) -> None:
                         target.open_modules.append(wl.syntax_module)
                     if target not in mod.open_modules:
                         mod.open_modules.append(target)
+                        # 公開シンボルのモジュール名衝突を検出する。
+                        # target より前に開かれているユーザモジュールの public シンボルと
+                        # target の public シンボルが同名の場合はエラーを報告し、
+                        # 衝突したシンボル名を現在のモジュールで UNDEF スタブとしてブロックする。
+                        from wild_life.data_structures import (
+                            Keyword as _Kw, Definition as _Def, DefType as _DT
+                        )
+                        prior_user_mods = [
+                            m for m in mod.open_modules[:-1]
+                            if m not in (wl.bi_module, wl.syntax_module) and m is not mod
+                        ]
+                        for existing_mod in prior_user_mods:
+                            for sym_name, defn_t in list(target.symbol_table.items()):
+                                if not (defn_t.keyword and defn_t.keyword.public):
+                                    continue
+                                if sym_name not in existing_mod.symbol_table:
+                                    continue
+                                defn_e = existing_mod.symbol_table[sym_name]
+                                if not (defn_e.keyword and defn_e.keyword.public):
+                                    continue
+                                # 衝突検出: target の sym_name と existing_mod の sym_name が衝突
+                                line_no = getattr(wl, 'line_count', 0) + 1
+                                print(
+                                    f'*** Error: serious module name clash: '
+                                    f'"{target.module_name}#{sym_name}" and '
+                                    f'"{existing_mod.module_name}#{sym_name}"',
+                                    file=_sys.stderr
+                                )
+                                print(
+                                    f'*** Syntax error: Module violation '
+                                    f'(near line {line_no}).',
+                                    file=_sys.stderr
+                                )
+                                # 現在のモジュールに UNDEF スタブを挿入して衝突シンボルをブロック
+                                if sym_name not in mod.symbol_table:
+                                    stub_kw = _Kw(sym_name, mod, public=False)
+                                    stub_defn = _Def(stub_kw)
+                                    stub_defn.type = _DT.UNDEF
+                                    stub_kw.definition = stub_defn
+                                    mod.symbol_table[sym_name] = stub_defn
             i += 1
         return True
     _reg('open', _bi_open)
