@@ -51,16 +51,19 @@ def title(quiet: bool = False) -> None:
 Frame = namedtuple('Frame', ['pre_mark', 'bindings_str', 'cs_before', 'var_tree'])
 
 
-def _prompt(depth: int) -> str:
+def _prompt(depth: int, module_name: str = "") -> str:
     """Return the prompt string for the given depth level.
 
-    depth=0  -> '> '
-    depth=1  -> '--1> '
-    depth=2  -> '----2> '
+    depth=0, user module  -> '> '
+    depth=0, module "a"   -> 'a> '
+    depth=1, user module  -> '--1> '
+    depth=1, module "a"   -> 'a--1> '
+
+    module_name: empty string for the default "user" module, otherwise the module name.
     """
     if depth == 0:
-        return "> "
-    return "--" * depth + str(depth) + "> "
+        return module_name + "> "
+    return module_name + "--" * depth + str(depth) + "> "
 
 
 def _format_bindings(var_tree: dict, engine, extra_var_trees=None) -> str:
@@ -187,7 +190,12 @@ def run_repl(
         depth = 0
 
     def _write_prompt(d: int):
-        sys.stdout.write(_prompt(d))
+        # モジュール対応プロンプト: "user" モジュールのときは空文字、それ以外はモジュール名を前置
+        mod = WL.current_module
+        mod_name = ""
+        if mod is not None and getattr(mod, 'module_name', 'user') != "user":
+            mod_name = mod.module_name
+        sys.stdout.write(_prompt(d, mod_name))
         sys.stdout.flush()
 
     # ---- Main REPL ---------------------------------------------------------
@@ -362,6 +370,8 @@ def run_repl(
                     # Pass cs_before as barrier so this fresh query does NOT
                     # backtrack into choice points from enclosing (outer) queries.
                     # At depth=0 cs_before is None (no barrier), which is fine.
+                    # 現在の行番号をランタイムに保存 (エラーメッセージで "near line N" に使用)
+                    WL.line_count = repl_line_number
                     success = engine.prove(term, cs_barrier=cs_before)
                 except HaltException:
                     return 0
