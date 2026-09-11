@@ -6326,6 +6326,70 @@ def bi_sub_type(goal: PsiTerm, eng) -> bool:
     return d1.is_subtype_of(d2)
 
 
+def bi_subsort(goal: PsiTerm, eng) -> bool:
+    """subsort(A, B) — A is a subtype of B, with residuation on B.
+
+    When B is unbound (type=top, no value, no attrs), suspends on B (registers
+    a pending goal on B so it wakes when B is narrowed) and returns True.
+    B will display as @~ until narrowed.
+
+    When B is concrete:
+      - If B has a value: A must have the same value.
+      - If B has only a type (sort): A's type must be a subtype of B's type.
+    On success, re-registers the pending goal on B so further narrowing triggers
+    another check (B shows type~). Returns False if the check fails.
+    """
+    from wild_life.data_structures import Goal, GoalType, Residuation, SORT_VAR
+    from wild_life.runtime import WL
+
+    a1_raw = goal.attr_list.get('1')
+    a2_raw = goal.attr_list.get('2')
+    if a1_raw is None or a2_raw is None:
+        return False
+
+    d1 = a1_raw.deref()
+    d2 = a2_raw.deref()
+
+    # Check if B is unbound: type=top, no value, no attributes
+    b_is_unbound = (d2.type is WL.top and d2.value is None and not d2.attr_list)
+
+    def _register_on(var_pt):
+        """Register a new pending subsort goal on var_pt."""
+        pending_goal = Goal(GoalType.PROVE, goal, None, None, pending=True)
+        if var_pt.resid is None:
+            eng.trail.trail_psi(var_pt, 'resid')
+            var_pt.resid = [Residuation(goal=pending_goal)]
+        else:
+            eng.trail.trail_copy(var_pt, 'resid')
+            var_pt.resid.append(Residuation(goal=pending_goal))
+        if not (var_pt.flags & SORT_VAR):
+            eng.trail.trail_psi(var_pt, 'flags')
+            var_pt.flags |= SORT_VAR
+
+    if b_is_unbound:
+        # B is free — suspend and return True
+        if eng is not None:
+            _register_on(d2)
+        return True
+
+    # B is concrete — check A :=< B
+    if d2.value is not None:
+        # B is a concrete value: A must equal B
+        success = (d1.value is not None and d1.value == d2.value)
+    else:
+        # B is a sort (no value): A's type must be a subtype of B's type
+        if d1.type is None or d2.type is None:
+            success = False
+        else:
+            success = d1.type.is_subtype_of(d2.type)
+
+    if success and eng is not None:
+        # Re-register so further narrowing of B triggers another check
+        _register_on(d2)
+
+    return success
+
+
 def bi_get_attribute(goal: PsiTerm, eng) -> bool:
     """get_attribute(Term, Key, Value)."""
     a1 = goal.attr_list.get('1')
@@ -6988,7 +7052,7 @@ def register_all(wl) -> None:
 
     # Type hierarchy
     _reg('sub_type', bi_sub_type)
-    _reg('subsort', bi_sub_type)   # alias: subsort(A,B) ↔ sub_type(A,B)
+    _reg('subsort', bi_subsort)    # subsort(A,B): A:=<B with residuation on B
     _reg('get_attribute', bi_get_attribute)
     _reg('set_attribute', bi_set_attribute)
     _reg('type_of', bi_type_of)
