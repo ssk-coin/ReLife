@@ -310,6 +310,33 @@ def run_repl(
                     _write_prompt(depth)
                 continue
 
+            # ---- Multi-line input accumulation ----------------------------
+            # If this line does not end with '.' or '?', it is the start
+            # of a multi-line fact/rule/query.  Read continuation lines,
+            # showing '|    ' for each one, until the buffer ends with '.'
+            # or '?', or until EOF / a blank line terminates the input.
+            _stripped_r = line_stripped.rstrip()
+            if _stripped_r and not (_stripped_r.endswith('.') or _stripped_r.endswith('?')):
+                _buf = line_stripped
+                while True:
+                    _stripped_r = _buf.rstrip()
+                    if not _stripped_r or _stripped_r.endswith('.') or _stripped_r.endswith('?'):
+                        break
+                    sys.stdout.write('|    ')
+                    sys.stdout.flush()
+                    try:
+                        _cont = input()
+                        repl_line_number += 1
+                    except EOFError:
+                        break
+                    _cont_s = _cont.strip()
+                    if _cont_s:
+                        _buf = _buf + '\n' + _cont_s
+                    else:
+                        # Blank continuation line: stop accumulation
+                        break
+                line_stripped = _buf
+
             # ---- Parse the input ------------------------------------------
             # Build inherited variable scope from all active frames so that
             # variables with matching names in a nested query reuse the

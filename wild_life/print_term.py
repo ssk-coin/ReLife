@@ -1018,35 +1018,79 @@ def _print_value(ps: PrintState, t: 'PsiTerm', wl) -> None:
     ps.write(repr(t.value))
 
 
+def _render_one_attr(ps: PrintState, k: str, v, depth: int, cnt: list, wl) -> None:
+    """Render a single key=>value attribute pair into ps."""
+    iv = _str_to_int(k)
+    if iv < 0:
+        # Named feature
+        _print_symbol_quoted(ps, k, ps.const_quote)
+        ps.write(" => ")
+    elif iv == cnt[0]:
+        cnt[0] += 1
+        # positional — no label
+    else:
+        ps.write(str(iv))
+        ps.write(" => ")
+    if v:
+        _pretty_tag_or_psi_term(ps, v, 999, depth, wl)
+    else:
+        ps.write("<null>")
+
+
 def _pretty_attr(ps: PrintState, attr_list: dict, depth: int, wl) -> None:
-    """Print attribute list in parenthesized form."""
-    ps.write("(")
-    # Sort features: integers first (numerically), then strings
+    """Print attribute list in parenthesized form, with column-aware wrapping.
+
+    If the flat representation fits on the current line it is printed inline.
+    Otherwise each attribute is placed on its own line, indented to align with
+    the first attribute (one past the opening parenthesis).
+    """
+    import io
     from wild_life.data_structures import featcmp_key
     keys = sorted(attr_list.keys(), key=featcmp_key)
-    cnt = [1]  # mutable counter
 
+    # Column where the first attribute starts (one past the opening '(')
+    indent_col = ps.col + 1
+
+    # ── flat pass to measure total width ─────────────────────────────────────
+    flat_buf = io.StringIO()
+    flat_ps = PrintState(outfile=flat_buf)
+    flat_ps.print_depth = ps.print_depth
+    flat_ps.const_quote = ps.const_quote
+    flat_ps.write_resids = ps.write_resids
+    flat_ps.pointer_names = ps.pointer_names
+    flat_ps.printed_pointers = dict(ps.printed_pointers)
+    flat_ps.col = ps.col            # column before '('
+    flat_ps.max_col = 10_000        # suppress wrapping in probe pass
+
+    flat_ps.write("(")
+    cnt_f = [1]
+    first_f = True
+    for k in keys:
+        if not first_f:
+            flat_ps.write(",")
+        first_f = False
+        _render_one_attr(flat_ps, k, attr_list[k], depth, cnt_f, wl)
+    flat_ps.write(")")
+    flat_str = flat_buf.getvalue()
+
+    # ── decide: inline or multi-line ─────────────────────────────────────────
+    if ps.col + len(flat_str) <= ps.max_col:
+        # Fits on the current line — use the flat string
+        ps.write(flat_str)
+        ps.printed_pointers.update(flat_ps.printed_pointers)
+        return
+
+    # ── multi-line: each attribute on its own line ────────────────────────────
+    ps.write("(")
+    cnt = [1]
     first = True
     for k in keys:
         if not first:
             ps.write(",")
+            ps.write("\n")
+            ps.write(" " * indent_col)
         first = False
-        v = attr_list[k]
-        iv = _str_to_int(k)
-        if iv < 0:
-            # Named feature
-            _print_symbol_quoted(ps, k, ps.const_quote)
-            ps.write(" => ")
-        elif iv == cnt[0]:
-            cnt[0] += 1
-            # positional — no label
-        else:
-            ps.write(str(iv))
-            ps.write(" => ")
-        if v:
-            _pretty_tag_or_psi_term(ps, v, 999, depth, wl)
-        else:
-            ps.write("<null>")
+        _render_one_attr(ps, k, attr_list[k], depth, cnt, wl)
     ps.write(")")
 
 
