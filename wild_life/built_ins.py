@@ -2731,9 +2731,11 @@ def _apply_and_conjunction_to_var(conj_t: 'PsiTerm', target: 'PsiTerm', eng) -> 
     # Both sides are concrete sorts with no concrete value: use GLB enumeration
     d1 = t1.type
     d2 = t2.type
-    if d1 is None or d2 is None or t1.value is not None or t2.value is not None:
-        # Has a concrete value (e.g. a number or string) or no type def:
-        # use the old approach which handles glb(1, int) etc.
+    if (d1 is None or d2 is None or t1.value is not None or t2.value is not None
+            or t1.attr_list or t2.attr_list):
+        # Has a concrete value (e.g. a number or string), no type def, or
+        # has attributes that must be unified (e.g. a(10) & @(1=>11)):
+        # use the old approach which handles glb(1, int) and attribute merging.
         result = _eval_and_conjunction(conj_t, eng)
         if result is None:
             return False
