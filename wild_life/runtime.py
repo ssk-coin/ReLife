@@ -159,6 +159,12 @@ class WildLifeRuntime:
         # ==================== 組み込み関数テーブル ====================
         self.builtin_table: Dict[Definition, Callable] = {}
 
+        # ==================== 列挙可能演算子リスト ====================
+        # op/3 の列挙モードで返す演算子の順序を保持する。
+        # dict の挿入順には依存せず、_init_operators() / add_operator() が
+        # この順序で追記する。
+        self._enumerable_ops: list = []  # list of (precedence, type_str, name)
+
         # ==================== 初期化 ====================
         self._initialized = False
 
@@ -523,127 +529,133 @@ class WildLifeRuntime:
 
     def _init_operators(self):
         """組み込み演算子の定義
-        LIFE言語の演算子 (op1テストのop(B,C,D)出力から確認した正確な優先度)
+
+        op1テストの期待出力 (60演算子) に厳密に合わせた順序で定義する。
+        Python dict の挿入順が bi_op 列挙の順序を決定する。
+
+        列挙可能な演算子 (syntax_module, enumerable=True):
+          syntax_module の symbol_table に挿入順で格納され、op/3 が全列挙する。
+
+        内部専用演算子 (enumerable=False):
+          パーサーが必要とするが op/3 では列挙されない演算子。
+          同じ syntax_module に追加するが enumerable=False を付ける。
         """
+        op_type_str_map = {
+            OperatorType.FX: 'fx', OperatorType.FY: 'fy',
+            OperatorType.XF: 'xf', OperatorType.YF: 'yf',
+            OperatorType.XFX: 'xfx', OperatorType.XFY: 'xfy',
+            OperatorType.YFX: 'yfx',
+        }
+
         def op(prec: int, op_type: OperatorType, name: str,
-               module: Optional[Module] = None):
-            """演算子を定義する"""
-            defn = self.update_symbol(module or self.syntax_module, name)
-            od = OperatorData(op_type, prec, defn.op_data)
+               module: Optional[Module] = None,
+               enumerable: bool = True):
+            """演算子を定義する。
+            enumerable=True の場合は _enumerable_ops リストにも順序通りに追加する。
+            """
+            m = module or self.syntax_module
+            defn = self.update_symbol(m, name)
+            od = OperatorData(op_type, prec, defn.op_data, enumerable=enumerable)
             defn.op_data = od
+            if enumerable:
+                type_str = op_type_str_map.get(op_type)
+                if type_str is not None:
+                    self._enumerable_ops.append((prec, type_str, name))
 
         OT = OperatorType
 
-        # 優先度 1200 (最も緩い結合 = トップレベル構造)
-        op(1200, OT.XFX, ":-")       # predicate definition / directive
-        op(1200, OT.XFX, "-->")      # DCG rule
-        op(1200, OT.XFX, "->")       # function definition (LIFE)
-        op(1200, OT.XFX, "<|")       # subtype declaration
-        op(1200, OT.XFX, ":=")       # ??
-        op(1200, OT.FX,  ":-")       # directive prefix
-        op(1200, OT.FX,  "?-")       # query prefix
-        op(1200, OT.FX,  "::")       # module qualifier prefix
+        # ════════════════════════════════════════════════════════════════════
+        # 列挙可能な演算子 (op1.refout の期待出力と同じ順序・60個)
+        # Python dict 挿入順 = op/3 列挙順なので、この順序が厳密に重要。
+        # ════════════════════════════════════════════════════════════════════
 
-        # 優先度 1150
-        op(1150, OT.XFX, "|")        # such-that / function guard / list tail
+        op(1200, OT.FY,  "man")       #  1  手引き宣言 (FY = right-assoc prefix)
+        op(600,  OT.XFX, "$=<")       #  2  sort value ≤
+        op(600,  OT.XFX, "$==")       #  3  sort value ==
+        op(900,  OT.FY,  "\\+")       #  4  negation as failure
+        op(200,  OT.XFY, "^")         #  5  power / existential quantifier
+        op(600,  OT.XFX, "$\\==")     #  6  sort value ≠
+        op(600,  OT.XFX, "$>=")       #  7  sort value ≥
+        op(600,  OT.XFX, "$>")        #  8  sort value >
+        op(600,  OT.XFX, "$<")        #  9  sort value <
+        op(1200, OT.XFX, ":=")        # 10  LIFE assignment
+        op(1200, OT.XFX, "<|")        # 11  subtype declaration
+        op(600,  OT.XFX, ":\\><")     # 12  sort constraint ≶
+        op(600,  OT.XFX, ":\\==")     # 13  sort non-identity
+        op(600,  OT.XFX, ":\\>")      # 14  sort constraint >
+        op(600,  OT.XFX, ":\\>=")     # 15  sort constraint ≥
+        op(600,  OT.XFX, ":\\<")      # 16  sort constraint <
+        op(600,  OT.XFX, ":\\=<")     # 17  sort constraint ≤
+        op(600,  OT.XFX, ":><")       # 18  sort intersection
+        op(600,  OT.XFX, ":==")       # 19  sort identity
+        op(600,  OT.XFX, ":>")        # 20  sort constraint >
+        op(600,  OT.XFX, ":>=")       # 21  sort constraint ≥
+        op(600,  OT.XFX, ":<")        # 22  sort constraint <
+        op(600,  OT.XFX, ":=<")       # 23  sort constraint ≤
+        op(100,  OT.XFY, "&")         # 24  type intersection / feature union
+        op(700,  OT.XFX, "<<-")       # 25  strict delay / residuation
+        op(600,  OT.XFX, "\\===")     # 26  address inequality
+        op(600,  OT.XFX, "===")       # 27  address equality
+        op(675,  OT.YFX, "xor")       # 28  boolean xor
+        op(625,  OT.FY,  "not")       # 29  boolean not
+        op(675,  OT.YFX, "or")        # 30  boolean or
+        op(650,  OT.YFX, "and")       # 31  boolean and
+        op(600,  OT.XFX, "=:=")       # 32  arithmetic equality
+        op(600,  OT.XFX, "=\\=")      # 33  arithmetic inequality
+        op(600,  OT.XFX, ">=")        # 34  ≥
+        op(600,  OT.XFX, ">")         # 35  >
+        op(600,  OT.XFX, "=<")        # 36  ≤
+        op(600,  OT.XFX, "<")         # 37  <
+        op(400,  OT.YFX, "<<")        # 38  left shift
+        op(400,  OT.YFX, ">>")        # 39  right shift
+        op(200,  OT.FY,  "\\")        # 40  bitwise NOT (unary)
+        op(500,  OT.YFX, "\\/")       # 41  bitwise OR
+        op(500,  OT.YFX, "/\\")       # 42  bitwise AND
+        op(400,  OT.YFX, "mod")       # 43  modulo
+        op(400,  OT.YFX, "//")        # 44  integer division
+        op(400,  OT.YFX, "/")         # 45  division
+        op(500,  OT.YFX, "+")         # 46  addition
+        op(400,  OT.YFX, "*")         # 47  multiplication
+        op(1200, OT.FX,  "::")        # 48  module qualifier prefix
+        op(1150, OT.XFX, "|")         # 49  such-that / guard / list tail
+        op(75,   OT.FY,  "`")         # 50  quotation
+        op(1200, OT.XFX, ":-")        # 51  predicate head definition
+        # "-" 記号は2エントリ: 期待出力順序は FY(200) が先・YFX(500) が後
+        # _enumerable_ops: FY を先に追加、YFX を後に追加
+        # op_data チェーン: YFX が head (後追加)、FY が next
+        op(200,  OT.FY,  "-")         # 52  unary minus
+        op(500,  OT.YFX, "-")         # 53  subtraction
+        op(1100, OT.XFY, ";")         # 54  disjunction
+        op(1200, OT.XFX, "->")        # 55  function definition (LIFE)
+        op(700,  OT.XFX, "<-")        # 56  delay / residuation
+        op(700,  OT.XFX, "=")         # 57  unification
+        op(50,   OT.XFY, ":")         # 58  type annotation / module qualifier
+        op(150,  OT.YFX, ".")         # 59  feature access
+        op(1000, OT.XFY, ",")         # 60  conjunction
 
-        # 優先度 1100
-        op(1100, OT.XFY, ";")        # disjunction (Prolog ;)
+        # ════════════════════════════════════════════════════════════════════
+        # 内部専用演算子 (enumerable=False)
+        # パーサーが必要とするが op/3 では列挙されない。
+        # C Wild Life の op1 出力には含まれていない。
+        # ════════════════════════════════════════════════════════════════════
 
-        # 優先度 1000
-        op(1000, OT.XFY, ",")        # conjunction
-
-        # 優先度 900 (negation as failure)
-        op(900,  OT.FY,  "\\+")      # negation as failure
-
-        # 優先度 700 (unification / delay)
-        op(700,  OT.XFX, "=")        # unification
-        op(700,  OT.XFX, "\\=")      # non-unification
-        op(700,  OT.XFX, "==")       # structural equality
-        op(700,  OT.XFX, "\\==")     # structural inequality
-        op(700,  OT.XFX, "<-")       # delay assignment / residuation
-        op(700,  OT.XFX, "<<-")      # delay assignment (strict)
-        op(700,  OT.XFX, "is")       # arithmetic evaluation
-        op(700,  OT.XFX, "=..")      # univ
-
-        # 優先度 675 (boolean disjunction / xor)
-        op(675,  OT.YFX, "or")       # boolean or
-        op(675,  OT.YFX, "xor")      # boolean xor
-
-        # 優先度 650 (boolean conjunction)
-        op(650,  OT.YFX, "and")      # boolean and
-
-        # 優先度 625 (boolean not)
-        op(625,  OT.FY,  "not")      # boolean not
-
-        # 優先度 600 (comparison operators)
-        op(600,  OT.XFX, "<")
-        op(600,  OT.XFX, ">")
-        op(600,  OT.XFX, "=<")
-        op(600,  OT.XFX, ">=")
-        op(600,  OT.XFX, "=:=")      # arithmetic equality
-        op(600,  OT.XFX, "=\\=")     # arithmetic inequality
-        op(600,  OT.XFX, "===")      # address equality
-        op(600,  OT.XFX, "\\===")    # address inequality
-        # Sort constraint operators
-        op(600,  OT.XFX, ":==")      # sort instantiation check
-        op(600,  OT.XFX, ":\\==")    # sort non-instantiation check
-        op(600,  OT.XFX, ":>")       # sort constraint >
-        op(600,  OT.XFX, ":>=")      # sort constraint >=
-        op(600,  OT.XFX, ":<")       # sort constraint <
-        op(600,  OT.XFX, ":=<")      # sort constraint =<
-        op(600,  OT.XFX, ":><")      # sort constraint ><
-        op(600,  OT.XFX, ":\\><")    # sort constraint \><
-        # Sort value comparison
-        op(600,  OT.XFX, "$==")      # sort value equality
-        op(600,  OT.XFX, "$\\==")    # sort value inequality
-        op(600,  OT.XFX, "$>")
-        op(600,  OT.XFX, "$<")
-        op(600,  OT.XFX, "$>=")
-        op(600,  OT.XFX, "$=<")
-        # Feature set operators
-        op(600,  OT.XFX, "=>")       # feature assignment
-
-        # 優先度 500 (addition / bitwise)
-        op(500,  OT.YFX, "+")
-        op(500,  OT.YFX, "-")
-        op(500,  OT.YFX, "/\\")
-        op(500,  OT.YFX, "\\/")
-        op(500,  OT.FX,  "+")
-        op(500,  OT.FX,  "-")
-
-        # 優先度 400 (multiplication / division / shift)
-        op(400,  OT.YFX, "*")
-        op(400,  OT.YFX, "/")
-        op(400,  OT.YFX, "//")
-        op(400,  OT.YFX, "mod")
-        op(400,  OT.YFX, "rem")
-        op(400,  OT.YFX, "<<")
-        op(400,  OT.YFX, ">>")
-
-        # 優先度 200 (power / bitwise not)
-        op(200,  OT.XFX, "**")
-        op(200,  OT.XFY, "^")
-        op(200,  OT.FY,  "\\")
-        op(200,  OT.FY,  "-")        # unary minus (also at 500)
-
-        # 優先度 150 (field access)
-        op(150,  OT.YFX, ".")        # field / attribute access
-
-        # 優先度 100 (intersection type)
-        op(100,  OT.XFY, "&")        # type intersection / feature set union
-
-        # 優先度 75 (backtick quotation)
-        op(75,   OT.FY,  "`")        # quotation
-
-        # 優先度 50 (feature access / type annotation, very tight)
-        op(50,   OT.XFY, ":")        # type annotation / module qualifier
-
-        # 宣言演算子 (FX, prefix)
-        op(1200, OT.FX,  "type")     # type declaration
-        op(1200, OT.FX,  "fun")      # function declaration
-        op(1200, OT.FX,  "pred")     # predicate declaration
-        op(1200, OT.FX,  "man")      # manual declaration
+        # Prolog互換 (パーサーで認識するが LIFE では列挙しない)
+        op(700,  OT.XFX, "\\=",    enumerable=False)  # non-unification
+        op(700,  OT.XFX, "==",     enumerable=False)  # structural equality
+        op(700,  OT.XFX, "\\==",   enumerable=False)  # structural inequality
+        op(700,  OT.XFX, "is",     enumerable=False)  # arithmetic eval (Prolog)
+        op(700,  OT.XFX, "=..",    enumerable=False)  # univ (Prolog)
+        op(1200, OT.XFX, "-->",    enumerable=False)  # DCG rule
+        op(1200, OT.FX,  "?-",     enumerable=False)  # Prolog query prefix
+        op(200,  OT.XFX, "**",     enumerable=False)  # power (Prolog)
+        op(400,  OT.YFX, "rem",    enumerable=False)  # remainder (Prolog)
+        op(600,  OT.XFX, "=>",     enumerable=False)  # feature assignment
+        op(500,  OT.FX,  "+",      enumerable=False)  # unary plus
+        op(500,  OT.FX,  "-",      enumerable=False)  # unary minus (FX alias)
+        # 宣言キーワード (FX prefix; man は上で FY として定義済み)
+        op(1200, OT.FX,  "type",   enumerable=False)  # type declaration
+        op(1200, OT.FX,  "fun",    enumerable=False)  # function declaration
+        op(1200, OT.FX,  "pred",   enumerable=False)  # predicate declaration
 
     # ==================== 組み込み述語・関数の初期化 ====================
 
@@ -927,13 +939,29 @@ class WildLifeRuntime:
 
     def add_operator(self, prec: int, op_type: "OperatorType",
                      name: str, module: "Module" = None) -> None:
-        """演算子を動的に追加する公開API (bi_op から呼ばれる)"""
+        """演算子を動的に追加する公開API (bi_op から呼ばれる)
+
+        module=None のとき current_module でシンボルを検索・作成することで、
+        トークナイザーが同名アトムを以前に current_module に登録していた場合でも
+        同じ Definition に op_data を設定できる。これにより、op(500,xfy,foo)?
+        のあとに foo を演算子として正しくパースできる。
+        """
         if module is None:
-            module = self.syntax_module
+            module = self.current_module
         defn = self.update_symbol(module, name)
         # 既存のチェーンを先頭に繋ぐ（同名シンボルに複数の演算子種別が許される）
         op = OperatorData(op_type, prec, defn.op_data)
         defn.op_data = op
+        # ユーザー宣言演算子を列挙リストにも追加する
+        _op_type_str_map = {
+            OperatorType.FX: 'fx', OperatorType.FY: 'fy',
+            OperatorType.XF: 'xf', OperatorType.YF: 'yf',
+            OperatorType.XFX: 'xfx', OperatorType.XFY: 'xfy',
+            OperatorType.YFX: 'yfx',
+        }
+        type_str = _op_type_str_map.get(op_type)
+        if type_str is not None:
+            self._enumerable_ops.append((prec, type_str, name))
 
 
 # ==================== グローバルシングルトン ====================

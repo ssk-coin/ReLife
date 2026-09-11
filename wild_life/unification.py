@@ -352,11 +352,14 @@ class Unifier:
     def _unify_impl_inner(self, u: PsiTerm, v: PsiTerm) -> bool:
         """Actual unification body (called by _unify_impl after cycle detection)."""
         # Dot-access expression resolution: when either term is a dot-projection
-        # (type.keyword.symbol == '.'), resolve it to the actual feature cell
-        # before unification.  This handles cases like s(A.B, A.C) = s(A.D, A.E)
-        # where the dot-terms appear as sub-terms inside a compound.
+        # (type.keyword.symbol == '.' AND has '1'/'2' args), resolve it to the
+        # actual feature cell before unification.  This handles cases like
+        # s(A.B, A.C) = s(A.D, A.E) where the dot-terms appear as sub-terms.
+        # NOTE: a plain '.' atom (no args) must NOT be treated as a dot-access —
+        # it is a legitimate operator name and must unify freely with variables.
         _dot_check = (lambda t: (t.type is not None and t.type.keyword is not None
-                                 and t.type.keyword.symbol == '.'))
+                                 and t.type.keyword.symbol == '.'
+                                 and t.attr_list.get('1') is not None))
         if _dot_check(u) or _dot_check(v):
             if self.engine is not None:
                 from wild_life.built_ins import _resolve_dot_feat as _rdf
