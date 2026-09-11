@@ -188,6 +188,10 @@ class Definition:
         self.creation_id: int = len(Definition.all_definitions)
         Definition.all_definitions.append(self)
 
+        # モジュール clash 検出時に作成されたブロックスタブ
+        # listing 等で "is undefined" を表示しないようにするフラグ
+        self.clash_blocked: bool = False
+
     @property
     def symbol(self) -> str:
         """シンボル名"""

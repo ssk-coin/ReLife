@@ -6104,16 +6104,66 @@ def bi_statistics(goal: PsiTerm, eng) -> bool:
     return True
 
 
+def _rule_to_string(h, b, wl):
+    """ルール (head, body) を共有 PrintState で文字列化する。
+
+    body 中の conjunction ','( left, right ) を個々のゴールに分解し、
+    head_str と goal_str のリストを返す。
+    同一 PsiTerm を head/body で共有する変数は同じ名前 (_A, _B, ...) で表示。
+    """
+    import io
+    from wild_life.print_term import (
+        PrintState, _pretty_tag_or_psi_term, MAX_PRECEDENCE
+    )
+
+    def split_conj(t):
+        """Recursively split conjunction into list of individual goals."""
+        if t is None:
+            return []
+        t = t.deref()
+        # Conjunction operator ','  (no functor-style extra attr)
+        if (t.type and t.type.keyword and t.type.keyword.symbol == ','
+                and '1' in t.attr_list and '2' in t.attr_list
+                and 'functor' not in t.attr_list):
+            return split_conj(t.attr_list['1']) + split_conj(t.attr_list['2'])
+        return [t]
+
+    body_goals = split_conj(b) if b is not None else []
+
+    # 共有 PrintState: head / body ゴール全体をまとめてスキャン
+    ps = PrintState(outfile=io.StringIO())
+    ps.const_quote = True
+    ps.indent = False
+
+    ps.go_through(h)
+    for g in body_goals:
+        ps.go_through(g)
+    ps.insert_variables({}, False)
+
+    # head を出力
+    _pretty_tag_or_psi_term(ps, h, MAX_PRECEDENCE + 1, 0, wl)
+    head_str = ps.outfile.getvalue()
+
+    # body ゴールを個別に出力 (outfile を切り替えて再利用)
+    goal_strs = []
+    for g in body_goals:
+        ps.outfile = io.StringIO()
+        _pretty_tag_or_psi_term(ps, g, MAX_PRECEDENCE + 1, 0, wl)
+        goal_strs.append(ps.outfile.getvalue())
+
+    return head_str, goal_strs
+
+
 def _bi_listing_one(defn, wl, imported: bool = False) -> None:
     """Helper: list clauses for a single Definition.
 
     imported=True  : 別モジュールからインポートされた述語。
                      dynamic ヘッダなし、常に ':-' ボディ付きで表示。
+                     body ゴールは ',' で改行区切り。
     imported=False : 現在のモジュール所有の述語。
                      'dynamic(name)?' ヘッダ付き、succeed ボディは省略。
     """
     from wild_life.data_structures import DefType
-    from wild_life.print_term import term_to_string
 
     if defn is None or defn.keyword is None:
         return
@@ -6129,24 +6179,28 @@ def _bi_listing_one(defn, wl, imported: bool = False) -> None:
         print(f"\ndynamic({func_name})?")
 
     for h, b in active_rules:
-        hs = term_to_string(h, wl=wl)
+        head_str, goal_strs = _rule_to_string(h, b, wl)
+
         if is_function:
-            vs = term_to_string(b, wl=wl) if b is not None else 'true'
-            print(f"{hs} -> {vs}.")
+            vs = goal_strs[0] if goal_strs else 'true'
+            print(f"{head_str} -> {vs}.")
         elif imported:
-            # インポート述語: 常に ':-' ボディ付きで表示
-            bs = term_to_string(b, wl=wl) if b is not None else 'succeed'
-            print(f"{hs} :-\n        {bs}.")
+            # インポート述語: 常に ':-' ボディ付きで表示 (各ゴール改行)
+            if goal_strs:
+                bs = ',\n        '.join(goal_strs)
+            else:
+                bs = 'succeed'
+            print(f"{head_str} :-\n        {bs}.")
         else:
             # 自モジュール述語: succeed ボディは省略
             has_body = (b is not None and b.type is not None
                         and b.type.keyword is not None
                         and b.type.keyword.symbol != succeed_sym)
             if has_body:
-                bs = term_to_string(b, wl=wl)
-                print(f"{hs} :-\n        {bs}.")
+                bs = ',\n        '.join(goal_strs) if goal_strs else 'succeed'
+                print(f"{head_str} :-\n        {bs}.")
             else:
-                print(f"{hs}.")
+                print(f"{head_str}.")
 
 
 def _bi_listing_all(eng, wl) -> None:
@@ -6227,7 +6281,16 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
                     print(f"% '{func_name}' is a user-defined predicate with an empty definition.\n")
                 else:
                     _bi_listing_one(defn, wl, imported=False)
-        # else: UNDEF (衝突ブロック済など) → 無出力で成功
+        elif defn is not None and defn.type == DefType.UNDEF:
+            # UNDEF の場合:
+            #   clash_blocked スタブ → 衝突検出で作成済みのブロック → 無音成功
+            #   それ以外 (未定義/非公開) → "% 'name' is undefined." を表示
+            if not getattr(defn, 'clash_blocked', False):
+                func_name = defn.keyword.symbol if defn.keyword else '?'
+                flush_imported()
+                print()   # プロンプト行の末尾に改行を入れる
+                print(f"% '{func_name}' is undefined.")
+        # else: defn が None など → 無出力で成功
 
         i += 1
 
@@ -7756,7 +7819,10 @@ def register_all(wl) -> None:
     _reg('public', _bi_public)
 
     def _bi_private_feature(goal, eng):
-        """private_feature(F, ...) — mark features as private to current module."""
+        """private_feature(F, ...) — mark features as private to current module.
+        public 宣言済みの特性を private_feature にする場合は警告を出す。
+        """
+        import sys as _sys
         mod = wl.current_module
         if mod is None:
             return True
@@ -7772,6 +7838,14 @@ def register_all(wl) -> None:
             if name:
                 defn = wl.update_symbol(mod, name)
                 if defn.keyword:
+                    if defn.keyword.public:
+                        # 既に public 宣言された特性を private にする → 警告
+                        print(
+                            f"*** Warning: feature '{defn.keyword.combined_name}'"
+                            f" is now private, but was also declared public",
+                            file=_sys.stderr,
+                        )
+                        defn.keyword.public = False
                     defn.keyword.private_feature = True
             i += 1
         return True
@@ -7841,6 +7915,7 @@ def register_all(wl) -> None:
                                     stub_kw = _Kw(sym_name, mod, public=False)
                                     stub_defn = _Def(stub_kw)
                                     stub_defn.type = _DT.UNDEF
+                                    stub_defn.clash_blocked = True  # listing で無音成功
                                     stub_kw.definition = stub_defn
                                     mod.symbol_table[sym_name] = stub_defn
             i += 1

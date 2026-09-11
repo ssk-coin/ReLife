@@ -403,12 +403,8 @@ class Parser:
                         t3 = self.ts.read_token()
                         if self.equ_tok(t3, "=>"):
                             t3 = self.read_life_form(',', ')')
-                            # 特性を挿入
-                            key = t2.type.keyword
-                            if key and key.private_feature:
-                                feat_name = key.combined_name
-                            else:
-                                feat_name = t2.type.symbol if t2.type else str(count)
+                            # 特性を挿入 (常にシンボル名のみ使用; モジュール修飾は外部参照用)
+                            feat_name = t2.type.symbol if t2.type else str(count)
                             self._feature_insert(feat_name, t.attr_list, t3)
                             f2 = False
                         else:
