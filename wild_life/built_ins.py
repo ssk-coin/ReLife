@@ -6104,8 +6104,14 @@ def bi_statistics(goal: PsiTerm, eng) -> bool:
     return True
 
 
-def _bi_listing_one(defn, wl) -> None:
-    """Helper: list clauses for a single Definition."""
+def _bi_listing_one(defn, wl, imported: bool = False) -> None:
+    """Helper: list clauses for a single Definition.
+
+    imported=True  : 別モジュールからインポートされた述語。
+                     dynamic ヘッダなし、常に ':-' ボディ付きで表示。
+    imported=False : 現在のモジュール所有の述語。
+                     'dynamic(name)?' ヘッダ付き、succeed ボディは省略。
+    """
     from wild_life.data_structures import DefType
     from wild_life.print_term import term_to_string
 
@@ -6115,15 +6121,24 @@ def _bi_listing_one(defn, wl) -> None:
     if not active_rules:
         return
     func_name = defn.keyword.symbol
-    print(f"\ndynamic({func_name})?")
     is_function = (defn.type == DefType.FUNCTION)
     succeed_sym = wl.succeed.keyword.symbol if wl.succeed and wl.succeed.keyword else 'succeed'
+
+    if not imported:
+        # 自モジュール述語: dynamic 宣言ヘッダを表示
+        print(f"\ndynamic({func_name})?")
+
     for h, b in active_rules:
         hs = term_to_string(h, wl=wl)
         if is_function:
             vs = term_to_string(b, wl=wl) if b is not None else 'true'
             print(f"{hs} -> {vs}.")
+        elif imported:
+            # インポート述語: 常に ':-' ボディ付きで表示
+            bs = term_to_string(b, wl=wl) if b is not None else 'succeed'
+            print(f"{hs} :-\n        {bs}.")
         else:
+            # 自モジュール述語: succeed ボディは省略
             has_body = (b is not None and b.type is not None
                         and b.type.keyword is not None
                         and b.type.keyword.symbol != succeed_sym)
@@ -6150,66 +6165,74 @@ def _bi_listing_all(eng, wl) -> None:
 
 
 def bi_listing(goal: PsiTerm, eng) -> bool:
-    """listing(F) — list clauses for functor F.
+    """listing(F, ...) — list clauses for one or more functors.
 
-    Expected output format (matching original Wild Life):
-      - Empty predicate: % 'NAME' is a user-defined predicate with an empty definition.\\n
-      - Non-empty predicate:
+    引数なし: 全ユーザ定義述語/関数を列挙。
+    引数あり: 指定したシンボルの節を列挙。複数引数可 (例: listing(aa,bb)?)。
+
+    表示形式:
+      - 自モジュール述語 (PREDICATE/FUNCTION):
           \\ndynamic(NAME)?
-          HEAD :-
-                  BODY.
-      - Functional rules:
-          \\ndynamic(NAME)?
-          HEAD -> VALUE.
+          HEAD :- BODY.   (succeed ボディは省略して HEAD. のみ)
+      - インポート述語 (別モジュール由来):
+          HEAD :- BODY.   (dynamic ヘッダなし、succeed でも表示)
+          エントリ間は空行で区切る
+      - 空定義 (自モジュール): % 'NAME' is a user-defined predicate...
+      - UNDEF / 衝突ブロック済: 無出力で成功
     """
     from wild_life.data_structures import DefType
-    from wild_life.print_term import term_to_string
 
     wl = eng.wl
-    arg = _get_one_arg(goal)
-    if arg is None:
-        # listing with no args: list all user-defined predicates/functions
+
+    # 引数なし: 全ユーザ述語を列挙
+    if not goal.attr_list:
         _bi_listing_all(eng, wl)
         return True
-    defn = arg.type if arg.type else None
-    if defn is None:
-        return False
 
-    func_name = defn.keyword.symbol if defn.keyword else '?'
+    # 全引数を順に処理
+    # imported_pending: 連続するインポート述語をまとめて空行区切りで出力
+    imported_pending = []   # list of defn (imported, with rules)
 
-    # Collect non-deleted rules
-    active_rules = [(h, b) for h, b in (defn.rule or []) if h is not None]
+    def flush_imported():
+        """collected imported entries を空行区切りで出力してリセット"""
+        for k, d in enumerate(imported_pending):
+            # k==0: プロンプト直後なので改行1つでプロンプト行を終わらせる
+            # k>0 : 前エントリの末尾 \n に続く空行区切り
+            print()
+            _bi_listing_one(d, wl, imported=True)
+        imported_pending.clear()
 
-    if not active_rules:
-        # UNDEF の場合 (モジュール衝突でブロックされたシンボルなど): 無出力で成功
-        if defn.type not in (DefType.PREDICATE, DefType.FUNCTION):
-            return True
-        # Empty definition
-        print(f"% '{func_name}' is a user-defined predicate with an empty definition.\n")
-        return True
+    i = 1
+    while True:
+        a = goal.attr_list.get(str(i))
+        if a is None:
+            break
+        a_deref = a.deref() if hasattr(a, 'deref') else a
+        defn = a_deref.type if a_deref.type else None
 
-    # Print dynamic declaration header (with leading blank line)
-    print(f"\ndynamic({func_name})?")
+        if defn is not None and defn.type in (DefType.PREDICATE, DefType.FUNCTION):
+            is_imported = (defn.keyword and defn.keyword.module is not None
+                           and defn.keyword.module != wl.user_module)
+            active_rules = [(h, b) for h, b in (defn.rule or []) if h is not None]
 
-    is_function = (defn.type == DefType.FUNCTION)
-    succeed_sym = wl.succeed.keyword.symbol if wl.succeed and wl.succeed.keyword else 'succeed'
-
-    for h, b in active_rules:
-        hs = term_to_string(h, wl=wl)
-        if is_function:
-            # Functional rule: HEAD -> VALUE.
-            vs = term_to_string(b, wl=wl) if b is not None else 'true'
-            print(f"{hs} -> {vs}.")
-        else:
-            # Regular predicate clause
-            has_body = (b is not None and b.type is not None
-                        and b.type.keyword is not None
-                        and b.type.keyword.symbol != succeed_sym)
-            if has_body:
-                bs = term_to_string(b, wl=wl)
-                print(f"{hs} :-\n        {bs}.")
+            if is_imported:
+                if active_rules:
+                    imported_pending.append(defn)
+                # インポート述語で節なし: 無出力で成功
             else:
-                print(f"{hs}.")
+                # 自モジュール述語が来たらインポート分を先に出力
+                flush_imported()
+                func_name = defn.keyword.symbol if defn.keyword else '?'
+                if not active_rules:
+                    print(f"% '{func_name}' is a user-defined predicate with an empty definition.\n")
+                else:
+                    _bi_listing_one(defn, wl, imported=False)
+        # else: UNDEF (衝突ブロック済など) → 無出力で成功
+
+        i += 1
+
+    # 残留インポート述語を出力
+    flush_imported()
 
     return True
 
