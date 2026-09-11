@@ -3431,18 +3431,22 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     from wild_life.inference import _mark_arith_non_strict as _BI_MANS  # noqa: F811
     _bq_sym_check = (lambda td: td.type is not None and td.type.keyword is not None
                      and td.type.keyword.symbol == '`')
+    _b_was_backtick = False
     if _bq_sym_check(b_d):
         _bq_inner = b_d.attr_list.get('1')
         if _bq_inner is not None:
             _bq_inner_d = _bq_inner.deref()
             _BI_MANS(_bq_inner_d)  # recursively mark arithmetic sub-terms as NON_STRICT
             b_d = _bq_inner_d
+            _b_was_backtick = True
+    _a_was_backtick = False
     if _bq_sym_check(a_d):
         _bq_inner = a_d.attr_list.get('1')
         if _bq_inner is not None:
             _bq_inner_d = _bq_inner.deref()
             _BI_MANS(_bq_inner_d)
             a_d = _bq_inner_d
+            _a_was_backtick = True
 
     # Detect non-frozen arithmetic operator being applied via @(1,2)-style term.
     # Example: A=(+), A=@(1,2) — without backtick-freeze, `+` is an eager operator,
@@ -4165,7 +4169,7 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     # effects, and only keep the VALUE if it turned out to be concrete.
     # This avoids corrupting `result`'s coref and prevents spurious arithmetic
     # constraints from unevaluated or self-referential rule bodies.
-    if _b_is_user_fn and not _b_is_non_strict and not b_d.attr_list:
+    if _b_is_user_fn and not _b_is_non_strict and not b_d.attr_list and not _b_was_backtick:
         _0a_mark = eng.trail.mark()
         _b_evaled = _eval_user_func_sync(b_d, eng, 0)
         eng.trail.undo_to(_0a_mark)  # undo coref-linking of atom with rule-head copy
