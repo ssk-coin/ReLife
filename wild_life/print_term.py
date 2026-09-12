@@ -680,6 +680,40 @@ def _check_legal_cons(t: 'PsiTerm', t_type) -> bool:
     )
 
 
+def _find_named_tail(start_cell, pointer_names: dict, wl, t_type) -> str | None:
+    """Traverse list cons cells from start_cell to find a named-variable tail.
+
+    Used after list truncation: if the remaining (not-displayed) part of the
+    list ultimately ends at a named shared variable (e.g. a cyclic reference B),
+    return its name so it can be shown as '...|B'.  Returns None for finite lists
+    that end at nil, or for improper lists without a named tail.
+    """
+    cur = start_cell
+    seen_ids: set = set()
+    while True:
+        cid = id(cur)
+        if cid in seen_ids:
+            return None   # pure structural cycle with no named exit
+        seen_ids.add(cid)
+        arg1, arg2 = _get_two_args(cur.attr_list)
+        if arg2 is None:
+            return None
+        arg2 = arg2.deref()
+        arg2_id = id(arg2)
+        # Named variable (shared pointer) as tail?
+        if arg2_id in pointer_names and pointer_names[arg2_id]:
+            return pointer_names[arg2_id]
+        # Nil tail?
+        if (arg2.type == wl.nil and not arg2.attr_list):
+            return None
+        if wl.disj_nil and arg2.type == wl.disj_nil and not arg2.attr_list:
+            return None
+        # Improper (non-cons) tail?
+        if not _check_legal_cons(arg2, t_type):
+            return None
+        cur = arg2
+
+
 def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
     """Pretty-print a list or disjunction with column-aware wrapping.
 
@@ -711,7 +745,7 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
         cur = start
         list_depth = 0
         while True:
-            if ps.print_depth > 0 and list_depth >= ps.print_depth:
+            if ps.print_depth > 0 and depth + list_depth >= ps.print_depth:
                 yield None, None, True   # sentinel for "..."
                 return
             arg1, arg2 = _get_two_args(cur.attr_list)
@@ -757,8 +791,15 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
     done_f = False
     t_walk = t
     while not done_f:
-        if ps.print_depth > 0 and list_depth_f >= ps.print_depth:
+        if ps.print_depth > 0 and depth + list_depth_f >= ps.print_depth:
+            if not first_f:
+                flat_ps.write(sep)   # comma before "..."
             flat_ps.write("...")
+            # If remaining list has a named variable tail (e.g. cyclic B), show "|B"
+            named_tail = _find_named_tail(t_walk, flat_ps.pointer_names, wl, t_type)
+            if named_tail:
+                flat_ps.write("|")
+                flat_ps.write(named_tail)
             done_f = True
             break
         arg1, arg2 = _get_two_args(t_walk.attr_list)
@@ -807,8 +848,14 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
     first2 = True
     done2 = False
     while not done2:
-        if ps.print_depth > 0 and list_depth2 >= ps.print_depth:
+        if ps.print_depth > 0 and depth + list_depth2 >= ps.print_depth:
+            if not first2:
+                ps.write(sep)   # comma before "..."
             ps.write("...")
+            named_tail2 = _find_named_tail(t_walk2, ps.pointer_names, wl, t_type)
+            if named_tail2:
+                ps.write("|")
+                ps.write(named_tail2)
             done2 = True
             break
         arg1, arg2 = _get_two_args(t_walk2.attr_list)
