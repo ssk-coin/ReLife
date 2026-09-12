@@ -1384,13 +1384,16 @@ def bi_writeln(goal: PsiTerm, eng) -> bool:
 def bi_print_depth(goal: PsiTerm, eng) -> bool:
     """print_depth(N) — set the global print depth limit.
 
-    N = 0  → unlimited depth (0 = unlimited in Wild Life C semantics).
-    N < 0  → error; reset to unlimited.
-    N > 0  → truncate output after N levels (shows '...' beyond).
+    TRUE MODEL (from C Wild Life REFERR/REFOUT analysis):
+      N >= 0  → wl.print_depth = N + 1  (pd(0)?→1, pd(1)?→2, pd(3)?→4, ...)
+      N < 0   → error; if current pd<=1, show "..." in msg; else show actual arg value;
+                reset pd to 4 (C Wild Life default) regardless.
     """
     arg = _get_one_arg(goal)
     if arg is None:
-        return False
+        # 0-arg case: print_depth? resets pd to initial (effectively unlimited)
+        eng.wl.print_depth = 1000000000
+        return True
     arg = arg.deref()
     wl = eng.wl
     if arg.value is not None and arg.type and arg.type.is_subtype_of(wl.real):
@@ -1398,8 +1401,8 @@ def bi_print_depth(goal: PsiTerm, eng) -> bool:
         if n < 0:
             # Error: negative argument not allowed
             pd = wl.print_depth
-            if pd == 0 or pd == 1:
-                # pd=0 (unlimited) or pd=1: the arg would appear truncated at depth 1
+            if pd <= 1:
+                # pd=1 means output would be truncated at top level → show "..."
                 arg_str = "..."
             else:
                 import io
@@ -1410,12 +1413,11 @@ def bi_print_depth(goal: PsiTerm, eng) -> bool:
             sys.stderr.write(
                 f"*** Error: argument in print_depth({arg_str}) must be positive or zero.\n"
             )
-            wl.print_depth = 0  # reset to unlimited
+            wl.print_depth = 4  # reset to C Wild Life default (4)
             return True
-        elif n == 0:
-            wl.print_depth = 0  # 0 = unlimited (C Wild Life convention)
         else:
-            wl.print_depth = n
+            # TRUE MODEL: pd(N)? → wl.print_depth = N + 1
+            wl.print_depth = n + 1
         return True
     return False
 
@@ -1570,6 +1572,7 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
             else:
                 _evaled_arg = _try_eval_string_func(_vd, eng)
                 t_pre.attr_list[_k] = _evaled_arg if _evaled_arg is not None else _vd
+        _cp_save = eng.choice_stack  # Save choice stack before user-func unification
         for _ri, (h0, b0) in enumerate(active):
             _vm: dict = {}
             head = copy_term(h0, _vm)
@@ -1589,16 +1592,20 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
             # Handle conditional: body = (value | condition) — skip if conditioned
             if body_d.type is not None and body_d.type is wl.such_that:
                 continue  # Can't evaluate conditionals without engine; skip
-            # Unify head with pre-evaluated copy of t to bind arguments
+            # Unify head with pre-evaluated copy of t to bind arguments.
+            # Unifying with disjunction terms may create orphaned choice points;
+            # restore the choice stack afterward to discard them.
             mark = eng.trail.mark()
             ok = eng.unifier.unify(t_pre, head)
             if ok:
                 result = _eval_arith(body_d, eng, _depth + 1)
                 eng.trail.undo_to(mark)
+                eng.choice_stack = _cp_save  # Discard any orphaned choice points
                 if result[0]:
                     return result
                 # Evaluation failed; try next rule
             eng.trail.undo_to(mark)
+            eng.choice_stack = _cp_save  # Discard any orphaned choice points
 
     # Feature access: T.F → evaluate as arithmetic if possible
     if sym == '.':
