@@ -357,6 +357,14 @@ class PrintState:
                 self.pointer_names[tid] = 'SHARED'  # needs a name
                 continue
             self.pointer_names[tid] = None  # seen once
+            # Don't walk inside copy_term(X) — copy_term represents a syntactic
+            # copy operation, not a structural sharing relationship.  Walking its
+            # argument would cause the argument variable to be seen twice (once
+            # as a real binding and once as copy_term's arg), incorrectly marking
+            # it as SHARED and adding a spurious "X: value" prefix when printed.
+            _cur_sym = cur.type.keyword.symbol if (cur.type and cur.type.keyword) else ''
+            if _cur_sym == 'copy_term':
+                continue
             for val in cur.attr_list.values():
                 stack.append((val, True))
 
@@ -554,6 +562,20 @@ def _pretty_psi_with_ops(ps: PrintState, t: 'PsiTerm', sprec: int, depth: int) -
             arg1 = arg1.deref()
         if arg2:
             arg2 = arg2.deref()
+        # Expand copy_term(X) before precedence/paren calculation so that the
+        # actual content (e.g. a disjunction "a;b") determines whether parens
+        # are needed, not copy_term's own NOTOP prec=0.
+        def _expand_copy_term(node):
+            if node is None:
+                return node
+            _sym = node.type.keyword.symbol if (node.type and node.type.keyword) else ''
+            if (_sym == 'copy_term' and node.value is None
+                    and '1' in node.attr_list and '2' not in node.attr_list):
+                from wild_life.unification import copy_term as _ct
+                return _ct(node.attr_list['1'].deref())
+            return node
+        arg1 = _expand_copy_term(arg1)
+        arg2 = _expand_copy_term(arg2)
         a1kind, a1prec, a1type = _opcheck(arg1) if arg1 else (NOTOP, 0, OperatorType.NOP)
         a2kind, a2prec, a2type = _opcheck(arg2) if arg2 else (NOTOP, 0, OperatorType.NOP)
 
@@ -689,7 +711,7 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
         cur = start
         list_depth = 0
         while True:
-            if list_depth >= ps.print_depth:
+            if ps.print_depth > 0 and list_depth >= ps.print_depth:
                 yield None, None, True   # sentinel for "..."
                 return
             arg1, arg2 = _get_two_args(cur.attr_list)
@@ -735,7 +757,7 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
     done_f = False
     t_walk = t
     while not done_f:
-        if list_depth_f >= ps.print_depth:
+        if ps.print_depth > 0 and list_depth_f >= ps.print_depth:
             flat_ps.write("...")
             done_f = True
             break
@@ -785,7 +807,7 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
     first2 = True
     done2 = False
     while not done2:
-        if list_depth2 >= ps.print_depth:
+        if ps.print_depth > 0 and list_depth2 >= ps.print_depth:
             ps.write("...")
             done2 = True
             break
@@ -956,15 +978,16 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
         _print_value(ps, t, wl)
         args_written = True
     else:
-        if depth < ps.print_depth:
+        if ps.print_depth == 0 or depth + 1 < ps.print_depth:
             args_written = _pretty_psi_with_ops(ps, t, sprec, depth + 1)
         if not args_written:
             _print_symbol_q(ps, t.type.keyword if t.type else None)
 
-    if not args_written and t.attr_list and depth < ps.print_depth:
-        _pretty_attr(ps, t.attr_list, depth + 1, wl)
-    elif not args_written and t.attr_list and depth >= ps.print_depth:
-        ps.write("(...)")
+    if not args_written and t.attr_list:
+        if ps.print_depth > 0 and depth + 1 >= ps.print_depth:
+            ps.write("(...)")
+        else:
+            _pretty_attr(ps, t.attr_list, depth + 1, wl)
 
     _maybe_resid(ps, t)
 
@@ -980,12 +1003,20 @@ def _print_value(ps: PrintState, t: 'PsiTerm', wl) -> None:
     if wl.integer and defn.is_subtype_of(wl.integer):
         v = t.value
         if isinstance(v, float):
-            if v == int(v):
+            # Float-typed integer value
+            if v == int(v) and abs(v) <= 2**53:
                 ps.write(str(int(v)))
             else:
-                ps.write(repr(v))
+                ps.write(f"{v:g}")
         else:
-            ps.write(str(v))
+            # Python int: simulate C double (float64) precision.
+            # If the value cannot be represented exactly as float64 (|v| > 2^53),
+            # C Wild Life would store/print it in exponential notation.
+            fv = float(v)
+            if int(fv) == v:
+                ps.write(str(v))
+            else:
+                ps.write(f"{fv:g}")
         if defn != wl.integer:
             ps.write(DOTDOT)
             _print_symbol(ps, defn.keyword)

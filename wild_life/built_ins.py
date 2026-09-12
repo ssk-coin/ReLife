@@ -1244,8 +1244,10 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
     except RecursionError:
         pass
 
+    from wild_life.print_term import PRINT_DEPTH as _PRINT_DEPTH
+    _pd = getattr(eng.wl, 'print_depth', _PRINT_DEPTH) if eng and eng.wl else _PRINT_DEPTH
     write_term(t, outfile=stream or sys.stdout, quoted=quoted, wl=eng.wl,
-               var_tree=var_tree)
+               var_tree=var_tree, print_depth=_pd)
 
 
 def _term_to_str(t: PsiTerm, eng, quoted=True) -> str:
@@ -1377,6 +1379,45 @@ def bi_writeln(goal: PsiTerm, eng) -> bool:
     bi_write(goal, eng)
     print()
     return True
+
+
+def bi_print_depth(goal: PsiTerm, eng) -> bool:
+    """print_depth(N) — set the global print depth limit.
+
+    N = 0  → unlimited depth (0 = unlimited in Wild Life C semantics).
+    N < 0  → error; reset to unlimited.
+    N > 0  → truncate output after N levels (shows '...' beyond).
+    """
+    arg = _get_one_arg(goal)
+    if arg is None:
+        return False
+    arg = arg.deref()
+    wl = eng.wl
+    if arg.value is not None and arg.type and arg.type.is_subtype_of(wl.real):
+        n = int(float(arg.value))
+        if n < 0:
+            # Error: negative argument not allowed
+            pd = wl.print_depth
+            if pd == 0 or pd == 1:
+                # pd=0 (unlimited) or pd=1: the arg would appear truncated at depth 1
+                arg_str = "..."
+            else:
+                import io
+                from wild_life.print_term import write_term
+                buf = io.StringIO()
+                write_term(arg, outfile=buf, quoted=False, print_depth=pd, wl=wl)
+                arg_str = buf.getvalue()
+            sys.stderr.write(
+                f"*** Error: argument in print_depth({arg_str}) must be positive or zero.\n"
+            )
+            wl.print_depth = 0  # reset to unlimited
+            return True
+        elif n == 0:
+            wl.print_depth = 0  # 0 = unlimited (C Wild Life convention)
+        else:
+            wl.print_depth = n
+        return True
+    return False
 
 
 def bi_put_char(goal: PsiTerm, eng) -> bool:
@@ -1567,7 +1608,13 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
             return _eval_arith(feat_val, eng, _depth + 1)
         return False, 0.0
 
-    # Binary operators
+    # Binary operators — early exit if sym is not a known arithmetic binary op.
+    # This prevents infinite recursion on cyclic terms like cons(A,A) where
+    # the 'cons' symbol is not arithmetic but the pre-check would recurse forever.
+    _arith_binary_syms = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+                                     'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
+    if sym not in _arith_binary_syms:
+        return False, 0.0
     arg1, arg2 = _get_two_args(t)
     ok1, v1 = _eval_arith(arg1, eng, _depth + 1) if arg1 else (False, 0.0)
     ok2, v2 = _eval_arith(arg2, eng, _depth + 1) if arg2 else (False, 0.0)
@@ -7308,6 +7355,7 @@ def register_all(wl) -> None:
     _reg('pretty_writeq', bi_writeq)   # alias: pretty_writeq = writeq
     _reg('write_canonical', bi_write_canonical)
     _reg('print', bi_print)
+    _reg('print_depth', bi_print_depth)
     _reg('nl', bi_nl)
     _reg('write_err', bi_write_err)
     _reg('writeln', bi_writeln)

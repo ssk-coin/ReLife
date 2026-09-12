@@ -1685,7 +1685,9 @@ class Engine:
             print("\n*** No", end='', flush=True)
 
         if has_answer or level > 0:
-            print_variables(vt, sys.stdout, wl=wl)
+            from wild_life.print_term import PRINT_DEPTH as _INF_PD
+            _inf_pd = getattr(wl, 'print_depth', _INF_PD) if wl else _INF_PD
+            print_variables(vt, sys.stdout, wl=wl, print_depth=_inf_pd)
 
         prompt = '--' * min(level, 4) + '?- '
         print(prompt, end='', flush=True)
