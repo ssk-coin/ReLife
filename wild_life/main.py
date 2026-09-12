@@ -93,8 +93,11 @@ def _format_bindings(var_tree: dict, engine, extra_var_trees=None) -> str:
     if not merged:
         return ""
 
+    from wild_life.print_term import PRINT_DEPTH as _FMT_PRINT_DEPTH
+    _fmt_pd = getattr(engine.wl, 'print_depth', _FMT_PRINT_DEPTH) if engine and engine.wl else _FMT_PRINT_DEPTH
     buf = io.StringIO()
-    had_vars = print_variables(merged, outfile=buf, wl=engine.wl)
+    had_vars = print_variables(merged, outfile=buf, wl=engine.wl,
+                               print_depth=_fmt_pd)
     result = buf.getvalue()
     # print_variables now writes "." at end without newline
     if not had_vars:
