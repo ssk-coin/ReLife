@@ -658,7 +658,15 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None or a2 is None:
             return None
         a1, a2 = a1.deref(), a2.deref()
-        # Only evaluate when BOTH arguments are concrete strings
+        # Recursively evaluate nested string funcs FIRST (before checking is_string),
+        # so that strcon("as", strcon(F, F)) can be fully evaluated when F is bound.
+        a1e = _try_eval_string_func(a1, eng)
+        if a1e is not None:
+            a1 = a1e
+        a2e = _try_eval_string_func(a2, eng)
+        if a2e is not None:
+            a2 = a2e
+        # Only evaluate when BOTH arguments are now concrete strings
         if eng is not None:
             wl = eng.wl
             def _is_string(x):
@@ -666,16 +674,28 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
                         and x.type.is_subtype_of(wl.quoted_string))
             if not (_is_string(a1) and _is_string(a2)):
                 return None
-        # Recursively evaluate if needed
-        a1e = _try_eval_string_func(a1, eng)
-        if a1e is not None:
-            a1 = a1e
-        a2e = _try_eval_string_func(a2, eng)
-        if a2e is not None:
-            a2 = a2e
         s1 = str(a1.value) if (a1.value is not None) else ''
         s2 = str(a2.value) if (a2.value is not None) else ''
         return _make_string(eng, s1 + s2)
+
+    elif sym == 'makestr':
+        # makestr(T) -> string representation of term T (compact, single-line).
+        # Unbound variables are represented as "@" (C Wild Life convention).
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return None
+        if eng is None:
+            return None
+        a1 = a1.deref()
+        if _term_is_unbound(a1, eng):
+            return _make_string(eng, '@')
+        import io
+        from wild_life.print_term import write_term
+        buf = io.StringIO()
+        # Use a very large max_col to suppress line-wrapping (C Wild Life produces
+        # single-line strings for makestr).
+        write_term(a1, outfile=buf, wl=eng.wl, quoted=False, max_col=1_000_000)
+        return _make_string(eng, buf.getvalue())
 
     elif sym == 'strlen':
         # strlen(String) -> integer length of String
@@ -1118,7 +1138,7 @@ def _psi_to_python(t: Optional[PsiTerm], eng):
     return t
 
 
-def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
+def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> None:
     from wild_life.print_term import write_term
     var_tree = getattr(eng, '_last_var_tree', None)
     wl = eng.wl if eng else None
@@ -1309,10 +1329,14 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
     except RecursionError:
         pass
 
-    from wild_life.print_term import PRINT_DEPTH as _PRINT_DEPTH
+    from wild_life.print_term import PRINT_DEPTH as _PRINT_DEPTH, MAX_COL as _MAX_COL
     _pd = getattr(eng.wl, 'print_depth', _PRINT_DEPTH) if eng and eng.wl else _PRINT_DEPTH
+    # C Wild Life's write/1 does NOT pretty-print (no line-wrapping). Only
+    # pretty_write/1 produces multi-line indented output.  compact=True disables
+    # line-wrapping (max_col=1_000_000); compact=False uses the default 79-char limit.
+    _mc = 1_000_000 if compact else _MAX_COL
     write_term(t, outfile=stream or sys.stdout, quoted=quoted, wl=eng.wl,
-               var_tree=var_tree, print_depth=_pd)
+               var_tree=var_tree, print_depth=_pd, max_col=_mc)
 
 
 def _term_to_str(t: PsiTerm, eng, quoted=True) -> str:
@@ -1329,11 +1353,14 @@ def _is_var(t: PsiTerm, eng) -> bool:
 # I/O predicates
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _write_all_args(goal: PsiTerm, eng, quoted: bool, stream=None) -> bool:
+def _write_all_args(goal: PsiTerm, eng, quoted: bool, stream=None,
+                    compact: bool = False) -> bool:
     """Write all positional arguments of goal, concatenated (no separator).
 
     In LIFE, write(a,b,c) writes each argument in order without separator.
     If the goal has no positional args, write the goal's sort name.
+    compact=True disables line-wrapping (for write/1 which is always single-line).
+    compact=False uses pretty-printing (for pretty_write/1).
     Returns False if any argument fails to write (e.g., bottom type, bad arithmetic).
     """
     attrs = goal.attr_list
@@ -1346,7 +1373,7 @@ def _write_all_args(goal: PsiTerm, eng, quoted: bool, stream=None) -> bool:
             break
         arg = attrs[key].deref()
         try:
-            _write_term(arg, eng, stream=stream, quoted=quoted)
+            _write_term(arg, eng, stream=stream, quoted=quoted, compact=compact)
         except _WriteFailure:
             return False
         written_any = True
@@ -1354,20 +1381,37 @@ def _write_all_args(goal: PsiTerm, eng, quoted: bool, stream=None) -> bool:
     if not written_any:
         # No positional args: treat as write of goal itself
         try:
-            _write_term(goal, eng, stream=stream, quoted=quoted)
+            _write_term(goal, eng, stream=stream, quoted=quoted, compact=compact)
         except _WriteFailure:
             return False
     return True
 
 
 def bi_write(goal: PsiTerm, eng) -> bool:
-    """write(T) — write term T (or all positional args) without quoting."""
-    return _write_all_args(goal, eng, quoted=False)
+    """write(T) — write term T (or all positional args) without quoting.
+    C Wild Life's write/1 does NOT pretty-print — always single-line compact output.
+    Use pretty_write/1 for multi-line indented output.
+    """
+    return _write_all_args(goal, eng, quoted=False, compact=True)
 
 
 def bi_writeq(goal: PsiTerm, eng) -> bool:
-    """writeq(T) — write term T (or all positional args) with quoting."""
-    return _write_all_args(goal, eng, quoted=True)
+    """writeq(T) — write term T (or all positional args) with quoting.
+    Like write/1, writeq/1 does NOT pretty-print — always single-line compact output.
+    """
+    return _write_all_args(goal, eng, quoted=True, compact=True)
+
+
+def bi_pretty_write(goal: PsiTerm, eng) -> bool:
+    """pretty_write(T) — write term T with pretty-printing (multi-line indented output).
+    Unlike write/1 which is always compact, pretty_write/1 wraps at 79 columns.
+    """
+    return _write_all_args(goal, eng, quoted=False, compact=False)
+
+
+def bi_pretty_writeq(goal: PsiTerm, eng) -> bool:
+    """pretty_writeq(T) — writeq with pretty-printing (multi-line indented output)."""
+    return _write_all_args(goal, eng, quoted=True, compact=False)
 
 
 def bi_write_canonical(goal: PsiTerm, eng) -> bool:
@@ -1431,11 +1475,11 @@ def bi_nl(goal: PsiTerm, eng) -> bool:
 
 
 def bi_write_err(goal: PsiTerm, eng) -> bool:
-    """write_err(T) — write to stderr."""
+    """write_err(T) — write to stderr (compact, no pretty-printing)."""
     arg = _get_one_arg(goal)
     if arg is None:
         return False
-    _write_term(arg, eng, stream=sys.stderr, quoted=False)
+    _write_term(arg, eng, stream=sys.stderr, quoted=False, compact=True)
     return True
 
 
@@ -2951,6 +2995,11 @@ def _apply_glb_to_var(t: 'PsiTerm', target: 'PsiTerm', eng) -> bool:
         r = _eval_glb_func(t, eng)
         return _unify(eng, target, r) if r is not None else False
 
+    # Normalize backtick '`' syntax type to the disj sort for lattice operations.
+    wl = eng.wl
+    d1 = _normalize_backtick_type(d1, wl)
+    d2 = _normalize_backtick_type(d2, wl)
+
     glbs = _all_glbs(d1, d2)
     if not glbs:
         return False
@@ -3027,8 +3076,43 @@ def _compute_all_lubs(d1, d2, wl):
     return minimal if minimal else [wl.top]
 
 
+def _lub_concrete_equal(t1, t2):
+    """Return copy_term(t1) if t1 and t2 are equal concrete values, else None.
+
+    Two terms are "equal concrete values" when both have the same non-None value
+    and the same type definition, with no attribute sub-terms that would need
+    their own LUB treatment.  This captures: lub(1,1)→1, lub("a","a")→"a",
+    lub(12.2,12.2)→12.2.
+    """
+    if (t1.value is not None and t2.value is not None
+            and t1.value == t2.value
+            and t1.type is t2.type
+            and not t1.attr_list and not t2.attr_list):
+        return copy_term(t1)
+    return None
+
+
+def _normalize_backtick_type(d, wl):
+    """Map the syntax backtick '`' type to wl.disjunction for LUB/GLB purposes.
+
+    In C Wild Life, `{a;b} is a disjunction term (type disj).  Our parser
+    gives it the syntax '`' type, but for sort-lattice operations we must
+    treat it the same as disj.
+    """
+    if (wl.disjunction and d is not wl.disjunction
+            and d.keyword and d.keyword.symbol == '`'):
+        return wl.disjunction
+    return d
+
+
 def _eval_lub_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
     """Evaluate lub(X, Y) → first LUB; non-determinism handled by _apply_lub_to_var."""
+    t1 = t.attr_list['1'].deref()
+    t2 = t.attr_list['2'].deref()
+    # lub(V, V) → V when both sides carry the same concrete scalar value.
+    eq = _lub_concrete_equal(t1, t2)
+    if eq is not None:
+        return eq
     lubs = _compute_all_lubs_from_t(t, eng)
     return PsiTerm(type_def=lubs[0]) if lubs else None
 
@@ -3041,12 +3125,21 @@ def _compute_all_lubs_from_t(t: 'PsiTerm', eng):
     wl = eng.wl
     if d1 is None or d2 is None:
         return [wl.top]
+    # Normalize backtick '`' syntax type to the disj sort for lattice operations.
+    d1 = _normalize_backtick_type(d1, wl)
+    d2 = _normalize_backtick_type(d2, wl)
     return _compute_all_lubs(d1, d2, wl)
 
 
 def _apply_lub_to_var(t: 'PsiTerm', target: 'PsiTerm', eng) -> bool:
     """Unify target with lub(X,Y), creating choice points for multiple LUBs."""
     from wild_life.data_structures import GoalType as _GT
+    t1 = t.attr_list['1'].deref()
+    t2 = t.attr_list['2'].deref()
+    # lub(V, V) → V when both sides carry the same concrete scalar value.
+    eq = _lub_concrete_equal(t1, t2)
+    if eq is not None:
+        return _unify(eng, target, eq)
     lubs = _compute_all_lubs_from_t(t, eng)
     if not lubs:
         return False
@@ -7195,6 +7288,72 @@ def bi_close(goal: PsiTerm, eng) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# read_token(T) — read one token from stdin, used by makestr.lf
+# ─────────────────────────────────────────────────────────────────────────────
+
+def bi_read_token(goal: PsiTerm, eng) -> bool:
+    """read_token(T) — read one token from the current input stream.
+
+    Used by makestr.lf to parse a string token written to a temp file:
+      write('"'), write(X), write('"')  →  file contains "X"
+      read_token(Y)                     →  Y = the quoted string "X"
+    """
+    arg = _get_one_arg(goal)
+    # Read all available content from stdin (which may be redirected to a file)
+    try:
+        content = sys.stdin.read()
+    except (EOFError, KeyboardInterrupt, AttributeError):
+        content = ''
+    if not content:
+        return False
+    # Tokenize and read the first token
+    from wild_life.tokenizer import tokenizer_from_string
+    ts = tokenizer_from_string(content)
+    try:
+        tok = ts.read_token_b()
+    except Exception:
+        return False
+    if tok is None:
+        return False
+    if arg is None:
+        return True
+    return _unify(eng, arg.deref(), tok)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# system(Command) — run a shell command
+# ─────────────────────────────────────────────────────────────────────────────
+
+def bi_system(goal: PsiTerm, eng) -> bool:
+    """system(Command) — execute a shell command.
+
+    Unifies the result (exit code as integer) with the second argument if present.
+    Used by makestr.lf to remove the temp file: @=system("rm lifebuff").
+    """
+    import subprocess as _subp
+    a1 = goal.attr_list.get('1')
+    a2 = goal.attr_list.get('2')
+    if a1 is None:
+        return False
+    a1d = a1.deref()
+    if a1d.value is not None:
+        cmd = str(a1d.value)
+    elif a1d.type and a1d.type.keyword:
+        cmd = a1d.type.keyword.symbol
+    else:
+        return False
+    try:
+        ret = _subp.call(cmd, shell=True)
+    except Exception:
+        ret = -1
+    if a2 is not None:
+        wl = eng.wl
+        result = wl.make_integer(ret)
+        return _unify(eng, a2.deref(), result)
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # map(F, List) → ResultList  (functional built-in)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -7434,9 +7593,9 @@ def register_all(wl) -> None:
 
     # I/O
     _reg('write', bi_write)
-    _reg('pretty_write', bi_write)     # alias: pretty_write = write
+    _reg('pretty_write', bi_pretty_write)   # pretty_write uses pretty-printing
     _reg('writeq', bi_writeq)
-    _reg('pretty_writeq', bi_writeq)   # alias: pretty_writeq = writeq
+    _reg('pretty_writeq', bi_pretty_writeq)  # pretty_writeq uses pretty-printing
     _reg('write_canonical', bi_write_canonical)
     _reg('print', bi_print)
     _reg('print_depth', bi_print_depth)
@@ -7459,6 +7618,8 @@ def register_all(wl) -> None:
     _reg('open_in', bi_open_in)
     _reg('open_out', bi_open_out)
     _reg('close', bi_close)
+    _reg('read_token', bi_read_token)
+    _reg('system', bi_system)
 
     # Arithmetic
     _reg('is', bi_is)
@@ -7711,6 +7872,30 @@ def register_all(wl) -> None:
             return True
         return _unify(eng, a2.deref(), result)
     _reg('psi2str', _bi_psi2str)
+
+    def _bi_makestr(goal, eng):
+        """makestr(T, S): S = compact string representation of T (C Wild Life built-in).
+        Unbound variables are represented as "@".
+        Used as function: makestr(T) = S in queries.
+        """
+        import io as _io
+        from wild_life.print_term import write_term as _write_term
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None:
+            return False
+        a1 = a1.deref()
+        if _term_is_unbound(a1, eng):
+            s = '@'
+        else:
+            _buf = _io.StringIO()
+            _write_term(a1, outfile=_buf, wl=eng.wl, quoted=False, max_col=1_000_000)
+            s = _buf.getvalue()
+        result = _make_string(eng, s)
+        if a2 is None:
+            return True
+        return _unify(eng, a2.deref(), result)
+    _reg('makestr', _bi_makestr)
 
     def _bi_str2psi(goal, eng):
         """str2psi(S, T): T = atom parsed from string S."""
