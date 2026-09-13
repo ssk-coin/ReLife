@@ -453,16 +453,30 @@ class Unifier:
                     _elems = _cdisj(v, self.engine)
                     if not _elems:
                         return False
-                    for _alt in reversed(_elems[1:]):
-                        # Push UNIFY choice point on v (disjunction) so backtracking
-                        # re-binds v → next alternative (body refs also update).
-                        self.engine.push_choice_point(GoalType.UNIFY, v, _alt, None)
-                    # Bind v (the disjunction) to the first element
-                    self.bind(v, _elems[0])
-                    # Bind u (X) to v so u dereferences through v to elem[0]
+                    # Bind u (X) to v FIRST so that choice-point trail marks are
+                    # saved AFTER X.coref=v is set.  Backtracking then preserves
+                    # X→v while undoing only v.coref (the inner binding).
                     self.bind(u, v)
+                    # Now push BIND_DIRECT choice points (trail mark AFTER u→v).
+                    for _alt in reversed(_elems[1:]):
+                        self.engine.push_choice_point(GoalType.BIND_DIRECT, v, _alt, None)
+                    # Bind v (the disjunction node) to the first element.
+                    self.bind(v, _elems[0])
                     self._wakeup_resid(u, v)
+                    # Fire sort delay rules for the first element (same as
+                    # BIND_DIRECT does for subsequent elements). This ensures
+                    # :: SortName | goal fires even for the first alternative.
+                    _elem0_d = _elems[0].deref() if _elems else None
+                    if (_elem0_d is not None and WL.delay_rules and self.engine is not None
+                            and _elem0_d.type is not None and _elem0_d.type is not WL.top
+                            and not getattr(_elem0_d, '_delay_fired', False)):
+                        _elem0_d._delay_fired = True
+                        self._fire_delay_rules(_elem0_d, _elem0_d.type)
                     return True
+                # Fix A: Empty disjunction (disj_nil = bottom type) cannot
+                # be unified with any variable — unify with {} must fail.
+                if v.type is WL.disj_nil:
+                    return False
                 self.bind(u, v)
                 # Fix B: SORT_VAR daemon transfer.
                 # When a SORT_VAR variable u has daemon residuations (from
@@ -614,11 +628,19 @@ class Unifier:
                 _elems = _cdisj(u, self.engine)
                 if not _elems:
                     return False
-                for _alt in reversed(_elems[1:]):
-                    self.engine.push_choice_point(GoalType.UNIFY, u, _alt, None)
-                self.bind(u, _elems[0])
+                # Bind v to u FIRST so choice-point marks are saved after v→u.
                 self.bind(v, u)
+                for _alt in reversed(_elems[1:]):
+                    self.engine.push_choice_point(GoalType.BIND_DIRECT, u, _alt, None)
+                self.bind(u, _elems[0])
                 self._wakeup_resid(v, u)
+                # Fire delay rules for the first element (mirrors BIND_DIRECT)
+                _uelems0_d = _elems[0].deref() if _elems else None
+                if (_uelems0_d is not None and WL.delay_rules and self.engine is not None
+                        and _uelems0_d.type is not None and _uelems0_d.type is not WL.top
+                        and not getattr(_uelems0_d, '_delay_fired', False)):
+                    _uelems0_d._delay_fired = True
+                    self._fire_delay_rules(_uelems0_d, _uelems0_d.type)
                 return True
             self.bind(v, u)
             self._wakeup_resid(v, u)
