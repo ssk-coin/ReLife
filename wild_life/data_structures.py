@@ -446,6 +446,7 @@ class GoalType(Enum):
     RETRACT     = auto()
     LOAD        = auto()
     C_WHAT_NEXT = auto()
+    BIND_DIRECT = auto()  # Disjunction expansion: direct trail+bind without full unify
 
 
 class Goal:

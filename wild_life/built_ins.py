@@ -813,7 +813,9 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         return lt
 
     elif sym == 'features':
-        # features(T) -> list of attribute labels
+        # features(T[, MOD]) -> list of attribute labels (sorted: positional first, then named)
+        # If MOD is given, only includes features visible from module MOD,
+        # and each named feature is returned as a MOD-qualified atom.
         a1 = t.attr_list.get('1')
         if a1 is None:
             return None
@@ -822,26 +824,74 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         _a1_ev = _try_eval_string_func(a1, eng)
         if _a1_ev is not None:
             a1 = _a1_ev
-        keys = list(a1.attr_list.keys())
+        a2 = t.attr_list.get('2')  # optional module name argument
         wl = eng.wl
-        lst = PsiTerm(type_def=wl.nil)
+
+        # Determine context module (from 2nd argument if given)
+        ctx_mod = None
+        if a2 is not None:
+            _mod_t = a2.deref()
+            _mod_name = None
+            if _mod_t.value is not None and isinstance(_mod_t.value, str):
+                _mod_name = _mod_t.value
+            elif _mod_t.type and _mod_t.type.keyword:
+                _mod_name = _mod_t.type.keyword.symbol
+            if _mod_name:
+                ctx_mod = wl.find_module(_mod_name)
+
+        # Get the term's defining module (for feature visibility checks)
+        term_type_mod = None
+        if a1.type and a1.type.keyword and a1.type.keyword.module:
+            term_type_mod = a1.type.keyword.module
+
+        all_keys = list(a1.attr_list.keys())
+        # Sort: positional (non-negative integers) first, then named alphabetically
+        pos_keys = sorted(
+            [k for k in all_keys if k.lstrip('-').isdigit() and int(k) >= 0],
+            key=lambda x: int(x))
+        named_keys = sorted(
+            [k for k in all_keys if not (k.lstrip('-').isdigit() and int(k) >= 0)])
+        sorted_keys = pos_keys + named_keys
+
+        lst = PsiTerm()
         lst.type = wl.nil
-        for key in reversed(keys):
-            try:
-                n = int(key)
-                # Negative integer feature names must be returned as atoms
-                # (quoted when printed, e.g. '-34'), not as integer values,
-                # because they are identifiers, not numbers.
-                if n >= 0:
-                    kterm = wl.make_integer(n)
+
+        for key in reversed(sorted_keys):
+            is_pos = key.lstrip('-').isdigit() and int(key) >= 0
+
+            if ctx_mod is not None and not is_pos:
+                # Check visibility of named feature in ctx_mod
+                visible = False
+                if term_type_mod is not None:
+                    kw_defn = term_type_mod.symbol_table.get(key)
+                    if kw_defn is not None and kw_defn.keyword is not None:
+                        kw = kw_defn.keyword
+                        if term_type_mod is ctx_mod:
+                            # Same module: always visible (including private features)
+                            visible = True
+                        elif kw.public and not kw.private_feature:
+                            visible = True
+                    else:
+                        # Not in term_type_mod: anonymous / user feature, always visible
+                        visible = True
                 else:
-                    kterm = _make_atom(eng, key)
-            except (ValueError, TypeError):
-                kterm = _make_atom(eng, key)
+                    visible = True
+                if not visible:
+                    continue
+
+            if is_pos:
+                n = int(key)
+                kterm = wl.make_integer(n)
+            else:
+                # Named feature: create atom in context module if given, else user module
+                target_mod = ctx_mod if ctx_mod is not None else wl.user_module
+                kterm = wl.make_atom(key, target_mod)
+
             pair = PsiTerm()
             pair.type = wl.alist
             pair.attr_list = {'1': kterm, '2': lst}
             lst = pair
+
         return lst
 
     elif sym == '.':
@@ -8599,15 +8649,16 @@ def register_all(wl) -> None:
     _reg('open', _bi_open)
 
     def _bi_display_modules(goal, eng):
-        """display_modules — print info about all known modules."""
+        """display_modules — print info about all known modules (to stderr)."""
+        import sys
         for name, mod in sorted(wl.module_table.items()):
             opens = [m.module_name for m in mod.open_modules
                      if m.module_name not in ('bi', 'syntax')]
             sym_count = len(mod.symbol_table)
             if opens:
-                print(f"Module '{name}': {sym_count} symbols, opens {opens}")
+                sys.stderr.write(f"Module '{name}': {sym_count} symbols, opens {opens}\n")
             else:
-                print(f"Module '{name}': {sym_count} symbols")
+                sys.stderr.write(f"Module '{name}': {sym_count} symbols\n")
         return True
     _reg('display_modules', _bi_display_modules)
 

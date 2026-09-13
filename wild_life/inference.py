@@ -1574,6 +1574,60 @@ class Engine:
                     self.goal_count += 1
                     success = self.unify_aim()
 
+                elif gtype == GoalType.BIND_DIRECT:
+                    # Disjunction expansion choice point: directly bind the
+                    # disjunction psi-term (aim.a) to the alternative (aim.b)
+                    # without going through full unification (which would trigger
+                    # spurious cross-product for nested disjunctions).
+                    # IMPORTANT: use aim.a directly (NOT deref'd) because
+                    # backtracking restored aim.a.coref to None — aim.a is the
+                    # disjunction node we always bind element-by-element.
+                    self.goal_stack = self.aim.next
+                    self.goal_count += 1
+                    _bd_u = self.aim.a   # the disjunction psi-term (not deref'd)
+                    _bd_v = self.aim.b   # the next alternative element
+                    if _bd_u is not None:
+                        _bd_v_d = _bd_v.deref() if _bd_v is not None else _bd_v
+                        # Try arithmetic evaluation on the alternative: if alt is
+                        # a ground arithmetic expression (e.g. 1+2, A+5 with A=5),
+                        # evaluate it and memoize the result so that deref through
+                        # the disjunction node gives the concrete number directly.
+                        _bd_val = _bd_v_d
+                        if (_bd_v_d is not None and not getattr(self, 'no_arith_eval', False)
+                                and _bd_v_d.type is not None and _bd_v_d.type.keyword is not None):
+                            _bd_sym = _bd_v_d.type.keyword.symbol
+                            _bd_arith_ops = frozenset(('+', '-', '*', '/', '//', 'mod',
+                                                        '**', '^', 'max', 'min',
+                                                        '/\\', '\\/', 'xor', '>>', '<<'))
+                            if _bd_sym in _bd_arith_ops:
+                                try:
+                                    from wild_life.built_ins import (
+                                        _eval_arith as _bd_ea, _make_number as _bd_mn)
+                                    _bd_ok, _bd_num_v = _bd_ea(_bd_v_d, self)
+                                    if _bd_ok:
+                                        _bd_num = _bd_mn(self, _bd_num_v)
+                                        _bd_val = _bd_num
+                                        # Memoize into the arithmetic term
+                                        if _bd_v_d.coref is None and _bd_v_d.value is None and _bd_v_d.attr_list:
+                                            self.trail.trail_psi(_bd_v_d, 'coref')
+                                            _bd_v_d.coref = _bd_num
+                                except Exception:
+                                    pass
+                        self.unifier.trail.trail_psi(_bd_u, 'coref')
+                        _bd_u.coref = _bd_val
+                        self.unifier._wakeup_resid(_bd_u, _bd_u)
+                        # Fire sort-level delay rules (:: SortName | goal) when the
+                        # disjunction node gets bound to a sort-typed term.
+                        _bd_val_canon = _bd_val.deref() if _bd_val is not None else None
+                        from wild_life.runtime import WL as _bd_WL
+                        if (_bd_WL.delay_rules and _bd_val_canon is not None
+                                and _bd_val_canon.type is not None
+                                and _bd_val_canon.type is not _bd_WL.top
+                                and not getattr(_bd_val_canon, '_delay_fired', False)):
+                            _bd_val_canon._delay_fired = True
+                            self.unifier._fire_delay_rules(_bd_val_canon, _bd_val_canon.type)
+                    success = True
+
                 elif gtype == GoalType.UNIFY_NOEVAL:
                     self.goal_stack = self.aim.next
                     self.goal_count += 1

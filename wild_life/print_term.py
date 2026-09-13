@@ -714,6 +714,41 @@ def _find_named_tail(start_cell, pointer_names: dict, wl, t_type) -> str | None:
         cur = arg2
 
 
+def _find_improper_tail(start_cell, pointer_names: dict, wl, t_type):
+    """Find the actual tail PsiTerm of a list starting from start_cell.
+
+    Returns (kind, value) where kind is:
+      'named'    — a named shared variable; value is the name string
+      'improper' — a non-nil non-cons tail; value is the PsiTerm
+      'proper'   — list ends at nil; value is None
+      'cycle'    — pure structural cycle with no exit; value is None
+    """
+    cur = start_cell
+    seen_ids: set = set()
+    while True:
+        cid = id(cur)
+        if cid in seen_ids:
+            return ('cycle', None)
+        seen_ids.add(cid)
+        arg1, arg2 = _get_two_args(cur.attr_list)
+        if arg2 is None:
+            return ('proper', None)
+        arg2 = arg2.deref()
+        arg2_id = id(arg2)
+        # Named variable (shared pointer) as tail?
+        if arg2_id in pointer_names and pointer_names[arg2_id]:
+            return ('named', pointer_names[arg2_id])
+        # Nil tail?
+        if (arg2.type == wl.nil and not arg2.attr_list):
+            return ('proper', None)
+        if wl.disj_nil and arg2.type == wl.disj_nil and not arg2.attr_list:
+            return ('proper', None)
+        # Improper (non-cons) tail?
+        if not _check_legal_cons(arg2, t_type):
+            return ('improper', arg2)
+        cur = arg2
+
+
 def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
     """Pretty-print a list or disjunction with column-aware wrapping.
 
@@ -796,11 +831,15 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
             if not first_f:
                 flat_ps.write(sep)   # comma before "..."
             flat_ps.write("...")
-            # If remaining list has a named variable tail (e.g. cyclic B), show "|B"
-            named_tail = _find_named_tail(t_walk, flat_ps.pointer_names, wl, t_type)
-            if named_tail:
+            # If remaining list has an improper/cyclic tail, show "|tail"
+            # C Wild Life always shows the tail even when depth is exhausted.
+            tail_kind, tail_val = _find_improper_tail(t_walk, flat_ps.pointer_names, wl, t_type)
+            if tail_kind == 'named':
                 flat_ps.write("|")
-                flat_ps.write(named_tail)
+                flat_ps.write(tail_val)
+            elif tail_kind == 'improper':
+                flat_ps.write("|")
+                _pretty_tag_or_psi_term(flat_ps, tail_val, MAX_PRECEDENCE + 1, depth)
             done_f = True
             break
         arg1, arg2 = _get_two_args(t_walk.attr_list)
@@ -853,10 +892,14 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
             if not first2:
                 ps.write(sep)   # comma before "..."
             ps.write("...")
-            named_tail2 = _find_named_tail(t_walk2, ps.pointer_names, wl, t_type)
-            if named_tail2:
+            # If remaining list has an improper/cyclic tail, show "|tail"
+            tail_kind2, tail_val2 = _find_improper_tail(t_walk2, ps.pointer_names, wl, t_type)
+            if tail_kind2 == 'named':
                 ps.write("|")
-                ps.write(named_tail2)
+                ps.write(tail_val2)
+            elif tail_kind2 == 'improper':
+                ps.write("|")
+                _pretty_tag_or_psi_term(ps, tail_val2, MAX_PRECEDENCE + 1, depth)
             done2 = True
             break
         arg1, arg2 = _get_two_args(t_walk2.attr_list)
@@ -933,15 +976,26 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
         return
     t = t.deref()
 
-    # Note: arithmetic evaluation during display is now handled by memoization
-    # in _try_eval_arith_to_term (built_ins.py) during unification.
-    # When a strict predicate evaluates an arithmetic expression, the result is
-    # stored back into the expression's coref so that display via deref shows the
-    # computed value.  Expressions that were never evaluated (e.g. sort constraints
-    # via X:T) stay as structural terms and are displayed unevaluated.
-    # The old _eval_pure_arith block here was removed to avoid evaluating sort-
-    # constraint expressions (assert4: X:(1+2) should show "X = 1 + 2." not "X = 3.").
     _psym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+
+    # Evaluate ground arithmetic expressions during display when both operands
+    # are concrete (e.g. A+5 where A=5 becomes 10, bagof results, etc.).
+    # Skip terms with NON_STRICT_TERM flag — those are sort-constraint expressions
+    # (X:(1+2)) that must stay unevaluated.
+    _arith_syms_display = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+                                      'max', 'min', 'abs', 'sqrt', 'floor', 'ceiling',
+                                      '/\\', '\\/', 'xor', '>>', '<<'))
+    if (_psym in _arith_syms_display and t.value is None and t.attr_list):
+        from wild_life.data_structures import NON_STRICT_TERM as _NST_DISP
+        if not (t.flags & _NST_DISP):
+            _arith_val = _eval_pure_arith(t, wl)
+            if _arith_val is not None:
+                # Display as the evaluated number
+                _num_t = PsiTerm()
+                _num_t.type = wl.integer if (isinstance(_arith_val, float) and _arith_val == int(_arith_val)) or isinstance(_arith_val, int) else wl.real
+                _num_t.value = int(_arith_val) if (isinstance(_arith_val, float) and _arith_val == int(_arith_val)) else _arith_val
+                _print_value(ps, _num_t, wl)
+                return
 
     # Evaluate copy_term(X) functional use during printing
     if (_psym == 'copy_term' and t.value is None and
@@ -1049,13 +1103,19 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
         if ps.print_depth == 0 or depth + 1 < ps.print_depth:
             args_written = _pretty_psi_with_ops(ps, t, sprec, depth + 1)
         if not args_written:
-            _print_symbol_q(ps, t.type.keyword if t.type else None)
+            _kw = t.type.keyword if t.type else None
+            # Use module-qualified name for sorts defined in non-user/bi/syntax modules
+            if (_kw is not None and hasattr(_kw, 'module') and _kw.module is not None
+                    and _kw.module.module_name not in ('user', 'bi', 'syntax', '')):
+                _print_symbol_quoted(ps, _kw.combined_name, ps.const_quote)
+            else:
+                _print_symbol_q(ps, _kw)
 
     if not args_written and t.attr_list:
         if ps.print_depth > 0 and depth + 1 >= ps.print_depth:
             ps.write("(...)")
         else:
-            _pretty_attr(ps, t.attr_list, depth + 1, wl)
+            _pretty_attr(ps, t.attr_list, depth + 1, wl, parent_type=t.type)
 
     _maybe_resid(ps, t)
 
@@ -1126,12 +1186,22 @@ def _print_value(ps: PrintState, t: 'PsiTerm', wl) -> None:
     ps.write(repr(t.value))
 
 
-def _render_one_attr(ps: PrintState, k: str, v, depth: int, cnt: list, wl) -> None:
+def _render_one_attr(ps: PrintState, k: str, v, depth: int, cnt: list, wl,
+                     parent_type=None) -> None:
     """Render a single key=>value attribute pair into ps."""
     iv = _str_to_int(k)
     if iv < 0:
-        # Named feature
-        _print_symbol_quoted(ps, k, ps.const_quote)
+        # Named feature: check if private_feature → use module-qualified name
+        display_k = k
+        if (parent_type is not None and parent_type.keyword is not None
+                and parent_type.keyword.module is not None
+                and parent_type.keyword.module.module_name not in ('user', 'bi', 'syntax', '')):
+            mod = parent_type.keyword.module
+            kw_defn = mod.symbol_table.get(k)
+            if (kw_defn is not None and kw_defn.keyword is not None
+                    and kw_defn.keyword.private_feature):
+                display_k = f"{mod.module_name}#{k}"
+        _print_symbol_quoted(ps, display_k, ps.const_quote)
         ps.write(" => ")
     elif iv == cnt[0]:
         cnt[0] += 1
@@ -1145,12 +1215,15 @@ def _render_one_attr(ps: PrintState, k: str, v, depth: int, cnt: list, wl) -> No
         ps.write("<null>")
 
 
-def _pretty_attr(ps: PrintState, attr_list: dict, depth: int, wl) -> None:
+def _pretty_attr(ps: PrintState, attr_list: dict, depth: int, wl,
+                 parent_type=None) -> None:
     """Print attribute list in parenthesized form, with column-aware wrapping.
 
     If the flat representation fits on the current line it is printed inline.
     Otherwise each attribute is placed on its own line, indented to align with
     the first attribute (one past the opening parenthesis).
+    parent_type: optional Definition of the enclosing term's type, used to
+                 look up private_feature status of named attributes.
     """
     import io
     from wild_life.data_structures import featcmp_key
@@ -1177,7 +1250,7 @@ def _pretty_attr(ps: PrintState, attr_list: dict, depth: int, wl) -> None:
         if not first_f:
             flat_ps.write(",")
         first_f = False
-        _render_one_attr(flat_ps, k, attr_list[k], depth, cnt_f, wl)
+        _render_one_attr(flat_ps, k, attr_list[k], depth, cnt_f, wl, parent_type)
     flat_ps.write(")")
     flat_str = flat_buf.getvalue()
 
@@ -1198,7 +1271,7 @@ def _pretty_attr(ps: PrintState, attr_list: dict, depth: int, wl) -> None:
             ps.write("\n")
             ps.write(" " * indent_col)
         first = False
-        _render_one_attr(ps, k, attr_list[k], depth, cnt, wl)
+        _render_one_attr(ps, k, attr_list[k], depth, cnt, wl, parent_type)
     ps.write(")")
 
 
