@@ -1522,8 +1522,8 @@ def bi_print_depth(goal: PsiTerm, eng) -> bool:
         if n < 0:
             # Negative argument: print error, reset to unlimited.
             pd = wl.print_depth
-            if pd == 0 or pd == 1:
-                # pd=0 (unlimited) or pd=1: the arg would appear truncated at depth 1
+            if pd <= 1:
+                # pd=1 means output would be truncated at top level → show "..."
                 arg_str = "..."
             else:
                 import io
@@ -1534,7 +1534,7 @@ def bi_print_depth(goal: PsiTerm, eng) -> bool:
             sys.stderr.write(
                 f"*** Error: argument in print_depth({arg_str}) must be positive or zero.\n"
             )
-            wl.print_depth = 0  # reset to unlimited
+            wl.print_depth = 4  # reset to C Wild Life default (4)
             return True
         else:
             # N >= 0: show N levels of args (root + N levels = N+1 levels total).
@@ -1695,6 +1695,7 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
             else:
                 _evaled_arg = _try_eval_string_func(_vd, eng)
                 t_pre.attr_list[_k] = _evaled_arg if _evaled_arg is not None else _vd
+        _cp_save = eng.choice_stack  # Save choice stack before user-func unification
         for _ri, (h0, b0) in enumerate(active):
             _vm: dict = {}
             head = copy_term(h0, _vm)
@@ -1714,16 +1715,20 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
             # Handle conditional: body = (value | condition) — skip if conditioned
             if body_d.type is not None and body_d.type is wl.such_that:
                 continue  # Can't evaluate conditionals without engine; skip
-            # Unify head with pre-evaluated copy of t to bind arguments
+            # Unify head with pre-evaluated copy of t to bind arguments.
+            # Unifying with disjunction terms may create orphaned choice points;
+            # restore the choice stack afterward to discard them.
             mark = eng.trail.mark()
             ok = eng.unifier.unify(t_pre, head)
             if ok:
                 result = _eval_arith(body_d, eng, _depth + 1)
                 eng.trail.undo_to(mark)
+                eng.choice_stack = _cp_save  # Discard any orphaned choice points
                 if result[0]:
                     return result
                 # Evaluation failed; try next rule
             eng.trail.undo_to(mark)
+            eng.choice_stack = _cp_save  # Discard any orphaned choice points
 
     # Feature access: T.F → evaluate as arithmetic if possible
     if sym == '.':
