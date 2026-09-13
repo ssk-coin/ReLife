@@ -3827,6 +3827,29 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     if _te_a is not None:
         return _unify(eng, b_d, _te_a)
 
+    # Fail if either side contains {} (bottom / empty disjunction = disj_nil).
+    # A term containing bottom has no solutions, so the unification fails.
+    # This handles cases like A=g(s,{}) or A=s(g(t,{})) where {} makes the
+    # whole term undefined/bottom.
+    _wl_bi_dn = eng.wl
+    def _has_disj_nil(t, _depth=0):
+        if _depth > 8:
+            return False
+        td = t.deref()
+        if td.type is _wl_bi_dn.disj_nil:
+            return True
+        # Do NOT descend into non-empty disjunction nodes — their tail IS a
+        # disj_nil sentinel (the linked-list end), which is normal and should
+        # not trigger failure.  Only a standalone {} at argument level fails.
+        if td.type is _wl_bi_dn.disjunction:
+            return False
+        for _v in td.attr_list.values():
+            if _has_disj_nil(_v, _depth + 1):
+                return True
+        return False
+    if (a_d.type is not None and _has_disj_nil(a_d)) or (b_d.type is not None and _has_disj_nil(b_d)):
+        return False
+
     # Try to evaluate b as a user-defined function call (f -> result style).
     # EXCEPTION: 0-arity user functions (global variables like `result` declared
     # with `persistent` or `setq`) are handled later by direct synchronous
@@ -3946,17 +3969,25 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         _ftype = _functor_val.type
         if _ftype is None:
             return None
-        # If functor is a non-frozen arithmetic operator (no NON_STRICT_TERM), refuse
-        # partial application — it's an eager operator, not a function value.
-        # Frozen operators (`+`, `*`, etc.) carry NON_STRICT_TERM and are allowed.
+        # If functor is a non-frozen arithmetic operator (no NON_STRICT_TERM), allow
+        # full application (where the apply node supplies all required args) but refuse
+        # zero-arg invocations.  We count the non-functor keys in rhs.attr_list to decide:
+        # if there is at least one arg being passed, proceed and let the arithmetic
+        # evaluator handle the result (e.g. +(1,2)→3).  If no args at all, refuse.
+        # This allows `F={(+);(-)}, C=F(A,B)` to work while still rejecting bare `(+)`
+        # when applied to nothing.
         from wild_life.data_structures import NON_STRICT_TERM as _BI_APPLY_NST_CHK  # noqa: F811
         _fval_sym = _ftype.keyword.symbol if _ftype.keyword else ''
         if (_fval_sym in _ARITH_OPS_SET
                 and not (_functor_val.flags & _BI_APPLY_NST_CHK)
                 and not _functor_val.attr_list):  # bare arithmetic operator (no args yet)
-            import sys as _sys_apply
-            _sys_apply.stderr.write(f'*** Error: attempt to unify with curried function {_fval_sym}\n')
-            return False
+            # Count args being supplied by the apply node (excluding the functor slot)
+            _supplied_args = sum(1 for k in rhs.attr_list if k != _functor_key)
+            if _supplied_args == 0:
+                import sys as _sys_apply
+                _sys_apply.stderr.write(f'*** Error: attempt to unify with curried function {_fval_sym}\n')
+                return False
+            # else: fall through — at least one arg supplied, allow full application
         call_psi = PsiTerm()
         call_psi.type = _ftype
         call_psi.value = None
@@ -4184,6 +4215,11 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     if a_is_var and b_d.type is not None and _term_contains_disjunction(b_d, eng):
         alts = _expand_term_disjunctions(b_d, eng)
         if len(alts) > 1:
+            # Evaluate embedded user function calls in each alternative in-place.
+            # This ensures s(f(1)) → s(1) rather than leaving f unevaluated.
+            # (e.g. A=s(f({1;2})) gives s(1) s(2), not s(f(1)) s(f(2)))
+            for _alt_ev in alts:
+                _eval_embedded_user_funcs(_alt_ev, eng, 0, set())
             for alt in reversed(alts[1:]):
                 eng.push_choice_point(GoalType.UNIFY, a_d, alt, None)
             return _unify(eng, a_d, alts[0])
