@@ -1144,6 +1144,32 @@ class Engine:
                 # recursive evaluation.
                 head_d = head.deref()
                 if head_d.attr_list:
+                    # If funct contains disjunction arguments, expand them at
+                    # the EVAL level BEFORE calling unify(funct, head).
+                    # Without this, BIND_DIRECT CPs pushed inside unify()
+                    # have incomplete goal_stacks (missing the PROVE(cond)
+                    # and UNIFY(val, result) goals pushed below), so cross-
+                    # product backtracking fails for e.g. b({3;4}) with
+                    # clause b(X) -> (X,Y) | Y={1;2}.
+                    from wild_life.built_ins import (
+                        _term_contains_disjunction as _st_tcd,
+                        _expand_term_disjunctions  as _st_etd,
+                    )
+                    if _st_tcd(funct, self):
+                        _st_alts = _st_etd(funct, self)
+                        if len(_st_alts) > 1:
+                            for _st_alt in reversed(_st_alts[1:]):
+                                self.push_choice_point(GoalType.EVAL, _st_alt, result, active)
+                            funct = _st_alts[0]
+                            _vm_st: dict = {}
+                            head = copy_term(head_orig, _vm_st)
+                            body = copy_term(body_orig, _vm_st)
+                            body_d = body.deref()
+                            val_part  = body_d.attr_list.get('1')
+                            cond_part = body_d.attr_list.get('2')
+                            if val_part is None or cond_part is None:
+                                return False
+                            head_d = head.deref()
                     mark = self.trail.mark()
                     ok = self.unifier.unify(funct, head)
                     if not ok:
@@ -1159,6 +1185,26 @@ class Engine:
                 self.push_goal(GoalType.UNIFY, val_part, result, None)
                 self.push_goal(GoalType.PROVE, _cond_d, _DEFRULES, None)
                 return True
+
+        # Expand disjunctions embedded in function arguments BEFORE pre-eval.
+        # This must happen first so that nested function calls like f2(f2({1;2}))
+        # push EVAL-level CPs (with the full continuation) rather than letting
+        # _eval_user_func_sync push inner CPs that miss the outer evaluation.
+        # e.g. f2(f2({1;2})) → push EVAL CP for f2(f2(2)), try f2(f2(1)) first.
+        # Then pre-eval evaluates inner calls on each alternative separately.
+        from wild_life.built_ins import _term_contains_disjunction, _expand_term_disjunctions
+        if _term_contains_disjunction(funct, self):
+            _alts = _expand_term_disjunctions(funct, self)
+            if len(_alts) > 1:
+                # Push choice points for alternatives 2..N (in reverse so first
+                # alternative is tried next, then 2nd, etc.)
+                for _alt in reversed(_alts[1:]):
+                    self.push_choice_point(GoalType.EVAL, _alt, result, active)
+                funct = _alts[0]
+                # Recompute fresh head/body copies for the first alternative
+                _vm = {}
+                head = copy_term(head_orig, _vm)
+                body = copy_term(body_orig, _vm)
 
         # Pre-evaluate any function call arguments in funct.
         # This enables patterns like f(g(x)) where g(x) needs to be evaluated
@@ -1182,26 +1228,6 @@ class Engine:
                     _evaled = _try_eval_arith_to_term(_attr, self)
                     if _evaled is not None:
                         funct.attr_list[_key] = _evaled
-
-        # Expand disjunctions embedded in function arguments.
-        # e.g. f(s({1;2;3})) → try f(s(1)), then f(s(2)), then f(s(3)).
-        # Push choice points for alternatives 2..N before trying alt 1.
-        from wild_life.built_ins import _term_contains_disjunction, _expand_term_disjunctions
-        if _term_contains_disjunction(funct, self):
-            _alts = _expand_term_disjunctions(funct, self)
-            if len(_alts) > 1:
-                # Push choice points for alternatives 2..N (in reverse so first
-                # alternative is tried next, then 2nd, etc.)
-                for _alt in reversed(_alts[1:]):
-                    _vm2: dict = {}
-                    _h2 = copy_term(head_orig, _vm2)
-                    _b2 = copy_term(body_orig, _vm2)
-                    self.push_choice_point(GoalType.EVAL, _alt, result, active)
-                funct = _alts[0]
-                # Recompute fresh head/body copies for the first alternative
-                _vm = {}
-                head = copy_term(head_orig, _vm)
-                body = copy_term(body_orig, _vm)
 
         # Arity check: if head has feature keys not present in funct, this rule
         # requires arguments that the call doesn't provide.  Skip the rule —

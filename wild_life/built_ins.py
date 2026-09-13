@@ -3827,6 +3827,29 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     if _te_a is not None:
         return _unify(eng, b_d, _te_a)
 
+    # Fail if either side contains {} (bottom / empty disjunction = disj_nil).
+    # A term containing bottom has no solutions, so the unification fails.
+    # This handles cases like A=g(s,{}) or A=s(g(t,{})) where {} makes the
+    # whole term undefined/bottom.
+    _wl_bi_dn = eng.wl
+    def _has_disj_nil(t, _depth=0):
+        if _depth > 8:
+            return False
+        td = t.deref()
+        if td.type is _wl_bi_dn.disj_nil:
+            return True
+        # Do NOT descend into non-empty disjunction nodes — their tail IS a
+        # disj_nil sentinel (the linked-list end), which is normal and should
+        # not trigger failure.  Only a standalone {} at argument level fails.
+        if td.type is _wl_bi_dn.disjunction:
+            return False
+        for _v in td.attr_list.values():
+            if _has_disj_nil(_v, _depth + 1):
+                return True
+        return False
+    if (a_d.type is not None and _has_disj_nil(a_d)) or (b_d.type is not None and _has_disj_nil(b_d)):
+        return False
+
     # Try to evaluate b as a user-defined function call (f -> result style).
     # EXCEPTION: 0-arity user functions (global variables like `result` declared
     # with `persistent` or `setq`) are handled later by direct synchronous
@@ -4184,6 +4207,11 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     if a_is_var and b_d.type is not None and _term_contains_disjunction(b_d, eng):
         alts = _expand_term_disjunctions(b_d, eng)
         if len(alts) > 1:
+            # Evaluate embedded user function calls in each alternative in-place.
+            # This ensures s(f(1)) → s(1) rather than leaving f unevaluated.
+            # (e.g. A=s(f({1;2})) gives s(1) s(2), not s(f(1)) s(f(2)))
+            for _alt_ev in alts:
+                _eval_embedded_user_funcs(_alt_ev, eng, 0, set())
             for alt in reversed(alts[1:]):
                 eng.push_choice_point(GoalType.UNIFY, a_d, alt, None)
             return _unify(eng, a_d, alts[0])
