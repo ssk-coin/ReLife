@@ -1175,6 +1175,28 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
             raise _WriteFailure("conjunction failed")
         t = evaluated
 
+    # ── eval(Expr): force evaluation even in non-strict (write) context ─────
+    # write/writeq are non-strict predicates: their arguments carry the
+    # NON_STRICT_TERM flag which normally suppresses arithmetic evaluation.
+    # eval(Expr) explicitly requests evaluation regardless of that flag.
+    # We handle it here, before the NON_STRICT_TERM check below.
+    _sym_early = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+    if _sym_early == 'eval':
+        _a1_eval = t.attr_list.get('1')
+        if _a1_eval is not None:
+            _a1d_eval = _a1_eval.deref()
+            # Unwrap backtick if present (eval(`Expr) evaluates Expr)
+            _a1_sym = (_a1d_eval.type.keyword.symbol
+                       if _a1d_eval.type and _a1d_eval.type.keyword else '')
+            if _a1_sym == '`':
+                _inner_eval = _a1d_eval.attr_list.get('1')
+                if _inner_eval is not None:
+                    _a1d_eval = _inner_eval.deref()
+            _eval_ok, _eval_v = _eval_arith(_a1d_eval, eng)
+            if _eval_ok:
+                t = _make_number(eng, _eval_v)
+            # else: evaluation failed → fall through and print term as-is
+
     # ── copy_term(X) functional use at top level ────────────────────────────
     if _is_copy_term_func(t):
         t = _eval_copy_term_func(t)
