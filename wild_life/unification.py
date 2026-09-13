@@ -446,7 +446,9 @@ class Unifier:
                 # SAME psi-term as the head attribute, so binding v → elem[0] makes all
                 # body references deref to elem[0].  u is then bound to v so that the
                 # top-level query variable also dereferences correctly.
-                if not v_is_var and v.type is WL.disjunction and self.engine is not None:
+                if (not v_is_var and v.type is WL.disjunction
+                        and v.attr_list  # bare disj type markers have no elements
+                        and self.engine is not None):
                     from wild_life.built_ins import _collect_disjunction as _cdisj
                     _elems = _cdisj(v, self.engine)
                     if not _elems:

@@ -55,7 +55,7 @@ def title(quiet: bool = False) -> None:
 #   bindings_str - formatted variable bindings string (e.g. "A = 1, B = 2.")
 #   cs_before    - choice_stack BEFORE proving (for restoring on pop)
 #   var_tree     - the variable tree for this query (to merge at deeper levels)
-Frame = namedtuple('Frame', ['pre_mark', 'bindings_str', 'cs_before', 'var_tree'])
+Frame = namedtuple('Frame', ['pre_mark', 'bindings_str', 'cs_before', 'var_tree', 'saved_pd'])
 
 
 def _prompt(depth: int, module_name: str = "") -> str:
@@ -73,12 +73,13 @@ def _prompt(depth: int, module_name: str = "") -> str:
     return module_name + "--" * depth + str(depth) + "> "
 
 
-def _format_bindings(var_tree: dict, engine, extra_var_trees=None) -> str:
+def _format_bindings(var_tree: dict, engine, extra_var_trees=None, forced_pd=None) -> str:
     """Format all named variables as a single-line string like 'A = 1, B = 2.'
 
     Returns empty string if there are no named variables (or all anonymous).
     If extra_var_trees is a list of additional var_tree dicts, they are merged
     in (for nested constraint sessions showing accumulated bindings).
+    If forced_pd is given, use that print_depth instead of the current setting.
     """
     from wild_life.print_term import print_variables
 
@@ -94,7 +95,10 @@ def _format_bindings(var_tree: dict, engine, extra_var_trees=None) -> str:
         return ""
 
     from wild_life.print_term import PRINT_DEPTH as _FMT_PRINT_DEPTH
-    _fmt_pd = getattr(engine.wl, 'print_depth', _FMT_PRINT_DEPTH) if engine and engine.wl else _FMT_PRINT_DEPTH
+    if forced_pd is not None:
+        _fmt_pd = forced_pd
+    else:
+        _fmt_pd = getattr(engine.wl, 'print_depth', _FMT_PRINT_DEPTH) if engine and engine.wl else _FMT_PRINT_DEPTH
     buf = io.StringIO()
     had_vars = print_variables(merged, outfile=buf, wl=engine.wl,
                                print_depth=_fmt_pd)
@@ -176,7 +180,11 @@ def run_repl(
     depth = 0
 
     def _pop_frame() -> str:
-        """Pop one depth level: undo trail, restore choice_stack, return parent bindings."""
+        """Pop one depth level: undo trail, restore choice_stack, return parent bindings.
+
+        NOTE: print_depth is NOT restored on pop — pd changes are global in C Wild Life,
+        not frame-local. The saved_pd in Frame is kept for informational purposes only.
+        """
         nonlocal depth
         if not frame_stack:
             return ""
@@ -237,12 +245,13 @@ def run_repl(
                     # At top level, blank just re-shows the prompt
                     _write_prompt(0)
                 else:
-                    # Pop one depth level
-                    parent_bindings = _pop_frame()
+                    # TRUE MODEL: *** Yes was already shown at frame-push time.
+                    # Blank at depth>0 shows *** No + parent bindings, then pops.
+                    parent_bindings = _pop_frame()   # depth becomes N-1, pd restored
                     sys.stdout.write("\n*** No\n")
                     if parent_bindings:
                         sys.stdout.write(parent_bindings + "\n")
-                    _write_prompt(depth)
+                    _write_prompt(depth)   # (N-1)> or > after pop
                 continue
 
             # ---- Period: exit ALL depth levels ----------------------------
@@ -403,13 +412,24 @@ def run_repl(
 
                 saved_noisy = engine.noisy
                 engine.noisy = False
+                # At depth > 0 there are accumulated bindings from outer frames on
+                # the trail (pre_mark > 0).  If cs_before is None (no active choice
+                # points), run() would call undo_to(0) on failure, wiping those
+                # outer bindings.  We prevent this by passing a sentinel ChoicePoint
+                # as cs_barrier: run() then skips undo_to(0) and the REPL's own
+                # undo_to(pre_mark) only removes the current query's bindings.
+                from wild_life.data_structures import ChoicePoint as _CP_sentinel
+                _cs_barrier = cs_before
+                if depth > 0 and cs_before is None:
+                    _cs_barrier = _CP_sentinel(undo_point=pre_mark,
+                                               goal_stack=None, next=None)
                 try:
-                    # Pass cs_before as barrier so this fresh query does NOT
+                    # Pass _cs_barrier so this fresh query does NOT
                     # backtrack into choice points from enclosing (outer) queries.
-                    # At depth=0 cs_before is None (no barrier), which is fine.
+                    # At depth=0 with no outer choices, cs_before is None (no barrier).
                     # 現在の行番号をランタイムに保存 (エラーメッセージで "near line N" に使用)
                     WL.line_count = repl_line_number
-                    success = engine.prove(term, cs_barrier=cs_before)
+                    success = engine.prove(term, cs_barrier=_cs_barrier)
                 except HaltException:
                     return 0
                 except AbortException as _ae:
@@ -459,16 +479,20 @@ def run_repl(
                     # (not just inherited from parent frames)
                     own_bindings_str = _format_bindings(var_tree, engine)
                     if own_bindings_str or has_new_choices:
-                        # Query has own bindings or new choice points → enter a new depth level
-                        # Compute the merged display string (including parent frames' vars)
+                        # Query has own bindings or new choice points → enter a new depth level.
+                        # TRUE MODEL: compute bindings at current print_depth, save pd in Frame,
+                        # then immediately write *** Yes + bindings + prompt at the new depth.
                         parent_var_trees = [f.var_tree for f in frame_stack if f.var_tree]
                         bindings_str = _format_bindings(var_tree, engine,
                                                         extra_var_trees=parent_var_trees)
-                        frame_stack.append(Frame(pre_mark, bindings_str, cs_before, var_tree))
+                        saved_pd = engine.wl.print_depth
+                        frame_stack.append(Frame(pre_mark, bindings_str, cs_before, var_tree, saved_pd))
                         depth += 1
+                        # TRUE MODEL: write *** Yes + bindings + prompt immediately on frame push.
                         sys.stdout.write("\n*** Yes\n")
                         if bindings_str:
                             sys.stdout.write(bindings_str + "\n")
+                        _write_prompt(depth)
                     else:
                         # No own variables, no choice points → stay at current depth, undo trail
                         engine.trail.undo_to(pre_mark)
@@ -482,7 +506,7 @@ def run_repl(
                                                           extra_var_trees=parent_var_trees)
                             if merged_str:
                                 sys.stdout.write(merged_str + "\n")
-                    _write_prompt(depth)
+                        _write_prompt(depth)
                 else:
                     # Failure: undo failed attempt
                     engine.trail.undo_to(pre_mark)
