@@ -246,9 +246,11 @@ def run_repl(
                     _write_prompt(0)
                 else:
                     # TRUE MODEL: *** Yes was already shown at frame-push time.
-                    # Blank at depth>0 shows only *** No then pops to parent depth.
-                    _pop_frame()           # depth becomes N-1, pd restored
+                    # Blank at depth>0 shows *** No + parent bindings, then pops.
+                    parent_bindings = _pop_frame()   # depth becomes N-1, pd restored
                     sys.stdout.write("\n*** No\n")
+                    if parent_bindings:
+                        sys.stdout.write(parent_bindings + "\n")
                     _write_prompt(depth)   # (N-1)> or > after pop
                 continue
 
@@ -410,13 +412,24 @@ def run_repl(
 
                 saved_noisy = engine.noisy
                 engine.noisy = False
+                # At depth > 0 there are accumulated bindings from outer frames on
+                # the trail (pre_mark > 0).  If cs_before is None (no active choice
+                # points), run() would call undo_to(0) on failure, wiping those
+                # outer bindings.  We prevent this by passing a sentinel ChoicePoint
+                # as cs_barrier: run() then skips undo_to(0) and the REPL's own
+                # undo_to(pre_mark) only removes the current query's bindings.
+                from wild_life.data_structures import ChoicePoint as _CP_sentinel
+                _cs_barrier = cs_before
+                if depth > 0 and cs_before is None:
+                    _cs_barrier = _CP_sentinel(undo_point=pre_mark,
+                                               goal_stack=None, next=None)
                 try:
-                    # Pass cs_before as barrier so this fresh query does NOT
+                    # Pass _cs_barrier so this fresh query does NOT
                     # backtrack into choice points from enclosing (outer) queries.
-                    # At depth=0 cs_before is None (no barrier), which is fine.
+                    # At depth=0 with no outer choices, cs_before is None (no barrier).
                     # 現在の行番号をランタイムに保存 (エラーメッセージで "near line N" に使用)
                     WL.line_count = repl_line_number
-                    success = engine.prove(term, cs_barrier=cs_before)
+                    success = engine.prove(term, cs_barrier=_cs_barrier)
                 except HaltException:
                     return 0
                 except AbortException as _ae:

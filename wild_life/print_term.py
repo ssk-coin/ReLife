@@ -1248,8 +1248,13 @@ def term_to_string(t: Optional['PsiTerm'], quoted: bool = True,
 def write_term(t: Optional['PsiTerm'], outfile: IO = None,
                quoted: bool = True, print_depth: int = PRINT_DEPTH,
                var_tree: dict = None, wl=None, canonical: bool = False,
-               no_arith_eval: bool = False) -> None:
-    """Write a term to outfile (default stdout)."""
+               no_arith_eval: bool = False, max_col: int = MAX_COL) -> None:
+    """Write a term to outfile (default stdout).
+
+    max_col: column limit for line-wrapping (default MAX_COL=79).
+             Pass a very large value (e.g. 1_000_000) to suppress wrapping
+             and produce a single-line compact output (used by makestr).
+    """
     if wl is None:
         from wild_life.runtime import WL as wl
     if outfile is None:
@@ -1260,6 +1265,7 @@ def write_term(t: Optional['PsiTerm'], outfile: IO = None,
     ps.write_canon = canonical
     ps.no_arith_eval = no_arith_eval
     ps.indent = False
+    ps.max_col = max_col
 
     vt = var_tree or {}
     ps.go_through(t, vt)
@@ -1355,7 +1361,9 @@ def print_variables(var_tree: dict, outfile: IO = None,
     total_len = sum(len(n) + 3 + len(v) for n, v in binding_strs)
     total_len += 2 * (len(binding_strs) - 1)   # ", " between bindings
     total_len += 1                              # "." at end
-    multi_line = total_len > ps.max_col or any('\n' in v for _, v in binding_strs)
+    # C Wild Life uses an 80-character line limit (not 79) for variable display.
+    _PRINT_VAR_COL = 80
+    multi_line = total_len > _PRINT_VAR_COL or any('\n' in v for _, v in binding_strs)
 
     # ── Emit ──────────────────────────────────────────────────────────────────
     for i, (name, val_str) in enumerate(binding_strs):
