@@ -33,7 +33,7 @@ Options
   -j N, --jobs N      Run N tests in parallel (default: 1).
   --test-dir DIR      Directory containing the test suite (default: tests_original).
   --log FILE          Write a summary log to FILE (like check.log).
-  --timeout SECS      Per-test timeout in seconds (default: 30).
+  --timeout SECS      Per-test timeout in seconds (default: 20).
 """
 
 from __future__ import annotations
@@ -239,8 +239,8 @@ def main(argv=None) -> int:
         help="Write summary log to FILE.",
     )
     parser.add_argument(
-        "--timeout", type=int, default=30, metavar="SECS",
-        help="Per-test timeout in seconds (default: 30).",
+        "--timeout", type=int, default=20, metavar="SECS",
+        help="Per-test timeout in seconds (default: 20).",
     )
     args = parser.parse_args(argv)
 
