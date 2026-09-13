@@ -1123,6 +1123,49 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
     var_tree = getattr(eng, '_last_var_tree', None)
     wl = eng.wl if eng else None
 
+    # ── backtick-quoted term: strip ONE outer backtick ──────────────────────
+    # write(`expr) prints the inner expr without the backtick.
+    # Inner backtick-quoted subterms keep their backtick during recursive printing.
+    # When backtick is stripped, pass directly to the printer with no_arith_eval=True,
+    # bypassing the disj_nil/bottom-type check (write(`{}) must print "{}", not fail).
+    if (t.type is not None and t.type.keyword is not None
+            and t.type.keyword.symbol == '`'):
+        inner = t.attr_list.get('1')
+        if inner is not None:
+            from wild_life.print_term import write_term as _wt
+            _pd = getattr(eng.wl, 'print_depth', None) if eng and eng.wl else None
+            from wild_life.print_term import PRINT_DEPTH as _PD
+
+            # Track this backtick as "directly written" so print_variables can strip it.
+            _wl = eng.wl if eng else None
+            if _wl is not None:
+                if not hasattr(_wl, '_written_backtick_ids'):
+                    _wl._written_backtick_ids = set()
+                _wl._written_backtick_ids.add(id(t))
+
+            # Temporarily redirect vars pointing to this backtick → inner.
+            # This makes go_through treat the inner as self-referential (SHARED),
+            # so insert_variables correctly assigns the var's name to the inner term.
+            # Without this, the inner is only seen once → gets a generated name '_A'.
+            inner_deref = inner.deref()
+            tid = id(t)
+            redirect_pairs = []
+            for _vname, _vref in (var_tree or {}).items():
+                if _vref is not None and id(_vref.deref()) == tid:
+                    _old_coref = _vref.coref
+                    _vref.coref = inner_deref
+                    redirect_pairs.append((_vref, _old_coref))
+
+            try:
+                _wt(inner_deref, outfile=stream or __import__('sys').stdout,
+                    quoted=quoted, wl=eng.wl, var_tree=var_tree,
+                    print_depth=_pd if _pd is not None else _PD,
+                    no_arith_eval=True)
+            finally:
+                for _vref, _old_coref in redirect_pairs:
+                    _vref.coref = _old_coref
+            return
+
     # ── psi-term conjunction (&): evaluate before printing ──────────────────
     # writeq(`X & Y) should evaluate the conjunction and print the result.
     # If the conjunction fails, the predicate fails.
@@ -1131,6 +1174,28 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True) -> None:
         if evaluated is None:
             raise _WriteFailure("conjunction failed")
         t = evaluated
+
+    # ── eval(Expr): force evaluation even in non-strict (write) context ─────
+    # write/writeq are non-strict predicates: their arguments carry the
+    # NON_STRICT_TERM flag which normally suppresses arithmetic evaluation.
+    # eval(Expr) explicitly requests evaluation regardless of that flag.
+    # We handle it here, before the NON_STRICT_TERM check below.
+    _sym_early = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+    if _sym_early == 'eval':
+        _a1_eval = t.attr_list.get('1')
+        if _a1_eval is not None:
+            _a1d_eval = _a1_eval.deref()
+            # Unwrap backtick if present (eval(`Expr) evaluates Expr)
+            _a1_sym = (_a1d_eval.type.keyword.symbol
+                       if _a1d_eval.type and _a1d_eval.type.keyword else '')
+            if _a1_sym == '`':
+                _inner_eval = _a1d_eval.attr_list.get('1')
+                if _inner_eval is not None:
+                    _a1d_eval = _inner_eval.deref()
+            _eval_ok, _eval_v = _eval_arith(_a1d_eval, eng)
+            if _eval_ok:
+                t = _make_number(eng, _eval_v)
+            # else: evaluation failed → fall through and print term as-is
 
     # ── copy_term(X) functional use at top level ────────────────────────────
     if _is_copy_term_func(t):
@@ -5242,6 +5307,9 @@ def _collect_solutions(template: PsiTerm, g: PsiTerm, eng) -> list:
     eng.trail.undo_to(mark)
     eng.choice_stack = cp_save
     eng.goal_stack = gs_save
+    # C Wild Life collects solutions via LIFO (last-in-first-out) internally,
+    # yielding results in reverse exploration order.  Reverse here to match.
+    collected.reverse()
     return collected
 
 

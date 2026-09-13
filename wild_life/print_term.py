@@ -680,6 +680,40 @@ def _check_legal_cons(t: 'PsiTerm', t_type) -> bool:
     )
 
 
+def _find_named_tail(start_cell, pointer_names: dict, wl, t_type) -> str | None:
+    """Traverse list cons cells from start_cell to find a named-variable tail.
+
+    Used after list truncation: if the remaining (not-displayed) part of the
+    list ultimately ends at a named shared variable (e.g. a cyclic reference B),
+    return its name so it can be shown as '...|B'.  Returns None for finite lists
+    that end at nil, or for improper lists without a named tail.
+    """
+    cur = start_cell
+    seen_ids: set = set()
+    while True:
+        cid = id(cur)
+        if cid in seen_ids:
+            return None   # pure structural cycle with no named exit
+        seen_ids.add(cid)
+        arg1, arg2 = _get_two_args(cur.attr_list)
+        if arg2 is None:
+            return None
+        arg2 = arg2.deref()
+        arg2_id = id(arg2)
+        # Named variable (shared pointer) as tail?
+        if arg2_id in pointer_names and pointer_names[arg2_id]:
+            return pointer_names[arg2_id]
+        # Nil tail?
+        if (arg2.type == wl.nil and not arg2.attr_list):
+            return None
+        if wl.disj_nil and arg2.type == wl.disj_nil and not arg2.attr_list:
+            return None
+        # Improper (non-cons) tail?
+        if not _check_legal_cons(arg2, t_type):
+            return None
+        cur = arg2
+
+
 def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
     """Pretty-print a list or disjunction with column-aware wrapping.
 
@@ -711,7 +745,7 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
         cur = start
         list_depth = 0
         while True:
-            if ps.print_depth > 0 and list_depth >= ps.print_depth:
+            if ps.print_depth > 0 and depth + list_depth >= ps.print_depth:
                 yield None, None, True   # sentinel for "..."
                 return
             arg1, arg2 = _get_two_args(cur.attr_list)
@@ -741,6 +775,7 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
     flat_ps.print_depth = ps.print_depth
     flat_ps.const_quote = ps.const_quote
     flat_ps.write_resids = ps.write_resids
+    flat_ps.no_arith_eval = ps.no_arith_eval  # propagate frozen context
     flat_ps.pointer_names = ps.pointer_names
     flat_ps.printed_pointers = dict(ps.printed_pointers)
     flat_ps.col = ps.col + len(prefix_str)  # column just before '['
@@ -757,8 +792,15 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
     done_f = False
     t_walk = t
     while not done_f:
-        if ps.print_depth > 0 and list_depth_f >= ps.print_depth:
+        if ps.print_depth > 0 and depth + list_depth_f >= ps.print_depth:
+            if not first_f:
+                flat_ps.write(sep)   # comma before "..."
             flat_ps.write("...")
+            # If remaining list has a named variable tail (e.g. cyclic B), show "|B"
+            named_tail = _find_named_tail(t_walk, flat_ps.pointer_names, wl, t_type)
+            if named_tail:
+                flat_ps.write("|")
+                flat_ps.write(named_tail)
             done_f = True
             break
         arg1, arg2 = _get_two_args(t_walk.attr_list)
@@ -807,8 +849,14 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
     first2 = True
     done2 = False
     while not done2:
-        if ps.print_depth > 0 and list_depth2 >= ps.print_depth:
+        if ps.print_depth > 0 and depth + list_depth2 >= ps.print_depth:
+            if not first2:
+                ps.write(sep)   # comma before "..."
             ps.write("...")
+            named_tail2 = _find_named_tail(t_walk2, ps.pointer_names, wl, t_type)
+            if named_tail2:
+                ps.write("|")
+                ps.write(named_tail2)
             done2 = True
             break
         arg1, arg2 = _get_two_args(t_walk2.attr_list)
@@ -926,9 +974,9 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
         ps.write("[]")
         _maybe_resid(ps, t)
         return
-    # nil with extra attributes — print as [](...)
+    # nil with extra attributes — print as nil(...)
     if t.type == wl.nil and t.attr_list:
-        ps.write("[]")
+        ps.write("nil")
         _pretty_attr(ps, t.attr_list, depth + 1, wl)
         _maybe_resid(ps, t)
         return
@@ -943,17 +991,37 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
         _maybe_resid(ps, t)
         return
 
-    # Backtick-quoted term: `(expr) → print as expr (one level of backtick stripped).
-    # In Wild Life, `expr means "prevent evaluation"; when printing, the backtick
-    # is invisible — the inner term is displayed directly without arithmetic evaluation.
+    # Backtick-quoted term: `(expr).
+    # In Wild Life, `expr means "prevent evaluation".
+    # Two contexts:
+    # - Normal context (ps.no_arith_eval=False): the backtick is a sort annotation
+    #   set by the ':' operator (e.g. A:`{a,b,A}).  Strip the backtick and print just
+    #   the inner sort term.  Use _pretty_tag_or_psi_term so cycle-breaking works.
+    #   Expected: write(A:`{a,b,A}) → "A: {(a, b, A)}" (no backtick in sort display).
+    # - Frozen context (ps.no_arith_eval=True): inside a backtick-stripped outer term
+    #   (e.g. write(`{a,b|L:`{c,d,L,e}})).  Keep the backtick visible.
+    #   Expected: L → "L: (` {(c, d, L, e)})" (backtick visible with parens).
+    # Backtick is a prefix operator fy 200; add parentheses when context requires
+    # stricter precedence (e.g. named-variable colon context uses sprec=0).
     if (t.type is not None and t.type.keyword is not None
             and t.type.keyword.symbol == '`'):
         inner = t.attr_list.get('1')
         if inner is not None:
-            old_no_arith_eval = ps.no_arith_eval
-            ps.no_arith_eval = True
-            _pretty_psi_term(ps, inner.deref(), sprec, depth, wl)
-            ps.no_arith_eval = old_no_arith_eval
+            if not ps.no_arith_eval:
+                # Normal context: strip the backtick (sort annotation display).
+                # Use _pretty_tag_or_psi_term so cycle detection (printed_pointers)
+                # is honoured for inner terms that are named variables.
+                _pretty_tag_or_psi_term(ps, inner.deref(), sprec, depth + 1, wl)
+            else:
+                # Frozen context: keep the backtick visible.
+                _BACKTICK_PREC = 200  # fy 200 in Wild Life
+                surround = _BACKTICK_PREC >= sprec
+                if surround:
+                    ps.write("(")
+                ps.write("` ")
+                _pretty_tag_or_psi_term(ps, inner.deref(), MAX_PRECEDENCE + 1, depth + 1, wl)
+                if surround:
+                    ps.write(")")
             return
 
     # Sort-constrained variable: X:sort where sort ≠ @ and term is unbound.
@@ -1179,7 +1247,8 @@ def term_to_string(t: Optional['PsiTerm'], quoted: bool = True,
 
 def write_term(t: Optional['PsiTerm'], outfile: IO = None,
                quoted: bool = True, print_depth: int = PRINT_DEPTH,
-               var_tree: dict = None, wl=None, canonical: bool = False) -> None:
+               var_tree: dict = None, wl=None, canonical: bool = False,
+               no_arith_eval: bool = False) -> None:
     """Write a term to outfile (default stdout)."""
     if wl is None:
         from wild_life.runtime import WL as wl
@@ -1189,6 +1258,7 @@ def write_term(t: Optional['PsiTerm'], outfile: IO = None,
     ps.print_depth = print_depth
     ps.const_quote = quoted
     ps.write_canon = canonical
+    ps.no_arith_eval = no_arith_eval
     ps.indent = False
 
     vt = var_tree or {}
@@ -1261,7 +1331,20 @@ def print_variables(var_tree: dict, outfile: IO = None,
             # Use sprec=700 (the precedence of '=') so that operator expressions
             # with prec >= 700 (like '->' prec 1200, ',' prec 1000) are
             # surrounded by parentheses in the "X = VALUE" binding context.
+            #
+            # Backtick-valued variables: decide whether to strip the backtick.
+            # A backtick that was the direct top-level argument to write() is a
+            # sort annotation → strip it (show the inner sort term, e.g. {(a,b,A)}).
+            # A backtick that was only encountered inside a write() context (e.g.
+            # L:`{c,d,L,e} inside an outer `{...}) is a structural value → keep it.
+            _is_backtick = (t.type is not None
+                            and t.type.keyword is not None
+                            and t.type.keyword.symbol == '`')
+            _written_ids = getattr(wl, '_written_backtick_ids', set())
+            if _is_backtick and id(t) not in _written_ids:
+                val_ps.no_arith_eval = True  # keep the backtick visible
             _pretty_psi_term(val_ps, t, 700, 0, wl)
+            val_ps.no_arith_eval = False   # reset for safety
             val_str = val_buf.getvalue()
             # Carry forward any newly named pointers
             ps.printed_pointers.update(val_ps.printed_pointers)
