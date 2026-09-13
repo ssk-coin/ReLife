@@ -3969,17 +3969,25 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         _ftype = _functor_val.type
         if _ftype is None:
             return None
-        # If functor is a non-frozen arithmetic operator (no NON_STRICT_TERM), refuse
-        # partial application — it's an eager operator, not a function value.
-        # Frozen operators (`+`, `*`, etc.) carry NON_STRICT_TERM and are allowed.
+        # If functor is a non-frozen arithmetic operator (no NON_STRICT_TERM), allow
+        # full application (where the apply node supplies all required args) but refuse
+        # zero-arg invocations.  We count the non-functor keys in rhs.attr_list to decide:
+        # if there is at least one arg being passed, proceed and let the arithmetic
+        # evaluator handle the result (e.g. +(1,2)→3).  If no args at all, refuse.
+        # This allows `F={(+);(-)}, C=F(A,B)` to work while still rejecting bare `(+)`
+        # when applied to nothing.
         from wild_life.data_structures import NON_STRICT_TERM as _BI_APPLY_NST_CHK  # noqa: F811
         _fval_sym = _ftype.keyword.symbol if _ftype.keyword else ''
         if (_fval_sym in _ARITH_OPS_SET
                 and not (_functor_val.flags & _BI_APPLY_NST_CHK)
                 and not _functor_val.attr_list):  # bare arithmetic operator (no args yet)
-            import sys as _sys_apply
-            _sys_apply.stderr.write(f'*** Error: attempt to unify with curried function {_fval_sym}\n')
-            return False
+            # Count args being supplied by the apply node (excluding the functor slot)
+            _supplied_args = sum(1 for k in rhs.attr_list if k != _functor_key)
+            if _supplied_args == 0:
+                import sys as _sys_apply
+                _sys_apply.stderr.write(f'*** Error: attempt to unify with curried function {_fval_sym}\n')
+                return False
+            # else: fall through — at least one arg supplied, allow full application
         call_psi = PsiTerm()
         call_psi.type = _ftype
         call_psi.value = None
