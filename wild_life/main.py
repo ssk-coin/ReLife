@@ -246,9 +246,11 @@ def run_repl(
                     _write_prompt(0)
                 else:
                     # TRUE MODEL: *** Yes was already shown at frame-push time.
-                    # Blank at depth>0 shows only *** No then pops to parent depth.
-                    _pop_frame()           # depth becomes N-1, pd restored
+                    # Blank at depth>0 shows *** No + parent bindings, then pops.
+                    parent_bindings = _pop_frame()   # depth becomes N-1, pd restored
                     sys.stdout.write("\n*** No\n")
+                    if parent_bindings:
+                        sys.stdout.write(parent_bindings + "\n")
                     _write_prompt(depth)   # (N-1)> or > after pop
                 continue
 

@@ -1447,21 +1447,36 @@ def bi_writeln(goal: PsiTerm, eng) -> bool:
 
 
 def bi_print_depth(goal: PsiTerm, eng) -> bool:
-    """print_depth(N) — set the global print depth limit.
+    """print_depth / print_depth(N) — get/set the global print depth limit.
 
-    N = 0  → unlimited depth (0 = unlimited in Wild Life C semantics).
-    N < 0  → error; reset to unlimited.
-    N > 0  → truncate output after N levels (shows '...' beyond).
+    0-arity form (print_depth):
+      Resets the print depth to unlimited (wl.print_depth = 0) and succeeds.
+
+    1-arity form (print_depth(N)), C Wild Life semantics:
+      N < 0  → unlimited depth (no truncation); error message is printed.
+      N = 0  → show only the root functor, arguments shown as '...'.
+      N > 0  → show N levels of arguments (N+1 levels total including root).
+
+    Internal mapping: wl.print_depth = 0 means unlimited; wl.print_depth = K > 0
+    means truncate at K levels (write_term convention).  So C Wild Life's N maps
+    to wl.print_depth = N + 1 for N >= 0, and 0 for N < 0.
     """
+    wl = eng.wl
+    # 0-arity: print_depth? — reset to unlimited
     arg = _get_one_arg(goal)
     if arg is None:
+        # Check if there truly are no args (arity 0), not just a parsing failure.
+        # _get_one_arg returns None if arity != 1; for arity 0, treat as reset.
+        goal_d = goal.deref()
+        if not goal_d.attr_list:  # no arguments = arity 0
+            wl.print_depth = 0  # reset to unlimited
+            return True
         return False
     arg = arg.deref()
-    wl = eng.wl
     if arg.value is not None and arg.type and arg.type.is_subtype_of(wl.real):
         n = int(float(arg.value))
         if n < 0:
-            # Error: negative argument not allowed
+            # Negative argument: print error, reset to unlimited.
             pd = wl.print_depth
             if pd == 0 or pd == 1:
                 # pd=0 (unlimited) or pd=1: the arg would appear truncated at depth 1
@@ -1477,10 +1492,11 @@ def bi_print_depth(goal: PsiTerm, eng) -> bool:
             )
             wl.print_depth = 0  # reset to unlimited
             return True
-        elif n == 0:
-            wl.print_depth = 0  # 0 = unlimited (C Wild Life convention)
         else:
-            wl.print_depth = n
+            # N >= 0: show N levels of args (root + N levels = N+1 levels total).
+            # Our internal convention: wl.print_depth = 0 means unlimited;
+            # wl.print_depth = K means show K levels (K=1 → just root functor).
+            wl.print_depth = n + 1
         return True
     return False
 

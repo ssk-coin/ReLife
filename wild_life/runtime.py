@@ -633,6 +633,12 @@ class WildLifeRuntime:
         op(150,  OT.YFX, ".")         # 59  feature access
         op(1000, OT.XFY, ",")         # 60  conjunction
 
+        # _enumerable_ops を逆順にする:
+        # C Wild Life では演算子は逆順（最後に登録されたものが先に列挙される）で
+        # 列挙される。bagof が collected.reverse() で LIFO 収集をシミュレートする
+        # ため、ここでは FIFO 順（C Wild Life の登録順 = 上の定義の逆順）にする。
+        self._enumerable_ops.reverse()
+
         # ════════════════════════════════════════════════════════════════════
         # 内部専用演算子 (enumerable=False)
         # パーサーが必要とするが op/3 では列挙されない。
