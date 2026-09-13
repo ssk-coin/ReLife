@@ -141,7 +141,7 @@ class WildLifeRuntime:
 
         # ==================== 表示設定 ====================
         self.page_width: int = 80
-        self.print_depth: int = 1000000000
+        self.print_depth: int = 1000000000  # unlimited initially; pd(N)?→N+1 via bi_print_depth
 
         # ==================== 特殊PsiTerm ====================
         self.null_psi_term: Optional[PsiTerm] = None
