@@ -8685,16 +8685,13 @@ def register_all(wl) -> None:
     _reg('open', _bi_open)
 
     def _bi_display_modules(goal, eng):
-        """display_modules — print info about all known modules (to stderr)."""
-        import sys
-        for name, mod in sorted(wl.module_table.items()):
-            opens = [m.module_name for m in mod.open_modules
-                     if m.module_name not in ('bi', 'syntax')]
-            sym_count = len(mod.symbol_table)
-            if opens:
-                sys.stderr.write(f"Module '{name}': {sym_count} symbols, opens {opens}\n")
-            else:
-                sys.stderr.write(f"Module '{name}': {sym_count} symbols\n")
+        """display_modules — enable module-qualified name display mode (like C Wild Life).
+
+        In C Wild Life, calling display_modules enables module-qualified printing
+        for all subsequent write/print operations.
+        """
+        # Enable module-qualified name display mode
+        wl.display_modules_mode = True
         return True
     _reg('display_modules', _bi_display_modules)
 

@@ -477,6 +477,21 @@ def _print_symbol_q(ps: PrintState, kw) -> None:
     _print_symbol_quoted(ps, sym, ps.const_quote)
 
 
+def _print_module_qualified(ps: PrintState, kw) -> None:
+    """Print a module-qualified name as module#symbol (each part quoted separately).
+
+    Produces output like abc#abc or def#d without quoting the # separator.
+    This matches C Wild Life's display_modules output format.
+    """
+    if kw is None:
+        return
+    if hasattr(kw, 'module') and kw.module and kw.module.module_name:
+        _print_symbol_quoted(ps, kw.module.module_name, ps.const_quote)
+        ps.write('#')
+    sym = kw.symbol if hasattr(kw, 'symbol') else str(kw)
+    _print_symbol_quoted(ps, sym, ps.const_quote)
+
+
 def _check_opargs(attr_list: dict) -> int:
     """Return bitmask: bit0=has '1', bit1=has '2', bit2=has other."""
     result = 0
@@ -1104,10 +1119,12 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
             args_written = _pretty_psi_with_ops(ps, t, sprec, depth + 1)
         if not args_written:
             _kw = t.type.keyword if t.type else None
-            # Use module-qualified name for sorts defined in non-user/bi/syntax modules
+            # Use module-qualified name only when display_modules mode is active
+            # (enabled by display_modules? directive, as in C Wild Life)
             if (_kw is not None and hasattr(_kw, 'module') and _kw.module is not None
-                    and _kw.module.module_name not in ('user', 'bi', 'syntax', '')):
-                _print_symbol_quoted(ps, _kw.combined_name, ps.const_quote)
+                    and _kw.module.module_name not in ('user', 'bi', 'syntax', '')
+                    and getattr(wl, 'display_modules_mode', False)):
+                _print_module_qualified(ps, _kw)
             else:
                 _print_symbol_q(ps, _kw)
 
@@ -1191,9 +1208,10 @@ def _render_one_attr(ps: PrintState, k: str, v, depth: int, cnt: list, wl,
     """Render a single key=>value attribute pair into ps."""
     iv = _str_to_int(k)
     if iv < 0:
-        # Named feature: check if private_feature → use module-qualified name
+        # Named feature: check if private_feature AND display_modules mode → module-qualified name
         display_k = k
-        if (parent_type is not None and parent_type.keyword is not None
+        if (getattr(wl, 'display_modules_mode', False)
+                and parent_type is not None and parent_type.keyword is not None
                 and parent_type.keyword.module is not None
                 and parent_type.keyword.module.module_name not in ('user', 'bi', 'syntax', '')):
             mod = parent_type.keyword.module
