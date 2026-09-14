@@ -2619,10 +2619,48 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
             eng.choice_stack = cp_save
             eng.goal_stack = gs_save
             if cond_ok:
+                # Collect condition-added attrs from val_part BEFORE deref.
+                # When val_part = bodify_list(T) (copy_term follows Y.coref),
+                # the condition `X = Y.A` uses `_resolve_dot_feat` which adds
+                # attr 'A' to val_part directly (since '.' arg1 is no longer
+                # eagerly pre-evaluated by _eval_embedded_user_funcs).
+                _pre_extra_attrs = {
+                    k: v for k, v in val_part.attr_list.items()
+                    if not (isinstance(k, str) and k.isdigit())
+                }
                 val_d = val_part.deref()
                 ok_a, val = _eval_arith(val_d, eng)
                 if ok_a:
                     return _make_number(eng, val)
+                # If val_d itself is a user function (e.g. bodify_list(T) from
+                # `Y : bodify_list(T) | X = Y.A`), evaluate it recursively.
+                # Condition guards may have added non-positional attributes
+                # (e.g. b=2 from `2 = Y.b`) that must be transferred to the
+                # evaluated result (e.g. bodify_list([]) -> @ gets b=2 attached).
+                if _is_user_function(val_d):
+                    # Extra attrs: from val_part (Y node, condition-set) PLUS
+                    # from val_d itself (the function term, any non-positional).
+                    _extra_attrs = dict(_pre_extra_attrs)
+                    _extra_attrs.update({
+                        k: v for k, v in val_d.attr_list.items()
+                        if not (isinstance(k, str) and k.isdigit())
+                        and k not in _extra_attrs
+                    })
+                    _evaled = _eval_user_func_sync(val_d, eng, _depth + 1)
+                    if _evaled is not None and _evaled is not val_d:
+                        # Transfer condition-added attributes to the result.
+                        for k, v in _extra_attrs.items():
+                            if k not in _evaled.attr_list:
+                                _evaled.attr_list[k] = v
+                        val_d = _evaled
+                    else:
+                        _eval_embedded_user_funcs(val_d, eng, _depth + 1, set())
+                else:
+                    # Transfer condition-set attrs from val_part (Y) to val_d.
+                    for k, v in _pre_extra_attrs.items():
+                        if k not in val_d.attr_list:
+                            val_d.attr_list[k] = v
+                    _eval_embedded_user_funcs(val_d, eng, _depth + 1, set())
                 return val_d
             else:
                 eng.trail.undo_to(mark)
@@ -2637,6 +2675,13 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
         for _key in list(t.attr_list.keys()):
             _attr = t.attr_list[_key].deref()
             _ev = _try_eval_any_func(_attr, eng)
+            if _ev is None and _attr.attr_list:
+                # Compound arg (e.g. `(CX, NT) & memo_copy(X, Table)` or
+                # `(B, NT) & copy_body(...)`) — use _eval_body_sync so that
+                # `&` conjunction semantics are handled (evaluate RHS and
+                # unify with LHS), rather than just evaluating sub-functions
+                # in-place without the conjunction unification step.
+                _ev = _eval_body_sync(_attr, eng, _depth + 1)
             if _ev is not None and _ev is not _attr:
                 t.attr_list[_key] = _ev
 
@@ -2668,10 +2713,11 @@ def _is_cond_builtin_local(t: 'PsiTerm') -> bool:
 
 
 def _is_copy_term_func(t: 'PsiTerm') -> bool:
-    """Return True if t is copy_term(X) with exactly 1 argument (functional use)."""
+    """Return True if t is copy_term(X) or copy(X) with exactly 1 argument (functional use)."""
     if t is None or t.type is None or t.type.keyword is None:
         return False
-    if t.type.keyword.symbol != 'copy_term':
+    sym = t.type.keyword.symbol
+    if sym not in ('copy_term', 'copy'):
         return False
     # 1-arg form only (2-arg is the predicate form copy_term(X, Y))
     return '1' in t.attr_list and '2' not in t.attr_list
@@ -3221,6 +3267,21 @@ def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
     if ok_a:
         return _make_number(eng, val)
 
+    # Special: where(goal1[, goal2, ...]) — in LIFE, where(G) in a function
+    # body executes G as a side-effect goal, then returns @ (top).
+    # `where -> @.` makes it a zero-arity sort but positional attributes are
+    # goals to execute in index order before returning @.
+    _wh_kw = body_d.type.keyword if body_d.type else None
+    if (_wh_kw is not None and _wh_kw.symbol == 'where'
+            and body_d.attr_list):
+        for _wk in sorted(
+                (k for k in body_d.attr_list if isinstance(k, str) and k.isdigit()),
+                key=int):
+            _warg = body_d.attr_list[_wk].deref()
+            _eval_body_sync(_warg, eng, _depth + 1)
+        # Return @ (top) so intersecting with another sort gives that sort unchanged
+        return PsiTerm(type_def=eng.wl.top)
+
     # User-defined function call?
     if _is_user_function(body_d):
         return _eval_user_func_sync(body_d, eng, _depth)
@@ -3286,6 +3347,40 @@ def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
     if psi_r is not None:
         return psi_r
 
+    # Built-in map(F, List) functional use — evaluate the mapped list
+    if (body_d.type is not None and body_d.type.keyword is not None
+            and body_d.type.keyword.symbol == 'map'
+            and '1' in body_d.attr_list and '2' in body_d.attr_list
+            and '3' not in body_d.attr_list):
+        return _eval_map_func(body_d, eng)
+
+    # Sort-conjunction `&` — LIFE call-by-value semantics: evaluate both sides
+    # and unify to produce the sort intersection. This handles:
+    #   `Copy & root_sort(X) & bodify_list(B)` — sort intersection
+    #   `(CX, NT) & memo_copy(X, Table)` — binds CX/NT from memo_copy result
+    #   `result_term & where(side_effects)` — where() runs side effects, returns @
+    _and_kw = body_d.type.keyword if body_d.type else None
+    if (_and_kw is not None and _and_kw.symbol == '&'
+            and '1' in body_d.attr_list and '2' in body_d.attr_list):
+        _lhs = body_d.attr_list['1'].deref()
+        _rhs = body_d.attr_list['2'].deref()
+        # Evaluate RHS first — side effects (e.g. where()) may bind vars
+        _rhs_val = _eval_body_sync(_rhs, eng, _depth + 1)
+        _rhs_ev = (_rhs_val if _rhs_val is not None else _rhs).deref()
+        # Evaluate LHS independently (now with any vars bound by RHS)
+        _lhs_val = _eval_body_sync(_lhs, eng, _depth + 1)
+        _lhs_ev = (_lhs_val if _lhs_val is not None else _lhs).deref()
+        # Sort intersection: unify both evaluated results.
+        # For `root_sort(X) & bodify_list(B)`: unify(ww, @(a=>1,b=>2)) → ww(a=>1,b=>2)
+        # For `(CX,NT) & memo_copy(...)`: unify((CX,NT), pair) → binds CX, NT
+        _unify(eng, _lhs_ev, _rhs_ev)
+        return _lhs_ev.deref()
+
+    # Try evaluating the whole body as a pure built-in (root_sort, features, etc.)
+    _sv = _try_eval_string_func(body_d, eng)
+    if _sv is not None:
+        return _sv
+
     # Compound term: evaluate embedded user-function and cond sub-terms in-place
     _eval_embedded_user_funcs(body_d, eng, _depth, set())
     return body_d
@@ -3337,6 +3432,12 @@ def _try_eval_any_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     if _is_lub_func(td):
         return _eval_lub_func(td, eng)
 
+    # Built-in map(F, List) functional use
+    if (td.type is not None and td.type.keyword is not None
+            and td.type.keyword.symbol == 'map'
+            and '1' in td.attr_list and '2' in td.attr_list and '3' not in td.attr_list):
+        return _eval_map_func(td, eng)
+
     # General string function (strcon, substr, strlen, int2str, …)
     r = _try_eval_string_func(td, eng)
     if r is not None:
@@ -3361,6 +3462,12 @@ def _try_eval_any_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
 _NON_STRICT_ARG1_BUILTINS: frozenset = frozenset({
     'setq', 'dynamic', 'static', 'assert', 'asserta', 'retract',
     'clause', 'abolish', 'listing',
+    # Dot feature-access `T.F`: arg '1' is the HOST subject of feature access
+    # or creation, NOT a function-value to reduce in isolation.  Pre-evaluating
+    # it (e.g. bodify_list(T) → @) replaces the shared reference and causes
+    # conditions like `1 = Y.A` (where Y = bodify_list(T)) to add attr 'A' to
+    # the fresh evaluated result rather than to val_part (bodify_list_copy).
+    '.',
 })
 
 
@@ -3399,6 +3506,32 @@ def _eval_embedded_user_funcs(
             td.attr_list[key] = evaled
             _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited)
         elif child.attr_list:
+            # If child is a sort-conjunction `A & B`, evaluate it via
+            # _eval_body_sync to get the sort intersection (e.g.
+            # `Copy & root_sort(X) & bodify_list(B)` → ww(a=>1,b=>2)).
+            # Only do this when at least one side contains an evaluable
+            # sub-term (a user or built-in function, or a nested `&`),
+            # to avoid accidentally unifying goal-position conjunctions.
+            _child_kw = child.type.keyword if child.type else None
+            if _child_kw is not None and _child_kw.symbol == '&':
+                _c1 = child.attr_list.get('1')
+                _c2 = child.attr_list.get('2')
+                _c1d = _c1.deref() if _c1 is not None else None
+                _c2d = _c2.deref() if _c2 is not None else None
+                _c1_kw = _c1d.type.keyword if (_c1d is not None and _c1d.type) else None
+                _c2_kw = _c2d.type.keyword if (_c2d is not None and _c2d.type) else None
+                _has_evaluable = (
+                    (_c1d is not None and _try_eval_any_func(_c1d, eng) is not None) or
+                    (_c2d is not None and _try_eval_any_func(_c2d, eng) is not None) or
+                    (_c1_kw is not None and _c1_kw.symbol == '&') or
+                    (_c2_kw is not None and _c2_kw.symbol == '&')
+                )
+                if _has_evaluable:
+                    _ev_conj = _eval_body_sync(child, eng, _depth + 1)
+                    if _ev_conj is not None and _ev_conj is not child:
+                        td.attr_list[key] = _ev_conj
+                        _eval_embedded_user_funcs(_ev_conj, eng, _depth + 1, visited)
+                        continue
             _eval_embedded_user_funcs(child, eng, _depth + 1, visited)
 
 
@@ -5001,6 +5134,29 @@ def bi_not_identical(goal: PsiTerm, eng) -> bool:
     s1 = _term_to_str(a, eng)
     s2 = _term_to_str(b, eng)
     return s1 != s2
+
+
+def c_same_address(goal: PsiTerm, eng) -> bool:
+    """X === Y — address (identity) equality.
+
+    Succeeds if X and Y are the same psi-term node after dereferencing
+    (pointer equality).  Fails otherwise.  Used by deja_vu/copy in LIFE.
+    """
+    a, b = _get_two_args(goal)
+    if a is None or b is None:
+        return False
+    return a is b
+
+
+def c_diff_address(goal: PsiTerm, eng) -> bool:
+    r"""X \=== Y — address (identity) inequality.
+
+    Succeeds if X and Y are different psi-term nodes after dereferencing.
+    """
+    a, b = _get_two_args(goal)
+    if a is None or b is None:
+        return False
+    return a is not b
 
 
 def bi_compare(goal: PsiTerm, eng) -> bool:
@@ -7448,6 +7604,73 @@ def bi_system(goal: PsiTerm, eng) -> bool:
 # map(F, List) → ResultList  (functional built-in)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _eval_map_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
+    """Evaluate map(F, List) functionally, returning the mapped list as a PsiTerm.
+
+    Tries user-defined functions first (via _try_eval_any_func), then arithmetic,
+    then string functions, and falls back to the unevaluated application term.
+    Returns None if evaluation cannot proceed.
+    """
+    wl = eng.wl
+    a1 = t.attr_list.get('1')  # F
+    a2 = t.attr_list.get('2')  # List
+    if a1 is None or a2 is None:
+        return None
+    f_term = a1.deref()
+    list_term = a2.deref()
+
+    # Evaluate the list argument if it's a function call (e.g. features(X))
+    _list_ev = _try_eval_any_func(list_term, eng)
+    if _list_ev is not None and _list_ev is not list_term:
+        list_term = _list_ev
+
+    results = []
+    node = list_term
+    while True:
+        node = node.deref()
+        sym = node.type.keyword.symbol if (node.type and node.type.keyword) else ''
+        if sym in ('nil', '[]') or (node.value is None and not node.attr_list and node.type is wl.nil):
+            break
+        if sym in ('cons', '.', '|') or node.type is wl.alist:
+            head_ref = node.attr_list.get('1')
+            tail_ref = node.attr_list.get('2')
+            if head_ref is None:
+                break
+            head = head_ref.deref()
+            applied = _apply_func(f_term, head, eng)
+            if applied is None:
+                return None
+            # Try user-defined function first (handles feature_value etc.)
+            result = _try_eval_any_func(applied, eng)
+            if result is not None:
+                results.append(result)
+            else:
+                ok, val = _eval_arith(applied, eng)
+                if ok:
+                    results.append(_make_number(eng, val))
+                else:
+                    str_result = _try_eval_string_func(applied, eng)
+                    if str_result is not None:
+                        results.append(str_result)
+                    else:
+                        results.append(applied)
+            node = tail_ref if tail_ref is not None else wl.make_atom('nil', wl.bi_module)
+        else:
+            # Not a proper cons cell — apply to the element directly
+            applied = _apply_func(f_term, node, eng)
+            if applied is None:
+                return None
+            result = _try_eval_any_func(applied, eng)
+            if result is not None:
+                results.append(result)
+            else:
+                ok, val = _eval_arith(applied, eng)
+                results.append(_make_number(eng, val) if ok else applied)
+            break
+
+    return wl.make_list(results)
+
+
 def _apply_func(f_term: PsiTerm, arg: PsiTerm, eng) -> Optional[PsiTerm]:
     """Apply functor f_term to one argument, returning the result term.
 
@@ -8812,3 +9035,11 @@ def register_all(wl) -> None:
         """module_info(M, Info) — basic module info (stub)."""
         return True
     _reg('module_info', _bi_module_info)
+
+    # ── Address equality operators (syntax_module operators) ─────────────────
+    # '===' and '\===' are registered as operators in syntax_module by the
+    # runtime's _init_built_ins (which was intended but never called), so we
+    # register their implementations here, in the syntax_module, so that
+    # prove_aim finds _builtin_func on the operator's Definition object.
+    _reg('===', c_same_address,  def_type=DefType.FUNCTION, module=wl.syntax_module)
+    _reg('\\===', c_diff_address, def_type=DefType.FUNCTION, module=wl.syntax_module)

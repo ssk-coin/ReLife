@@ -1020,6 +1020,32 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
         _pretty_psi_term(ps, t, sprec, depth, wl)
         return
 
+    # and_sym (&) conjunction: simplify for display when both sides share the
+    # same sort type.  e.g. (X:string) & string → print X;  string & string → string.
+    # This avoids showing raw "X & string" in feature-value position where the
+    # top-level _write_term conjunction evaluator never runs.
+    if wl and t.type is not None and t.type is wl.and_sym:
+        _t1_ref = t.attr_list.get('1')
+        _t2_ref = t.attr_list.get('2')
+        if _t1_ref is not None and _t2_ref is not None:
+            _t1 = _t1_ref.deref()
+            _t2 = _t2_ref.deref()
+            def _is_pure_sort_atom(s):
+                return (s.type is not None and s.type is not wl.top
+                        and s.value is None and not s.attr_list
+                        and s.coref is None and s.type is not wl.and_sym)
+            # If t2 is a pure sort atom and t1 already has that exact sort → print t1
+            if (_is_pure_sort_atom(_t2) and _t1.type is not None
+                    and _t1.type is _t2.type and _t1.type is not wl.top):
+                _pretty_tag_or_psi_term(ps, _t1, sprec, depth, wl)
+                return
+            # If t1 is a pure sort atom and t2 already has that exact sort → print t2
+            if (_is_pure_sort_atom(_t1) and _t2.type is not None
+                    and _t2.type is _t1.type and _t2.type is not wl.top):
+                _pretty_tag_or_psi_term(ps, _t2, sprec, depth, wl)
+                return
+        # Fall through: print as raw & operator term (handled by _pretty_tag_or_psi_term)
+
     # Evaluate ground string function calls during printing
     # (strcon, substr, strlen when all args are concrete strings/numbers)
     _str_funcs_print = frozenset(('strcon', 'substr', 'strlen'))
@@ -1094,18 +1120,14 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
             return
 
     # Sort-constrained variable: X:sort where sort ≠ @ and term is unbound.
-    # In Wild Life, such a variable prints as "sortname~" (e.g. "real~", "bool~").
-    # The ~ signals "there is a pending constraint":
-    #   - Pure sort annotation (X:real, resid=None) → always write "~"
+    # In Wild Life, the ~ signals "there is a pending constraint":
+    #   - Pure sort annotation (X:string, resid=None) → no ~ (C Wild Life prints just "string")
     #   - Arithmetic dissolved (resid=[] empty list) → no "~" (constraint was solved)
     #   - Arithmetic pending (resid=[...] with pending items) → _maybe_resid writes "~"
     from wild_life.data_structures import SORT_VAR
     if (t.flags & SORT_VAR) and t.value is None and not t.attr_list:
         _print_symbol_q(ps, t.type.keyword if t.type else None)
-        if t.resid is None:
-            # resid=None: pure sort annotation (no arithmetic involved) → always ~
-            ps.write("~")
-        # else resid is a list (empty = arithmetic dissolved, or with pending items)
+        # resid is a list (empty = arithmetic dissolved, or with pending items)
         # _maybe_resid will write ~ only for pending resid goals
         _maybe_resid(ps, t)
         return
