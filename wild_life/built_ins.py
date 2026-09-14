@@ -812,6 +812,32 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         }
         return lt
 
+    elif sym == 'length' and len(t.attr_list) == 1:
+        # length(L) -> number of elements, the functional form of length/2.
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return None
+        lst = a1.deref()
+        if lst.type is None or not lst.type.is_subtype_of(eng.wl.alist):
+            return None
+        return eng.wl.make_integer(len(_list_to_python(lst, eng)))
+
+    elif sym == 'append' and len(t.attr_list) == 2:
+        # append(L1, L2) -> L1 with L2 appended, the functional form of
+        # append/3.  L2 becomes the tail as-is, so the result shares it, and
+        # the elements of L1 are shared rather than copied.
+        a1 = t.attr_list.get('1')
+        a2 = t.attr_list.get('2')
+        if a1 is None or a2 is None:
+            return None
+        head = a1.deref()
+        if head.type is None or not head.type.is_subtype_of(eng.wl.alist):
+            return None
+        result = a2.deref()
+        for item in reversed(_list_to_python(head, eng)):
+            result = eng.wl.make_cons(item, result)
+        return result
+
     elif sym == 'features':
         # features(T[, MOD]) -> list of attribute labels (sorted: positional first, then named)
         # If MOD is given, only includes features visible from module MOD,
@@ -6279,11 +6305,15 @@ def bi_term_to_atom(goal: PsiTerm, eng) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _list_to_python(t: PsiTerm, eng):
-    """Convert WL list to Python list."""
+    """Convert WL list to Python list.
+
+    A sub-sort of cons is walked like a cons cell, so `int_cons <| cons.`
+    makes an int_cons spine just as traversable as a plain list.
+    """
     wl = eng.wl
     items = []
     cur = t.deref()
-    while cur.type == wl.alist:
+    while cur.type is not None and cur.type.is_subtype_of(wl.alist):
         h = cur.attr_list.get('1')
         t2 = cur.attr_list.get('2')
         if h:
