@@ -267,6 +267,50 @@ def _eval_body_to_result(branch: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
     return True
 
 
+def _boolean_value(t: 'PsiTerm'):
+    """True/False for a `true`/`false` psi-term, None for anything else."""
+    if t is None:
+        return None
+    d = t.deref()
+    if d.type is None or d.type.keyword is None:
+        return None
+    sym = d.type.keyword.symbol
+    return True if sym == 'true' else (False if sym == 'false' else None)
+
+
+def prove_cond(cond_g: 'PsiTerm', eng) -> bool:
+    """Prove the condition of a cond(C, T[, E]) in an inner run.
+
+    `&` in a condition is LIFE's type intersection rather than a conjunction:
+    in `cond(deja_vu(X,Table) & bool(Copy), ...)` the left side reduces to
+    `true(V)` or `false`, intersecting it with `bool(Copy)` picks V up as
+    Copy, and the condition holds exactly when the value is `true`.  Proving
+    the two sides as separate goals would instead fail on `bool`, which is a
+    sort and not a predicate — so an `&` condition is evaluated first, and
+    only a value that is neither `true` nor `false` falls back to a proof.
+    """
+    if cond_g.type is not None and cond_g.type is eng.wl.and_sym:
+        from wild_life.built_ins import _eval_body_sync
+        mark = eng.trail.mark()
+        truth = _boolean_value(_eval_body_sync(cond_g, eng, 0))
+        if truth is not None:
+            return truth
+        eng.trail.undo_to(mark)
+    cp_save = eng.choice_stack
+    gs_save = eng.goal_stack
+    # Clear the goal stack so only cond_g is proved — the outer continuation
+    # must not run inside the inner loop.
+    eng.goal_stack = None
+    eng.push_goal(GoalType.PROVE, cond_g, _DEFRULES, None)
+    old_ok = eng.main_loop_ok
+    barrier = cp_save if cp_save is not None else _INNER_RUN_BARRIER
+    ok = eng.run(cs_barrier=barrier)
+    eng.main_loop_ok = old_ok
+    eng.choice_stack = cp_save
+    eng.goal_stack = gs_save
+    return ok
+
+
 def _eval_cond_functional(cond_term: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
     """Evaluate cond(C, T [, E]) as a functional expression, binding result.
 
@@ -288,18 +332,8 @@ def _eval_cond_functional(cond_term: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
     then_g = args[1].deref()
     else_g = args[2].deref() if len(args) >= 3 else None
 
-    # Prove the condition via inner run (same pattern as bi_cond)
     mark = eng.trail.mark()
-    cp_save = eng.choice_stack
-    gs_save = eng.goal_stack
-    eng.goal_stack = None
-    eng.push_goal(GoalType.PROVE, cond_g, _DEFRULES, None)
-    old_ok = eng.main_loop_ok
-    barrier = cp_save if cp_save is not None else _INNER_RUN_BARRIER
-    cond_ok = eng.run(cs_barrier=barrier)
-    eng.main_loop_ok = old_ok
-    eng.choice_stack = cp_save
-    eng.goal_stack = gs_save
+    cond_ok = prove_cond(cond_g, eng)
 
     if cond_ok:
         return _eval_body_to_result(then_g, result, eng)
@@ -1145,6 +1179,35 @@ class Engine:
             self.trail.undo_to(mark)
         return ok
 
+    def suchthat_val_aim(self) -> bool:
+        """Handle a 'suchthat_val' goal: reduce a such-that rule's value part
+        once its guard has been proved, then unify it with the rule's result.
+
+        aim.c holds the value's function call; eval_aim has pointed the rule's
+        value variable at a fresh node, so any feature the guard added —
+        `X = Y.A` in
+        `bodify_list([(A,X)|T]) -> Y : bodify_list(T) | X = Y.A.` — sits on
+        aim.a.  Unifying the two merges the guard's constraints with the value
+        the call reduces to.
+        """
+        from wild_life.built_ins import _eval_user_func_sync
+        aim = self.aim
+        val_part = aim.a
+        result = aim.b
+        call = aim.c
+        if val_part is None or result is None or call is None:
+            return False
+
+        mark = self.trail.mark()
+        # A call that cannot be reduced here stands as its own value, as it did
+        # when the reduction was attempted before the guard.
+        evaled = _eval_user_func_sync(call, self) or call
+        ok = (self.unifier.unify(val_part, evaled)
+              and self.unifier.unify(val_part, result))
+        if not ok:
+            self.trail.undo_to(mark)
+        return ok
+
     def _push_embedded_func_goals_method(self, t: 'PsiTerm', visited: set) -> 'PsiTerm':
         """Walk t and replace user-function sub-terms with fresh vars, pushing
         EVAL goals for each.  Returns (possibly modified) term safe to UNIFY.
@@ -1164,6 +1227,15 @@ class Engine:
         if funct is None:
             return False
         funct = funct.deref()
+
+        # Boolean built-in used as a function — `===` and `\===` carry a
+        # _builtin_func instead of rules, so evaluating one means proving it
+        # and taking the truth value as its result.
+        if not rules and funct.type is not None:
+            bi_fn = getattr(funct.type, '_builtin_func', None)
+            if bi_fn is not None:
+                truth = 'true' if bi_fn(funct, self) else 'false'
+                return self.unifier.unify(result, wl.make_atom(truth))
 
         if rules is None:
             return False
@@ -1264,25 +1336,36 @@ class Engine:
                     _is_user_function,
                     _try_eval_string_func,
                 )
+                # A value that is a function call is reduced only AFTER the
+                # guard has been proven, because the guard may constrain the
+                # call's result — as in
+                #   bodify_list([(A,X)|T]) -> Y : bodify_list(T) | X = Y.A.
+                # where `Y.A` inserts feature A into Y.  Y is pointed at a
+                # fresh node first so that `Y.1` addresses that result rather
+                # than colliding with the call's own first argument, and that
+                # has to happen before the guard is touched at all, since
+                # _eval_embedded_user_funcs already resolves `Y.A` in place.
+                _st_call = None
+                _vp_d = val_part.deref()
+                if _is_user_function(_vp_d):
+                    _st_call = PsiTerm(type_def=_vp_d.type)
+                    _st_call.attr_list = dict(_vp_d.attr_list)
+                    _st_call.flags = _vp_d.flags
+                    self.trail.trail_psi(_vp_d, 'coref')
+                    _vp_d.coref = PsiTerm(type_def=wl.top)
                 _cond_d = cond_part.deref()
                 _eval_embedded_user_funcs(_cond_d, self, 0, set())
-                # Also evaluate embedded user functions in val_part.
-                # E.g. `bodify_list(T)` appearing as a conjunct in `Y & bodify_list(T)`
-                # must be evaluated to the concrete sort BEFORE unifying with result,
-                # otherwise result gets an unevaluated function-call sort.
-                _val_d = val_part.deref()
-                if _is_user_function(_val_d):
-                    _evaled_val = _eval_user_func_sync(_val_d, self)
-                    if _evaled_val is not None and _evaled_val is not _val_d:
-                        val_part = _evaled_val
-                else:
-                    _eval_embedded_user_funcs(_val_d, self, 0, set())
-                    # Also try to evaluate the val_d if it's a built-in function call
-                    _sv = _try_eval_string_func(_val_d, self)
-                    if _sv is not None and _sv is not _val_d:
+                if _st_call is None:
+                    # Any other value is reduced up front: its sub-terms are
+                    # rewritten in place, which a later backtrack into the
+                    # guard would not undo.
+                    _eval_embedded_user_funcs(_vp_d, self, 0, set())
+                    _sv = _try_eval_string_func(_vp_d, self)
+                    if _sv is not None and _sv is not _vp_d:
                         val_part = _sv
-                # Push: unify result with val_part AFTER cond_part is proven
-                self.push_goal(GoalType.UNIFY, val_part, result, None)
+                    self.push_goal(GoalType.UNIFY, val_part, result, None)
+                else:
+                    self.push_goal(GoalType.SUCHTHAT_VAL, val_part, result, _st_call)
                 self.push_goal(GoalType.PROVE, _cond_d, _DEFRULES, None)
                 return True
 
@@ -1800,6 +1883,11 @@ class Engine:
                     self.goal_stack = self.aim.next
                     self.goal_count += 1
                     success = self.eval_aim()
+
+                elif gtype == GoalType.SUCHTHAT_VAL:
+                    self.goal_stack = self.aim.next
+                    self.goal_count += 1
+                    success = self.suchthat_val_aim()
 
                 elif gtype == GoalType.MATCH:
                     self.goal_stack = self.aim.next

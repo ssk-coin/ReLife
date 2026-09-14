@@ -435,6 +435,7 @@ class GoalType(Enum):
     DISJ        = auto()
     WHAT_NEXT   = auto()
     EVAL        = auto()
+    SUCHTHAT_VAL= auto()  # Evaluate a such-that value part after its guard ran
     EVAL_CUT    = auto()
     FREEZE_CUT  = auto()
     IMPLIES_CUT = auto()
