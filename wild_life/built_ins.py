@@ -2599,6 +2599,21 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
                 if not ok_h:
                     eng.trail.undo_to(mark)
                     continue
+            # When the value is a function call, point the rule's value
+            # variable at a fresh node: the guard constrains the call's
+            # *result*, so `Y.1` in
+            #   bodify_list([(A,X)|T]) -> Y : bodify_list(T) | X = Y.A.
+            # must not collide with the call's own first argument.  This has to
+            # happen before the guard is touched at all, since
+            # _eval_embedded_user_funcs already resolves `Y.A` in place.
+            _st_call = None
+            _vp_d = val_part.deref()
+            if _is_user_function(_vp_d):
+                _st_call = PsiTerm(type_def=_vp_d.type)
+                _st_call.attr_list = dict(_vp_d.attr_list)
+                _st_call.flags = _vp_d.flags
+                eng.trail.trail_psi(_vp_d, 'coref')
+                _vp_d.coref = PsiTerm(type_def=eng.wl.top)
             # Evaluate built-in / user-defined functional sub-terms inside
             # the guard goal (e.g. genChildren(children(X), A) → the
             # children(X) arg must be reduced before the predicate is called).
@@ -2619,48 +2634,20 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
             eng.choice_stack = cp_save
             eng.goal_stack = gs_save
             if cond_ok:
-                # Collect condition-added attrs from val_part BEFORE deref.
-                # When val_part = bodify_list(T) (copy_term follows Y.coref),
-                # the condition `X = Y.A` uses `_resolve_dot_feat` which adds
-                # attr 'A' to val_part directly (since '.' arg1 is no longer
-                # eagerly pre-evaluated by _eval_embedded_user_funcs).
-                _pre_extra_attrs = {
-                    k: v for k, v in val_part.attr_list.items()
-                    if not (isinstance(k, str) and k.isdigit())
-                }
+                if _st_call is not None:
+                    # Reduce the call now, and merge it with the features the
+                    # guard attached to the value node.  A call that cannot be
+                    # reduced here stands as its own value.
+                    _evaled = _eval_user_func_sync(_st_call, eng, _depth + 1) or _st_call
+                    if not _unify(eng, val_part, _evaled):
+                        eng.trail.undo_to(mark)
+                        continue
+                    return val_part.deref()
                 val_d = val_part.deref()
                 ok_a, val = _eval_arith(val_d, eng)
                 if ok_a:
                     return _make_number(eng, val)
-                # If val_d itself is a user function (e.g. bodify_list(T) from
-                # `Y : bodify_list(T) | X = Y.A`), evaluate it recursively.
-                # Condition guards may have added non-positional attributes
-                # (e.g. b=2 from `2 = Y.b`) that must be transferred to the
-                # evaluated result (e.g. bodify_list([]) -> @ gets b=2 attached).
-                if _is_user_function(val_d):
-                    # Extra attrs: from val_part (Y node, condition-set) PLUS
-                    # from val_d itself (the function term, any non-positional).
-                    _extra_attrs = dict(_pre_extra_attrs)
-                    _extra_attrs.update({
-                        k: v for k, v in val_d.attr_list.items()
-                        if not (isinstance(k, str) and k.isdigit())
-                        and k not in _extra_attrs
-                    })
-                    _evaled = _eval_user_func_sync(val_d, eng, _depth + 1)
-                    if _evaled is not None and _evaled is not val_d:
-                        # Transfer condition-added attributes to the result.
-                        for k, v in _extra_attrs.items():
-                            if k not in _evaled.attr_list:
-                                _evaled.attr_list[k] = v
-                        val_d = _evaled
-                    else:
-                        _eval_embedded_user_funcs(val_d, eng, _depth + 1, set())
-                else:
-                    # Transfer condition-set attrs from val_part (Y) to val_d.
-                    for k, v in _pre_extra_attrs.items():
-                        if k not in val_d.attr_list:
-                            val_d.attr_list[k] = v
-                    _eval_embedded_user_funcs(val_d, eng, _depth + 1, set())
+                _eval_embedded_user_funcs(val_d, eng, _depth + 1, set())
                 return val_d
             else:
                 eng.trail.undo_to(mark)
@@ -3299,18 +3286,9 @@ def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
         then_g = args[1].deref()
         else_g = args[2].deref() if len(args) >= 3 else None
 
-        from wild_life.inference import GoalType as _GT, _DEFRULES as _DR, _INNER_RUN_BARRIER as _IRB
+        from wild_life.inference import prove_cond as _prove_cond
         mark_c = eng.trail.mark()
-        cp_save = eng.choice_stack
-        gs_save = eng.goal_stack
-        eng.goal_stack = None
-        eng.push_goal(_GT.PROVE, cond_g, _DR, None)
-        old_ok = eng.main_loop_ok
-        barrier = cp_save if cp_save is not None else _IRB
-        cond_ok = eng.run(cs_barrier=barrier)
-        eng.main_loop_ok = old_ok
-        eng.choice_stack = cp_save
-        eng.goal_stack = gs_save
+        cond_ok = _prove_cond(cond_g, eng)
 
         if cond_ok:
             branch = then_g.deref()
@@ -5592,20 +5570,9 @@ def bi_cond(goal: PsiTerm, eng) -> bool:
         return then_result is True
 
     # ── 3-arg form: predicate if-then-else ──
+    from wild_life.inference import prove_cond as _prove_cond
     mark = eng.trail.mark()
-    cp_save = eng.choice_stack
-    gs_save = eng.goal_stack
-    # IMPORTANT: clear goal_stack before the inner run so only cond_g is
-    # proved — the continuation must NOT run inside the inner run.
-    eng.goal_stack = None
-    eng.push_goal(GoalType.PROVE, cond_g, _DEFRULES_SENTINEL, None)
-    old_main_loop_ok = eng.main_loop_ok
-    _barrier = cp_save if cp_save is not None else _INNER_RUN_BARRIER
-    cond_ok = eng.run(cs_barrier=_barrier)
-    eng.main_loop_ok = old_main_loop_ok
-
-    eng.choice_stack = cp_save   # discard Cond's choice points either way
-    eng.goal_stack = gs_save     # restore the outer continuation
+    cond_ok = _prove_cond(cond_g, eng)
 
     if cond_ok:
         # Cond succeeded → push Then
@@ -7679,21 +7646,22 @@ def _apply_func(f_term: PsiTerm, arg: PsiTerm, eng) -> Optional[PsiTerm]:
     carries some attributes — we merge the new positional arg into position
     '1' (or the next free position).
     """
-    from wild_life.unification import copy_term as _copy
-    # Build a copy of f_term with arg placed into the first available
+    # Build a fresh application node with arg placed into the first available
     # positional slot: if f_term has no '1', use '1'; otherwise use '2', etc.
-    f_copy = _copy(f_term)
-    f_copy = f_copy.deref()
+    # The copy is shallow on purpose — a partial application captures the
+    # psi-terms already bound to it, so `feature_value(2 => X)` must keep the
+    # very node X, not a clone of it, or `X.A` would reach a fresh cell and
+    # every coreference in X would be lost.
+    f_d = f_term.deref()
+    f_copy = PsiTerm(type_def=f_d.type, value=f_d.value,
+                     attr_list=dict(f_d.attr_list))
+    f_copy.flags = f_d.flags
     if '1' not in f_copy.attr_list:
         f_copy.attr_list['1'] = arg
     elif '2' not in f_copy.attr_list:
         f_copy.attr_list['2'] = arg
     else:
-        # Fallback: create a new application term
-        app = PsiTerm(type=f_copy.type)
-        app.attr_list = dict(f_copy.attr_list)
-        app.attr_list['1'] = arg
-        f_copy = app
+        f_copy.attr_list['1'] = arg
     return f_copy
 
 
