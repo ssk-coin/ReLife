@@ -228,11 +228,42 @@ def _eval_body_to_result(branch: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
             return eng.unifier.unify(result, evaled)
         # fall through on sync failure
 
+    # Sort-conjunction `A & where(B)` pattern — evaluate where(B) synchronously
+    # first so that its arguments are evaluated for side effects (binding
+    # variables in A), then evaluate A with those variables bound.
+    # Without this, LIFO goal-stack ordering would run bodify_list(B) before
+    # copy_body binds B, causing an infinite loop.
+    _br_kw = branch_d.type.keyword if branch_d.type else None
+    if (_br_kw is not None and _br_kw.symbol == '&'
+            and '1' in branch_d.attr_list and '2' in branch_d.attr_list):
+        from wild_life.built_ins import _is_user_function as _iuf_and, _eval_body_sync as _ebs_and
+        _b_lhs = branch_d.attr_list['1'].deref()
+        _b_rhs = branch_d.attr_list['2'].deref()
+        # If RHS is a user function (e.g. where(side_effects)), evaluate it
+        # synchronously first so that its argument's side effects fire before
+        # any EVAL goals from LHS run.
+        if _iuf_and(_b_rhs):
+            _ebs_and(_b_rhs, eng, 0)   # side effects: binds vars in _b_lhs
+            return _eval_body_to_result(_b_lhs, result, eng)
+
     # Compound with embedded user-function sub-terms
+    from wild_life.built_ins import _is_user_function as _iuf_btr
     eval_goals = _collect_embedded_func_goals(branch_d, eng, set())
     eng.push_goal(GoalType.UNIFY, branch_d, result, None)
+    # Push top-level eval goals first, then push all deferred sub-goals last.
+    # Deferring sub-goals ensures they run BEFORE top-level goals in LIFO order,
+    # so e.g. copy_body (sub of where's arg) runs before bodify_list (top-level).
+    deferred_subs = []
     for ft, rv, rl in eval_goals:
         eng.push_goal(GoalType.EVAL, ft, rv, rl)
+        for _ak in list(ft.attr_list.keys()):
+            _av = ft.attr_list[_ak].deref()
+            if not _iuf_btr(_av) and _av.attr_list:
+                _sub_goals = _collect_embedded_func_goals(_av, eng, set())
+                for _sft, _srv, _srl in _sub_goals:
+                    deferred_subs.append((_sft, _srv, _srl))
+    for _sft, _srv, _srl in deferred_subs:
+        eng.push_goal(GoalType.EVAL, _sft, _srv, _srl)
     return True
 
 
@@ -335,9 +366,44 @@ def _collect_embedded_func_goals(t: 'PsiTerm', eng, visited: set) -> list:
             eval_goals.append((child, v, child.type.rule))
             # Do NOT enqueue children of child — they belong to the EVAL goal.
         else:
-            # Not a function call; walk its children.
-            for sub_key in list(child.attr_list.keys()):
-                work_queue.append((child, sub_key))
+            # Handle sort-conjunction `A & B` — when either side contains an
+            # evaluable sub-term (user function, built-in, or nested `&`),
+            # evaluate the whole conjunction via _eval_body_sync to get the
+            # sort intersection (e.g. `Copy & root_sort(X) & bodify_list(B)`
+            # → `ww(a=>1,b=>2)` after copy_body has bound B).
+            _child_kw = child.type.keyword if child.type else None
+            if _child_kw is not None and _child_kw.symbol == '&':
+                _c1 = child.attr_list.get('1')
+                _c2 = child.attr_list.get('2')
+                _c1d = _c1.deref() if _c1 is not None else None
+                _c2d = _c2.deref() if _c2 is not None else None
+                _c1_kw = _c1d.type.keyword if (_c1d is not None and _c1d.type) else None
+                _c2_kw = _c2d.type.keyword if (_c2d is not None and _c2d.type) else None
+                from wild_life.built_ins import (
+                    _try_eval_string_func as _tesf_cj,
+                    _eval_body_sync as _ebs_cj,
+                )
+                _has_evaluable = (
+                    (_c1d is not None and (_is_user_function(_c1d) or _tesf_cj(_c1d, eng) is not None)) or
+                    (_c2d is not None and (_is_user_function(_c2d) or _tesf_cj(_c2d, eng) is not None)) or
+                    (_c1_kw is not None and _c1_kw.symbol == '&') or
+                    (_c2_kw is not None and _c2_kw.symbol == '&')
+                )
+                if _has_evaluable:
+                    _ev_conj = _ebs_cj(child, eng, 0)
+                    if _ev_conj is not None and _ev_conj is not child:
+                        parent.attr_list[key] = _ev_conj
+                        # Examined the conjunction; don't re-enqueue its children.
+                        continue
+            # Try evaluating as a pure built-in (root_sort, features, etc.)
+            from wild_life.built_ins import _try_eval_string_func as _tesf_cefg
+            _bi_ev = _tesf_cefg(child, eng)
+            if _bi_ev is not None and _bi_ev is not child:
+                parent.attr_list[key] = _bi_ev
+            else:
+                # Not an evaluable built-in; walk its children.
+                for sub_key in list(child.attr_list.keys()):
+                    work_queue.append((child, sub_key))
 
     return eval_goals
 
@@ -1059,6 +1125,20 @@ class Engine:
         v = aim.b
         if u is None or v is None:
             return False
+        # Resolve dot-access terms (T.F) before structural unification.
+        # After EVAL goals fire for user-function hosts, the host is already
+        # bound and _try_eval_string_func can access the feature correctly.
+        u_d = u.deref()
+        if (u_d.type is not None and u_d.type.keyword is not None
+                and u_d.type.keyword.symbol == '.'):
+            from wild_life.built_ins import _try_eval_string_func as _tef_ua
+            _dot_val = _tef_ua(u_d, self)
+            if _dot_val is not None:
+                mark = self.trail.mark()
+                ok = self.unifier.unify(_dot_val, v)
+                if not ok:
+                    self.trail.undo_to(mark)
+                return ok
         mark = self.trail.mark()
         ok = self.unifier.unify(u, v)
         if not ok:
@@ -1178,9 +1258,29 @@ class Engine:
                 # Now that argument variables are bound, eagerly evaluate any
                 # built-in or user-defined functional sub-terms in cond_part
                 # (e.g. genChildren(children(X), A) → children(X) → [a,b,c,d]).
-                from wild_life.built_ins import _eval_embedded_user_funcs
+                from wild_life.built_ins import (
+                    _eval_embedded_user_funcs,
+                    _eval_user_func_sync,
+                    _is_user_function,
+                    _try_eval_string_func,
+                )
                 _cond_d = cond_part.deref()
                 _eval_embedded_user_funcs(_cond_d, self, 0, set())
+                # Also evaluate embedded user functions in val_part.
+                # E.g. `bodify_list(T)` appearing as a conjunct in `Y & bodify_list(T)`
+                # must be evaluated to the concrete sort BEFORE unifying with result,
+                # otherwise result gets an unevaluated function-call sort.
+                _val_d = val_part.deref()
+                if _is_user_function(_val_d):
+                    _evaled_val = _eval_user_func_sync(_val_d, self)
+                    if _evaled_val is not None and _evaled_val is not _val_d:
+                        val_part = _evaled_val
+                else:
+                    _eval_embedded_user_funcs(_val_d, self, 0, set())
+                    # Also try to evaluate the val_d if it's a built-in function call
+                    _sv = _try_eval_string_func(_val_d, self)
+                    if _sv is not None and _sv is not _val_d:
+                        val_part = _sv
                 # Push: unify result with val_part AFTER cond_part is proven
                 self.push_goal(GoalType.UNIFY, val_part, result, None)
                 self.push_goal(GoalType.PROVE, _cond_d, _DEFRULES, None)
@@ -1228,6 +1328,15 @@ class Engine:
                     _evaled = _try_eval_arith_to_term(_attr, self)
                     if _evaled is not None:
                         funct.attr_list[_key] = _evaled
+                    elif _attr.attr_list:
+                        # Compound arg: synchronously evaluate any embedded
+                        # user-function calls so that e.g.
+                        #   where((B,Table) & copy_body(...))
+                        # gets copy_body evaluated BEFORE where's body (@)
+                        # discards the argument.  Without this, bodify_list(B)
+                        # would run on the goal stack with B still unbound.
+                        from wild_life.built_ins import _eval_embedded_user_funcs
+                        _eval_embedded_user_funcs(_attr, self, 0, set())
 
         # Arity check: if head has feature keys not present in funct, this rule
         # requires arguments that the call doesn't provide.  Skip the rule —
@@ -1390,6 +1499,21 @@ class Engine:
         if _is_cond_builtin(body_d2):
             return _eval_cond_functional(body_d2, result, self)
 
+        # Body is built-in map(F, List) in functional position — evaluate it now.
+        from wild_life.built_ins import _eval_map_func as _emf
+        _body_sym_map = body_d2.type.keyword.symbol if (body_d2.type and body_d2.type.keyword) else ''
+        if (_body_sym_map == 'map'
+                and '1' in body_d2.attr_list and '2' in body_d2.attr_list
+                and '3' not in body_d2.attr_list):
+            mapped = _emf(body_d2, self)
+            if mapped is None:
+                return False
+            ok2 = self.unifier.unify(result, mapped)
+            if not ok2:
+                self.trail.undo_to(mark)
+                return False
+            return True
+
         # Body is a compound with possible embedded user-function sub-terms
         # (e.g. [X|app2(L1,L2)] where app2 is a recursive function).
         # Push EVAL goals for each embedded user-function call onto the goal
@@ -1430,9 +1554,22 @@ class Engine:
             # Push UNIFY first (runs LAST — body_d2 has fresh vars for embedded calls)
             self.push_goal(GoalType.UNIFY, body_d2, result, None)
 
-            # Push each EVAL goal (runs FIRST — binds the fresh vars before UNIFY)
+            # Push each EVAL goal (runs FIRST — binds the fresh vars before UNIFY).
+            # Also lift any embedded user-function calls from each EVAL goal's compound
+            # arguments (e.g. where((B,T) & copy_body(...)) needs copy_body evaluated).
+            from wild_life.built_ins import _is_user_function as _iuf_ea
             for ft, rv, rl in eval_goals:
+                # Push ft FIRST (runs LATER in LIFO order — after sub-goals).
                 self.push_goal(GoalType.EVAL, ft, rv, rl)
+                # Then push sub-goals (run EARLIER — before ft).
+                # This handles e.g. where((B,T) & copy_body(...)) where
+                # copy_body must be evaluated BEFORE where's body (@) runs.
+                for _ak in list(ft.attr_list.keys()):
+                    _av = ft.attr_list[_ak].deref()
+                    if not _iuf_ea(_av) and _av.attr_list:
+                        _sub_goals = _collect_embedded_func_goals(_av, self, set())
+                        for _sft, _srv, _srl in _sub_goals:
+                            self.push_goal(GoalType.EVAL, _sft, _srv, _srl)
 
         return True
 

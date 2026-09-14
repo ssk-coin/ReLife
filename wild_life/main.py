@@ -241,12 +241,16 @@ def run_repl(
 
             # ---- Blank line --------------------------------------------------
             if not line_stripped:
-                if depth == 0:
-                    # At top level, blank just re-shows the prompt
-                    _write_prompt(0)
+                if depth <= 1:
+                    # At top level or depth-1, blank just re-shows the prompt.
+                    # C Wild Life does not pop below depth 1 on a blank line:
+                    # depth 0 blank → re-show "> "
+                    # depth 1 blank → re-show "--1> " (stay inside the outer query)
+                    _write_prompt(depth)
                 else:
+                    # At depth > 1, blank pops one level.
                     # TRUE MODEL: *** Yes was already shown at frame-push time.
-                    # Blank at depth>0 shows *** No + parent bindings, then pops.
+                    # Blank at depth>1 shows *** No + parent bindings, then pops.
                     parent_bindings = _pop_frame()   # depth becomes N-1, pd restored
                     sys.stdout.write("\n*** No\n")
                     if parent_bindings:
