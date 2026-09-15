@@ -2189,25 +2189,44 @@ _NO_SOLUTION = object()
 
 
 def _report_division_problem(t: 'PsiTerm', eng, _depth: int = 0) -> bool:
-    """Report the first fault in a division sub-term of t, if there is one.
+    """Report the first arithmetic fault in a sub-term of t, if there is one.
 
-    No division takes a zero divisor, and integer division additionally needs
-    integer arguments.  Either fault is decidable as soon as the offending
-    argument is known, with the other one still free, so reporting it here
-    lets the caller fail a goal rather than suspend on a constraint that can
-    never hold.  Returns True when something was reported.
+    No division takes a zero divisor, integer division additionally needs
+    integer arguments, and neither a square root of a negative number nor a
+    logarithm of zero or less has a value.  Each fault is decidable as soon as
+    the offending argument is known, with any other one still free, so
+    reporting it here lets the caller fail a goal rather than suspend on a
+    constraint that can never hold.  Returns True when something was reported.
     """
     if t is None or _depth > 10:
         return False
     t = t.deref()
     if t.type is None:
         return False
-    if _get_sym(t) in ('//', '/'):
+    _sym_rp = _get_sym(t)
+    if _sym_rp in ('sqrt', 'log'):
+        import sys as _sys_rp
+        _a1_rp = t.attr_list.get('1')
+        _ok_rp, _v_rp = (_eval_arith(_a1_rp, eng) if _a1_rp is not None
+                         else (False, 0.0))
+        if _ok_rp:
+            _msg_rp = None
+            if _sym_rp == 'sqrt' and _v_rp < 0:
+                _msg_rp = 'square root of negative number'
+            elif _sym_rp == 'log' and _v_rp == 0:
+                _msg_rp = 'logarithm of zero'
+            elif _sym_rp == 'log' and _v_rp < 0:
+                _msg_rp = 'logarithm of negative number'
+            if _msg_rp is not None:
+                _sys_rp.stderr.write(
+                    f"*** Error: {_msg_rp} in {_term_to_str(t, eng)}.\n")
+                return True
+    if _sym_rp in ('//', '/'):
         import sys as _sys_div
         a1, a2 = t.attr_list.get('1'), t.attr_list.get('2')
         ok1, v1 = _eval_arith(a1, eng) if a1 is not None else (False, 0.0)
         ok2, v2 = _eval_arith(a2, eng) if a2 is not None else (False, 0.0)
-        if _get_sym(t) == '//':
+        if _sym_rp == '//':
             for arg, ok, val in ((a1, ok1, v1), (a2, ok2, v2)):
                 if ok and val != int(val):
                     _sys_div.stderr.write(
