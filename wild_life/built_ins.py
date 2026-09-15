@@ -1758,6 +1758,40 @@ def bi_parse(goal: PsiTerm, eng) -> bool:
 
 _ARITH_DEBUG = False  # Set True to debug arithmetic evaluation
 
+def _apply_to_call(t: PsiTerm, eng) -> Optional[PsiTerm]:
+    """Rebuild F(Args) from an apply(Args, functor => F) term.
+
+    The parser turns a call through a functor variable, `F(A)`, into
+    apply(A, functor => F).  Once F is bound this gives back the call it
+    stands for; it returns None while F is still unknown.
+    """
+    wl = eng.wl if eng is not None else None
+    if wl is None or getattr(wl, 'apply', None) is None or t.type is not wl.apply:
+        return None
+    key = (wl.functor.symbol
+           if (getattr(wl, 'functor', None) and wl.functor and wl.functor.keyword)
+           else 'functor')
+    fa = t.attr_list.get(key)
+    if fa is None:
+        return None
+    fv = fa.deref()
+    if fv.type is None or _term_is_unbound(fv, eng):
+        return None
+    call = PsiTerm()
+    call.type = fv.type
+    for k, v in t.attr_list.items():
+        if k != key:
+            call.attr_list[k] = v
+    # Features the functor already carries (a partial application such as *(23))
+    for k, v in fv.attr_list.items():
+        if k not in call.attr_list:
+            call.attr_list[k] = v
+    from wild_life.data_structures import NON_STRICT_TERM as _NST_AP
+    if fv.flags & _NST_AP:
+        call.flags |= _NST_AP
+    return call
+
+
 def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     """Evaluate an arithmetic expression. Returns (ok, value)."""
     if t is None or _depth > 40:
@@ -1770,6 +1804,14 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         return _eval_arith(cell, eng, _depth + 1)
     wl = eng.wl
     sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
+
+    # A call written through a functor variable evaluates once the functor is
+    # known, so that `F(A)*F(C) > 0` can be computed at all.
+    if getattr(wl, 'apply', None) is not None and t.type is wl.apply:
+        _ap_call = _apply_to_call(t, eng)
+        if _ap_call is None:
+            return False, 0.0
+        return _eval_arith(_ap_call, eng, _depth + 1)
 
     if t.value is not None and t.type and t.type.is_subtype_of(wl.real):
         # Fire int/real delay rule for parsed literal integers (not computed by _make_number).
@@ -2769,6 +2811,13 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
         head = copy_term(h0, _vm)
         body = copy_term(b0, _vm)
         body_d = body.deref()
+
+        # A rule whose head asks for features the call does not supply belongs
+        # to a partial application: `e5(F,A) -> F(A)` passes `p` as a value, and
+        # reducing it against `p(X) -> …` here would both give `p` an argument
+        # it was never called with and hand back p's body as the value of F.
+        if set(head.deref().attr_list.keys()) - set(t.attr_list.keys()):
+            continue
 
         # Handle conditional rule: body = val_part | guard
         # Run the guard with an inner proof and return the value part.
