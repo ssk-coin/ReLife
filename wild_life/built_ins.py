@@ -1145,20 +1145,28 @@ def _eval_and_conjunction(t: PsiTerm, eng) -> Optional[PsiTerm]:
             return None  # empty disjunction = fail (No)
         return _make_disjunction_psi(surviving, wl)
 
-    # Unify t1 and t2 through a fresh variable to find their meet
-    fresh = PsiTerm()
-    fresh.type = wl.top
-    mark = eng.trail.mark()
-    ok1 = eng.unifier.unify(fresh, t1)
-    if not ok1:
-        eng.trail.undo_to(mark)
-        return None
-    fresh_d = fresh.deref()
-    ok2 = eng.unifier.unify(fresh_d, t2)
-    if not ok2:
-        eng.trail.undo_to(mark)
-        return None
-    return fresh.deref()
+    # Unify t1 and t2 through a fresh variable to find their meet.
+    # The order the two sides reach the fresh variable matters for a sort
+    # carrying a membership condition (`posint := X:int | X>=0`): the condition
+    # is proven the moment the variable takes that sort, so a still-uninstantiated
+    # variable would be judged against it.  `posint & 2` therefore feeds the
+    # concrete side in first, exactly as `2 & posint` already did.
+    def _meet(first: PsiTerm, second: PsiTerm) -> Optional[PsiTerm]:
+        fresh = PsiTerm()
+        fresh.type = wl.top
+        mark = eng.trail.mark()
+        if not eng.unifier.unify(fresh, first):
+            eng.trail.undo_to(mark)
+            return None
+        if not eng.unifier.unify(fresh.deref(), second):
+            eng.trail.undo_to(mark)
+            return None
+        return fresh.deref()
+
+    _r = _meet(t1, t2)
+    if _r is None:
+        _r = _meet(t2, t1)
+    return _r
 
 
 def _has_concrete_non_numeric_arg(t: PsiTerm, eng) -> bool:
