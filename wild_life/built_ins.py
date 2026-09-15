@@ -7256,9 +7256,13 @@ def _bi_listing_one(defn, wl, imported: bool = False) -> None:
     is_function = (defn.type == DefType.FUNCTION)
     succeed_sym = wl.succeed.keyword.symbol if wl.succeed and wl.succeed.keyword else 'succeed'
 
-    if not imported:
-        # 自モジュール述語: dynamic 宣言ヘッダを表示
-        print(f"\ndynamic({func_name})?")
+    # 各定義の前に空行 (built_ins.lf の listing_2 が挟む nl に相当)。
+    print()
+    if getattr(defn, 'is_dynamic', False):
+        # `dynamic(P)?` を宣言された述語だけがヘッダを持つ (assert2.lf 末尾の
+        # dynamic(p)? / dynamic(f)? がその例)。宣言のない long.lf の q は
+        # ヘッダなしで列挙される。
+        print(f"dynamic({func_name})?")
 
     for h, b in active_rules:
         head_str, goal_strs = _rule_to_string(h, b, wl)
@@ -7266,23 +7270,11 @@ def _bi_listing_one(defn, wl, imported: bool = False) -> None:
         if is_function:
             vs = goal_strs[0] if goal_strs else 'true'
             print(f"{head_str} -> {vs}.")
-        elif imported:
-            # インポート述語: 常に ':-' ボディ付きで表示 (各ゴール改行)
-            if goal_strs:
-                bs = ',\n        '.join(goal_strs)
-            else:
-                bs = 'succeed'
-            print(f"{head_str} :-\n        {bs}.")
         else:
-            # 自モジュール述語: succeed ボディは省略
-            has_body = (b is not None and b.type is not None
-                        and b.type.keyword is not None
-                        and b.type.keyword.symbol != succeed_sym)
-            if has_body:
-                bs = ',\n        '.join(goal_strs) if goal_strs else 'succeed'
-                print(f"{head_str} :-\n        {bs}.")
-            else:
-                print(f"{head_str}.")
+            # 述語: ボディは常に ':-' 付きで表示 (各ゴール改行)。
+            # ファクトも `HEAD :- succeed.` として列挙される。
+            bs = ',\n        '.join(goal_strs) if goal_strs else 'succeed'
+            print(f"{head_str} :-\n        {bs}.")
 
 
 def _bi_listing_all(eng, wl) -> None:
@@ -7330,11 +7322,8 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
     imported_pending = []   # list of defn (imported, with rules)
 
     def flush_imported():
-        """collected imported entries を空行区切りで出力してリセット"""
-        for k, d in enumerate(imported_pending):
-            # k==0: プロンプト直後なので改行1つでプロンプト行を終わらせる
-            # k>0 : 前エントリの末尾 \n に続く空行区切り
-            print()
+        """collected imported entries を出力してリセット"""
+        for d in imported_pending:
             _bi_listing_one(d, wl, imported=True)
         imported_pending.clear()
 
@@ -8564,8 +8553,12 @@ def register_all(wl) -> None:
             return True
         arg = arg.deref()
         # If the type has no rule, set it to an empty list so assert/retract work
-        if arg.type and arg.type.rule is None:
-            arg.type.rule = []
+        if arg.type:
+            if arg.type.rule is None:
+                arg.type.rule = []
+            # listing prints a `dynamic(P)?` header for a predicate declared
+            # this way, so that its listing can be read back in.
+            arg.type.is_dynamic = True
         return True
     _reg('dynamic', _bi_dynamic)
 
