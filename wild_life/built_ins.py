@@ -97,6 +97,8 @@ _ARITH_OPS_SET = frozenset((
     'cpu_time', 'real_time',
     # Global integer counter (0-ary; increments each evaluation)
     'genint',
+    # Random integer draw (unary)
+    'random',
 ))
 
 
@@ -118,7 +120,7 @@ def _is_complete_arith_expr(t: 'PsiTerm') -> bool:
     # Unary-only operators: need exactly '1' arg
     _unary_only = frozenset(('abs', 'sqrt', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
                               'exp', 'log', 'floor', 'ceiling', 'round', 'truncate',
-                              'float', 'integer', 'sign', 'msb', '\\'))
+                              'float', 'integer', 'sign', 'msb', 'random', '\\'))
     if sym in _unary_only:
         return '1' in t.attr_list
     # '-' is both unary and binary: valid with 1 arg (unary) or 2 args (binary)
@@ -1995,7 +1997,7 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     # The handlers further down (strlen, asc, int, real and the 0-ary
     # cpu_time / real_time / genint) sit past this exit, so they are named
     # here — otherwise none of them would ever be reached.
-    _arith_late_syms = frozenset(('strlen', 'asc', 'int', 'real',
+    _arith_late_syms = frozenset(('strlen', 'asc', 'int', 'real', 'random',
                                   'cpu_time', 'real_time', 'genint'))
     if sym not in _arith_binary_syms and sym not in _arith_late_syms:
         return False, 0.0
@@ -2118,6 +2120,17 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         if ok:
             return True, float(v)
         return False, 0.0
+
+    # random(N) — a random integer in [0,N), drawn from the generator that
+    # initrandom(Seed) seeds, so that the same seed replays the same sequence.
+    if sym == 'random':
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return False, 0.0
+        ok, v = _eval_arith(a1.deref(), eng)
+        if not ok or v <= 0:
+            return False, 0.0
+        return True, float(_random_gen(eng).randrange(int(v)))
 
     # cpu_time — 0-ary function returning process CPU time in seconds
     if sym == 'cpu_time' and not t.attr_list:
@@ -7606,13 +7619,42 @@ def bi_succ_or_zero(goal: PsiTerm, eng) -> bool:
     return bi_succ(goal, eng)
 
 
-def bi_rand(goal: PsiTerm, eng) -> bool:
-    """random(X) — X is a random float [0,1)."""
-    import random
+def _random_gen(eng):
+    """The interpreter's random generator, seeded by initrandom/1."""
+    import random as _random_mod
+    wl = eng.wl
+    gen = getattr(wl, '_random_gen', None)
+    if gen is None:
+        gen = _random_mod.Random()
+        wl._random_gen = gen
+    return gen
+
+
+def bi_initrandom(goal: PsiTerm, eng) -> bool:
+    """initrandom(Seed) — restart the random generator from Seed, so that the
+    same seed replays the same sequence of draws."""
+    import random as _random_mod
     arg = _get_one_arg(goal)
     if arg is None:
         return False
-    return _unify(eng, arg, eng.wl.make_number(random.random()))
+    arg = arg.deref()
+    ok, v = _eval_arith(arg, eng)
+    if not ok:
+        return False
+    eng.wl._random_gen = _random_mod.Random(int(v))
+    return True
+
+
+def bi_rand(goal: PsiTerm, eng) -> bool:
+    """random(X) — X is a random float [0,1).
+
+    The functional form random(N), an integer in [0,N), is evaluated in
+    _eval_arith; this is the predicate form, which draws into an unbound X.
+    """
+    arg = _get_one_arg(goal)
+    if arg is None:
+        return False
+    return _unify(eng, arg, eng.wl.make_number(_random_gen(eng).random()))
 
 
 def bi_msort_key(goal: PsiTerm, eng) -> bool:
@@ -8637,6 +8679,7 @@ def register_all(wl) -> None:
     _reg('plus', bi_plus)
     _reg('between', bi_between)
     _reg('random', bi_rand)
+    _reg('initrandom', bi_initrandom)
 
     # System
     _reg('halt', bi_halt)
