@@ -1838,6 +1838,24 @@ class Engine:
                 return False
             return True
 
+        # Body is a built-in function in functional position (features,
+        # root_sort, …).  Embedded ones are reduced below as sub-terms, but a
+        # body that IS such a call — `F:f -> features(F)` — has to be evaluated
+        # here, or the call's value would be the unevaluated term.
+        from wild_life.built_ins import _try_eval_string_func as _tesf_body
+        _bi_body = None
+        if not any(_is_user_function(_bv.deref())
+                   for _bv in body_d2.attr_list.values()):
+            # A call still waiting on a user function of its own — copy1.lf's
+            # `copy(X) -> memo_copy(X,[]).1` — is left to the sub-term handling
+            # below, which evaluates the inner call first.
+            _bi_body = _tesf_body(body_d2, self)
+        if _bi_body is not None and _bi_body is not body_d2:
+            if not self.unifier.unify(result, _bi_body):
+                self.trail.undo_to(mark)
+                return False
+            return True
+
         # Body is a compound with possible embedded user-function sub-terms
         # (e.g. [X|app2(L1,L2)] where app2 is a recursive function).
         # Push EVAL goals for each embedded user-function call onto the goal
