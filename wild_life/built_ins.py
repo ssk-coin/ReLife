@@ -648,6 +648,11 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None:
             return None
         a1 = a1.deref()
+        # Reduce a nested string function first, as strcon does, so that
+        # str2psi(strcon("a","1")) reads the string and not the call.
+        a1e = _try_eval_string_func(a1, eng)
+        if a1e is not None:
+            a1 = a1e.deref()
         if a1.type and a1.type is eng.wl.quoted_string and a1.value is not None:
             name = str(a1.value)
         elif a1.type and a1.type.keyword:

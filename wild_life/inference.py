@@ -1300,6 +1300,16 @@ class Engine:
         _prev_no_arith = getattr(self, 'no_arith_eval', False)
         if _non_strict:
             self.no_arith_eval = True
+        else:
+            # A strict predicate is given values, not calls: reduce a built-in
+            # function in an argument before matching, so that a clause body
+            # asserting its argument asserts `a1` and not `str2psi("a1")`.
+            from wild_life.built_ins import _try_eval_string_func as _tesf_pa
+            for _k_pa, _a_pa in list(thegoal.attr_list.items()):
+                _a_pa_d = _a_pa.deref()
+                _ev_pa = _tesf_pa(_a_pa_d, self)
+                if _ev_pa is not None and _ev_pa is not _a_pa_d:
+                    thegoal.attr_list[_k_pa] = _ev_pa
         mark = self.trail.mark()
         ok = self.unifier.unify(thegoal, head)
         if _non_strict:
