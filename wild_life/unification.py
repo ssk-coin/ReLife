@@ -299,9 +299,13 @@ class Unifier:
         narrows the rest of the spine along with it.  Features the prototype
         names but t lacks are added; the ones it already has are unified with
         the prototype, which is what fails an incompatible narrowing.
+
+        Only a term that already carries features takes a prototype this way.
+        A bare one is just a sort being named — `Q:person` meeting `julius`
+        leaves Q as julius, not as julius(last_name => caesar).
         """
         proto = getattr(t.type, 'prototype_attrs', None) if t.type is not None else None
-        if not proto:
+        if not proto or not t.attr_list:
             return True
         # A cyclic term would otherwise re-enter through the recursive unify
         # below; the guard is per-unification, so a later retry still applies.
@@ -315,10 +319,13 @@ class Unifier:
             for key, proto_val in proto.items():
                 copy = copy_term(proto_val, var_map)
                 existing = t.attr_list.get(key)
-                if existing is None:
-                    self.set_attr(t, key, copy)
-                elif not self.unify(existing, copy):
+                if existing is not None and not self.unify(existing, copy):
                     return False
+                # Point the feature at the prototype's own node, so features
+                # the prototype shares stay shared on the term: every feature
+                # of `:: square(side => S, length => S, width => S)` is one
+                # node even where the term already carried equal values.
+                self.set_attr(t, key, copy)
             return True
         finally:
             self._applying_proto.discard(id(t))
@@ -806,13 +813,6 @@ class Unifier:
         if not self._unify_attrs(u, v):
             return False
 
-        # ソート絞り込み: :: Sort(attrs) プロトタイプに基づいて、より特定のソートに絞り込む
-        # cleopatra(nose=>pretty, occupation=>queen) の prototype があり、
-        # u が person(nose=>pretty) になったとき、 u を cleopatra に絞り込む
-        u_canon = u.deref()
-        if u_canon.type is not None and u_canon.attr_list and self.engine is not None:
-            self._try_sort_narrowing(u_canon)
-
         # After successful structural unification, merge the two psi-terms by
         # binding v → u (via coref).  This preserves the sharing relationship
         # so that print_variables can detect when two variables refer to the
@@ -838,6 +838,14 @@ class Unifier:
             # When a psi-term u has daemon resids (from such_that), and u is
             # merged into v (compound-compound), wake them now so the daemon fires.
             self._wakeup_resid(u, v)
+
+        # Sort narrowing from a :: Sort(attrs) prototype, e.g. a term that has
+        # become person(nose => pretty) narrows to cleopatra.  This runs after
+        # the merge above, on whichever psi-term is now the canonical one —
+        # narrowing the other would be undone by the merge.
+        u_canon = u.deref()
+        if u_canon.type is not None and u_canon.attr_list and self.engine is not None:
+            self._try_sort_narrowing(u_canon)
 
         return True
 
@@ -1195,6 +1203,11 @@ class Unifier:
                 pat_sort_ok = True
             else:
                 pat_sort_ok = new_sort.is_subtype_of(pat_sort)
+                # A sort under delay_check/1 holds its rules until a term
+                # narrows past it: reaching the sort itself is not yet the
+                # final word on what the term is.
+                if not pat_sort.always_check and new_sort is pat_sort:
+                    pat_sort_ok = False
             if not pat_sort_ok:
                 continue
 
@@ -1233,13 +1246,13 @@ class Unifier:
                 self.trail.undo_to(_trial_mark)
                 continue
 
-            # Build a materialised goal copy (resolved current bindings) before
-            # proving so that if the proof undoes partial bindings, the goal term
-            # still contains the values visible at this point.
+            # Prove the goal itself, not a copy: it shares the pattern's
+            # variables, and that sharing is how the proof reaches the term.
+            # `get_along(P,Q)` binding Q to julius is what gives the cleopatra
+            # its best_friend; against a copy the binding would be discarded.
             from wild_life.data_structures import GoalType as _GT
             from wild_life.inference import _DEFRULES as _defrules_sentinel
-            goal_d_copy = goal_copy.deref()
-            goal_materialized = copy_term(goal_d_copy, {})
+            goal_materialized = goal_copy.deref()
 
             # Fire integer literal delays BEFORE the goal so they appear first in output.
             # In C Wild Life the integer feature key '1' in write(C.1) fires BEFORE
