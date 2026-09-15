@@ -31,6 +31,30 @@ _ARITH_OPS_NON_STRICT = frozenset((
     'round', 'truncate', 'exp', 'log', 'sin', 'cos', 'tan',
 ))
 
+def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
+    """Freeze the arithmetic that a non-strict call's arguments stand for.
+
+    A predicate declared non_strict does not evaluate what it is given, and in
+    C Wild Life that reaches the whole clause the call sits in: once `foo(N)`
+    is non-strict, the `N:(2*4)` elsewhere in the same clause reads as `2 * 4`
+    for every other call too, since both are the one variable.
+    """
+    non_strict = getattr(eng, 'non_strict_set', None)
+    if not non_strict or t is None:
+        return
+    if visited is None:
+        visited = set()
+    t = t.deref()
+    if id(t) in visited:
+        return
+    visited.add(id(t))
+    if t.type in non_strict:
+        for arg in t.attr_list.values():
+            _mark_arith_non_strict(arg)
+    for sub in t.attr_list.values():
+        _mark_non_strict_args(sub, eng, visited)
+
+
 def _mark_arith_non_strict(t: PsiTerm, visited: set = None) -> None:
     """Recursively mark arithmetic operator psiterms with NON_STRICT_TERM.
 
@@ -669,6 +693,7 @@ class Engine:
                  typ: DefType) -> bool:
         """Add a clause to the database (implements assert_clause logic)."""
         wl = self.wl
+        _mark_non_strict_args(body, self)
         head = head.deref()
         defn = head.type
         if defn is None:
@@ -1275,6 +1300,16 @@ class Engine:
         _prev_no_arith = getattr(self, 'no_arith_eval', False)
         if _non_strict:
             self.no_arith_eval = True
+        else:
+            # A strict predicate is given values, not calls: reduce a built-in
+            # function in an argument before matching, so that a clause body
+            # asserting its argument asserts `a1` and not `str2psi("a1")`.
+            from wild_life.built_ins import _try_eval_string_func as _tesf_pa
+            for _k_pa, _a_pa in list(thegoal.attr_list.items()):
+                _a_pa_d = _a_pa.deref()
+                _ev_pa = _tesf_pa(_a_pa_d, self)
+                if _ev_pa is not None and _ev_pa is not _a_pa_d:
+                    thegoal.attr_list[_k_pa] = _ev_pa
         mark = self.trail.mark()
         ok = self.unifier.unify(thegoal, head)
         if _non_strict:
@@ -2151,6 +2186,7 @@ class Engine:
             Pass engine.choice_stack to prevent this fresh query from
             consuming choice points that belong to an enclosing query.
         """
+        _mark_non_strict_args(goal, self)
         self.push_goal(GoalType.PROVE, goal, _DEFRULES, None)
         return self.run(cs_barrier=cs_barrier)
 

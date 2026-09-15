@@ -275,6 +275,8 @@ class Unifier:
         # If we encounter the same pair again (via circular attrs), we return True
         # immediately (the rational-tree assumption: cyclic terms can be unified).
         self._unifying_pairs: set = set()
+        # ids of psi-terms whose conditional sort is being checked.
+        self._proving_sort: set = set()
         # ids of psi-terms whose :: Sort(attrs). prototype is being applied.
         self._applying_proto: set = set()
 
@@ -329,6 +331,53 @@ class Unifier:
             return True
         finally:
             self._applying_proto.discard(id(t))
+
+    def _prove_sort_condition(self, t: PsiTerm) -> bool:
+        """Prove the membership condition a conditional sort carries.
+
+        `zero := I | I = 0.` makes every zero satisfy `I = 0`, so narrowing a
+        term to zero has to prove that of the term — and keep what the proof
+        binds, which is how `A = zero` answers `A = 0: zero`, and how
+        `C = -5` refuses to be positive.
+        """
+        from wild_life.data_structures import DefType as _DT_sc
+        defn = t.type
+        if (self.engine is None or defn is None or defn.type is not _DT_sc.TYPE
+                or not defn.rule):
+            return True
+        # The proof narrows sorts of its own, including the pattern it matches
+        # against; without a guard it would ask the same question again on the
+        # way, without end.
+        if self._proving_sort:
+            return True
+        self._proving_sort.add(id(t))
+        try:
+            from wild_life.data_structures import GoalType as _GT_sc
+            from wild_life.inference import _DEFRULES as _DR_sc, _INNER_RUN_BARRIER as _IRB_sc
+            eng = self.engine
+            for pat, cond in defn.rule:
+                if pat is None or cond is None:
+                    continue
+                var_map: dict = {}
+                pat_copy = copy_term(pat, var_map)
+                cond_copy = copy_term(cond, var_map)
+                mark = self.trail.mark()
+                if not self.unify(t, pat_copy):
+                    self.trail.undo_to(mark)
+                    return False
+                cp_save, gs_save = eng.choice_stack, eng.goal_stack
+                eng.goal_stack = None
+                eng.push_goal(_GT_sc.PROVE, cond_copy.deref(), _DR_sc, None)
+                old_ok = eng.main_loop_ok
+                ok = eng.run(cs_barrier=cp_save if cp_save is not None else _IRB_sc)
+                eng.main_loop_ok = old_ok
+                eng.choice_stack, eng.goal_stack = cp_save, gs_save
+                if not ok:
+                    self.trail.undo_to(mark)
+                    return False
+            return True
+        finally:
+            self._proving_sort.clear()
 
     def bind_value(self, t: PsiTerm, new_value: Any):
         """PsiTerm の値を変更する (バックトラック可能)"""
@@ -581,6 +630,10 @@ class Unifier:
                         self._fire_delay_rules(_v_canon, _v_canon.type)
                 if _v_canon.attr_list and _v_canon.type is not None and self.engine is not None:
                     self._try_sort_narrowing(_v_canon)
+                # Binding a variable to a conditional sort has to satisfy that
+                # sort's condition, the same as narrowing an existing term to it.
+                if not self._prove_sort_condition(_v_canon):
+                    return False
             return True
 
         if v_is_var:
@@ -590,7 +643,12 @@ class Unifier:
             # Skip if engine is in non-strict call context (engine.no_arith_eval=True).
             from wild_life.data_structures import SORT_VAR as _SORT_VAR_FLAG
             v_is_sort_var = bool(v.flags & _SORT_VAR_FLAG) and v.type is not WL.top
-            _skip_arith = getattr(self.engine, 'no_arith_eval', False) if self.engine else False
+            # A term frozen by a non-strict call keeps its shape: binding it
+            # to a variable is how it reaches the rest of the clause, and
+            # evaluating it here would undo the freeze.
+            from wild_life.data_structures import NON_STRICT_TERM as _NST_BIND
+            _skip_arith = (getattr(self.engine, 'no_arith_eval', False)
+                           if self.engine else False) or bool(u.flags & _NST_BIND)
             if self.engine is not None and not u_is_var and not _skip_arith:
                 _arith_ops = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
                                         'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
@@ -866,10 +924,10 @@ class Unifier:
         # 一方が top (@) → もう一方の型に制約
         if du is WL.top:
             self.bind_type(u, dv)
-            return self._apply_prototype_attrs(u)
+            return self._apply_prototype_attrs(u) and self._prove_sort_condition(u)
         if dv is WL.top:
             self.bind_type(v, du)
-            return self._apply_prototype_attrs(v)
+            return self._apply_prototype_attrs(v) and self._prove_sort_condition(v)
 
         # サブタイプ関係: より特殊な型 (GLB) を採用
         if du.is_subtype_of(dv):
@@ -882,7 +940,7 @@ class Unifier:
                 import math as _math_ut
                 if not _math_ut.isfinite(v.value) or v.value != int(v.value):
                     return False
-            return self._apply_prototype_attrs(v)
+            return self._apply_prototype_attrs(v) and self._prove_sort_condition(v)
         if dv.is_subtype_of(du):
             self.bind_type(u, dv)   # u の型を dv (より特殊) に引き上げ
             # Numeric value compatibility: if u has a concrete numeric value,
@@ -891,7 +949,7 @@ class Unifier:
                 import math as _math_ut
                 if not _math_ut.isfinite(u.value) or u.value != int(u.value):
                     return False
-            return self._apply_prototype_attrs(u)
+            return self._apply_prototype_attrs(u) and self._prove_sort_condition(u)
 
         # 直交した型 (どちらもサブタイプでない) → 互換性チェック
         # ユーザー定義の共通サブタイプがあれば GLB が存在する
@@ -915,7 +973,8 @@ class Unifier:
         glb = glbs[0]
         self.bind_type(u, glb)
         self.bind_type(v, glb)
-        return self._apply_prototype_attrs(u) and self._apply_prototype_attrs(v)
+        return (self._apply_prototype_attrs(u) and self._apply_prototype_attrs(v)
+                and self._prove_sort_condition(u) and self._prove_sort_condition(v))
 
     def _unify_values(self, u: PsiTerm, v: PsiTerm) -> bool:
         """値 (数値・文字列) を単一化する"""

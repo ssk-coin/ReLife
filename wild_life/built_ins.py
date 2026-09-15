@@ -648,6 +648,11 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None:
             return None
         a1 = a1.deref()
+        # Reduce a nested string function first, as strcon does, so that
+        # str2psi(strcon("a","1")) reads the string and not the call.
+        a1e = _try_eval_string_func(a1, eng)
+        if a1e is not None:
+            a1 = a1e.deref()
         if a1.type and a1.type is eng.wl.quoted_string and a1.value is not None:
             name = str(a1.value)
         elif a1.type and a1.type.keyword:
@@ -5928,7 +5933,16 @@ def bi_cond(goal: PsiTerm, eng) -> bool:
             return True
         # Cond is true → evaluate Then as a boolean function
         then_result = _eval_as_bool_func(then_g, eng)
-        return then_result is True
+        if then_result is not None:
+            return then_result
+        # A plain predicate call has no boolean value to read; it is proved,
+        # which is how `cond(true, foo(X))` binds X at all.  Anything else
+        # unresolvable stays a failure, as a conjunction of goals would be.
+        if (then_g.type is not None and then_g.type.type == DefType.PREDICATE
+                and then_g.type._builtin_func is None):
+            eng.push_goal(GoalType.PROVE, then_g, _DEFRULES_SENTINEL, None)
+            return True
+        return False
 
     # ── 3-arg form: predicate if-then-else ──
     from wild_life.inference import prove_cond as _prove_cond
@@ -7195,6 +7209,9 @@ def _rule_to_string(h, b, wl):
     ps = PrintState(outfile=io.StringIO())
     ps.const_quote = True
     ps.indent = False
+    # A listing shows the clause as written: `a(1+2).` lists as `a(1 + 2)`,
+    # not as the 3 it would evaluate to when the clause is used.
+    ps.no_arith_eval = True
 
     ps.go_through(h)
     for g in body_goals:
@@ -7342,6 +7359,32 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
                     print(f"% '{func_name}' is a user-defined predicate with an empty definition.\n")
                 else:
                     _bi_listing_one(defn, wl, imported=False)
+        elif defn is not None and defn.type == DefType.TYPE:
+            # A sort lists as its membership condition, if it was defined with
+            # one, followed by the sorts it sits under.
+            flush_imported()
+            name = defn.keyword.symbol if defn.keyword else '?'
+            print()
+            for _pat, _cond in (defn.rule or []):
+                if _pat is None or _cond is None:
+                    continue
+                # The pattern is shown as the sort being defined, not as the
+                # sort it was written against: `positive := I:int | I > 0`
+                # lists as `:: _A: positive | _A > 0`.  The swap is on the
+                # pattern itself, so that it and the condition still share the
+                # variable and print under one name.
+                from wild_life.data_structures import SORT_VAR as _SV_LST
+                _pat_d = _pat.deref()
+                _was_type, _was_flags = _pat_d.type, _pat_d.flags
+                _pat_d.type, _pat_d.flags = defn, _pat_d.flags | _SV_LST
+                try:
+                    _pat_str, _cond_strs = _rule_to_string(_pat_d, _cond, wl)
+                finally:
+                    _pat_d.type, _pat_d.flags = _was_type, _was_flags
+                print(f":: {_pat_str} | {', '.join(_cond_strs)}.")
+            for _parent in defn.parents:
+                _pname = _parent.keyword.symbol if _parent.keyword else '@'
+                print(f"{name} <| {_pname}.")
         elif defn is not None and defn.type == DefType.GLOBAL:
             # C Wild Life lists a global by name only — it does not report the
             # value the cell currently holds.
