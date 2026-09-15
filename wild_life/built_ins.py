@@ -1418,7 +1418,10 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
 
 def _term_to_str(t: PsiTerm, eng, quoted=True) -> str:
     from wild_life.print_term import term_to_string
-    return term_to_string(t, quoted=quoted, wl=eng.wl)
+    # Pass the query's variables so a diagnostic names them as the user wrote
+    # them (`B`) rather than by an internal label (`_A`).
+    return term_to_string(t, quoted=quoted, wl=eng.wl,
+                          var_tree=getattr(eng, '_last_var_tree', None))
 
 
 def _is_var(t: PsiTerm, eng) -> bool:
@@ -1844,6 +1847,23 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         '>>': lambda a, b: float(int(a) >> int(b)),
         '<<': lambda a, b: float(int(a) << int(b)),
     }
+    if sym == '//' and ok1 and ok2:
+        # C Wild Life's integer division reports a non-integer argument and a
+        # zero divisor, and leaves the expression unevaluated either way, which
+        # fails the goal that asked for it.
+        import sys as _sys_div
+        for _arg, _val in ((arg1, v1), (arg2, v2)):
+            if _val != int(_val):
+                _sys_div.stderr.write(
+                    f"*** Warning: argument '{_term_to_str(_arg.deref(), eng)}' "
+                    f"of integer division is not an integer.\n")
+                return False, 0.0
+        if v2 == 0:
+            _sys_div.stderr.write(
+                f"*** Error: division by zero in {_term_to_str(t, eng)}.\n")
+            return False, 0.0
+        return True, _int_div(v1, v2)
+
     if sym in ops2 and ok1 and ok2:
         try:
             _result_val = float(ops2[sym](v1, v2))
@@ -5130,42 +5150,40 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                     # Re-suspension is correct even for is_resid_refiring cases:
                     # drop only when truly cyclic (a_coeff==1 with no const solution).
                     if not vars_in_expr:
-                        # No free vars in expression — evaluate it and unify.
-                        ok_eval, v_eval = _eval_arith(b_d, eng)
-                        if ok_eval:
-                            b_d = _make_number(eng, v_eval)
-                        else:
-                            # Concrete but unevaluable (e.g. division by zero, non-numeric
-                            # atom argument).  Check if any immediate arg is a concrete
-                            # non-numeric atom — if so, emit the standard Wild Life warning.
-                            _b_sym_fail = (b_d.type.keyword.symbol
-                                           if (b_d.type and b_d.type.keyword) else '')
-                            if _b_sym_fail in _ARITH_OPS_SET:
-                                _fa1, _fa2 = _get_two_args(b_d)
-                                # Evaluate each arg to its concrete form (resolving dot
-                                # accesses, feature lookups, etc.) for the display message.
-                                def _eval_arg_for_warn(a_ref):
-                                    if a_ref is None:
-                                        return None
-                                    a_d_w = a_ref.deref()
-                                    _ev_w = _try_eval_string_func(a_d_w, eng)
-                                    return _ev_w if _ev_w is not None else a_d_w
-                                _fa1_ev = _eval_arg_for_warn(_fa1)
-                                _fa2_ev = _eval_arg_for_warn(_fa2)
-                                # Build a normalised copy of b_d with evaluated args.
-                                _b_norm_w = PsiTerm()
-                                _b_norm_w.type = b_d.type
-                                _b_norm_w.attr_list = {}
-                                if _fa1_ev is not None:
-                                    _b_norm_w.attr_list['1'] = _fa1_ev
-                                if _fa2_ev is not None:
-                                    _b_norm_w.attr_list['2'] = _fa2_ev
-                                if _has_concrete_non_numeric_arg(_b_norm_w, eng):
-                                    import sys as _sys_w
-                                    _expr_str_w = _term_to_str(_b_norm_w, eng, quoted=True)
-                                    print(f"*** Warning: non-numeric argument(s) in "
-                                          f"'{_expr_str_w}'.", file=_sys_w.stderr)
-                            return False
+                        # Concrete but unevaluable (e.g. division by zero,
+                        # non-numeric atom argument).  The evaluation above
+                        # already failed on it, so re-evaluating here would only
+                        # repeat whatever diagnostic it printed.  Check if any
+                        # immediate arg is a concrete non-numeric atom — if so,
+                        # emit the standard Wild Life warning.
+                        _b_sym_fail = (b_d.type.keyword.symbol
+                                       if (b_d.type and b_d.type.keyword) else '')
+                        if _b_sym_fail in _ARITH_OPS_SET:
+                            _fa1, _fa2 = _get_two_args(b_d)
+                            # Evaluate each arg to its concrete form (resolving dot
+                            # accesses, feature lookups, etc.) for the display message.
+                            def _eval_arg_for_warn(a_ref):
+                                if a_ref is None:
+                                    return None
+                                a_d_w = a_ref.deref()
+                                _ev_w = _try_eval_string_func(a_d_w, eng)
+                                return _ev_w if _ev_w is not None else a_d_w
+                            _fa1_ev = _eval_arg_for_warn(_fa1)
+                            _fa2_ev = _eval_arg_for_warn(_fa2)
+                            # Build a normalised copy of b_d with evaluated args.
+                            _b_norm_w = PsiTerm()
+                            _b_norm_w.type = b_d.type
+                            _b_norm_w.attr_list = {}
+                            if _fa1_ev is not None:
+                                _b_norm_w.attr_list['1'] = _fa1_ev
+                            if _fa2_ev is not None:
+                                _b_norm_w.attr_list['2'] = _fa2_ev
+                            if _has_concrete_non_numeric_arg(_b_norm_w, eng):
+                                import sys as _sys_w
+                                _expr_str_w = _term_to_str(_b_norm_w, eng, quoted=True)
+                                print(f"*** Warning: non-numeric argument(s) in "
+                                      f"'{_expr_str_w}'.", file=_sys_w.stderr)
+                        return False
                     else:
                         from wild_life.data_structures import Goal, Residuation
                         eq_defn = getattr(wl, 'eqsym', None) or wl.syntax_module.symbol_table.get('=')
