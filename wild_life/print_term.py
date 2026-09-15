@@ -272,6 +272,9 @@ class PrintState:
         # When True, suppress arithmetic evaluation during printing
         # (set inside backtick-quoted term contexts)
         self.no_arith_eval: bool = False
+        # Inside a backtick that is being stripped for display: the term keeps
+        # its shape (no arithmetic is evaluated) but the backtick is not shown.
+        self.frozen_arith: bool = False
         # Track psi-term ids that were first seen as structural components
         # (i.e. inside another term's attr_list), used by forbid_variables.
         self._structural_ids: Set[int] = set()
@@ -826,6 +829,7 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
     flat_ps.const_quote = ps.const_quote
     flat_ps.write_resids = ps.write_resids
     flat_ps.no_arith_eval = ps.no_arith_eval  # propagate frozen context
+    flat_ps.frozen_arith = ps.frozen_arith
     flat_ps.pointer_names = ps.pointer_names
     flat_ps.printed_pointers = dict(ps.printed_pointers)
     flat_ps.col = ps.col + len(prefix_str)  # column just before '['
@@ -1001,7 +1005,7 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
                                       'max', 'min', 'abs', 'sqrt', 'floor', 'ceiling',
                                       '/\\', '\\/', 'xor', '>>', '<<'))
     if (_psym in _arith_syms_display and t.value is None and t.attr_list
-            and not ps.no_arith_eval):
+            and not ps.no_arith_eval and not ps.frozen_arith):
         from wild_life.data_structures import NON_STRICT_TERM as _NST_DISP
         if not (t.flags & _NST_DISP):
             _arith_val = _eval_pure_arith(t, wl)
@@ -1107,7 +1111,14 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
                 # Normal context: strip the backtick (sort annotation display).
                 # Use _pretty_tag_or_psi_term so cycle detection (printed_pointers)
                 # is honoured for inner terms that are named variables.
-                _pretty_tag_or_psi_term(ps, inner.deref(), sprec, depth + 1, wl)
+                # The backtick goes but what it froze stays frozen, so
+                # `X:`(1+2)` still displays as `X = 1 + 2`.
+                _was_frozen = ps.frozen_arith
+                ps.frozen_arith = True
+                try:
+                    _pretty_tag_or_psi_term(ps, inner.deref(), sprec, depth + 1, wl)
+                finally:
+                    ps.frozen_arith = _was_frozen
             else:
                 # Frozen context: keep the backtick visible.
                 _BACKTICK_PREC = 200  # fy 200 in Wild Life
@@ -1280,6 +1291,7 @@ def _pretty_attr(ps: PrintState, attr_list: dict, depth: int, wl,
     flat_ps.const_quote = ps.const_quote
     flat_ps.write_resids = ps.write_resids
     flat_ps.no_arith_eval = ps.no_arith_eval  # propagate frozen context
+    flat_ps.frozen_arith = ps.frozen_arith
     flat_ps.pointer_names = ps.pointer_names
     flat_ps.printed_pointers = dict(ps.printed_pointers)
     flat_ps.col = ps.col            # column before '('
