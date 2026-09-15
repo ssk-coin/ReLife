@@ -1870,8 +1870,6 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         '+': lambda a, b: a + b,
         '-': lambda a, b: a - b,
         '*': lambda a, b: a * b,
-        '/': lambda a, b: a / b if b != 0 else float('inf'),
-        '//': lambda a, b: _int_div(a, b) if b != 0 else 0.0,
         'mod': lambda a, b: float(int(a) % int(b)) if b != 0 else 0.0,
         '**': lambda a, b: a ** b,
         '^': lambda a, b: a ** b,
@@ -1884,17 +1882,17 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         '>>': lambda a, b: float(int(a) >> int(b)),
         '<<': lambda a, b: float(int(a) << int(b)),
     }
-    if sym == '//' and (ok1 or ok2):
-        # Integer division needs integer arguments and a non-zero divisor;
-        # either fault leaves the expression unevaluated and is reported by the
-        # caller (see _report_int_div_problem), so that a goal proved several
-        # times over does not repeat the diagnostic.
-        if (ok1 and v1 != int(v1)) or (ok2 and v2 != int(v2)):
+    if sym in ('//', '/') and (ok1 or ok2):
+        # Dividing by zero, and for integer division a non-integer argument,
+        # leave the expression unevaluated and are reported by the caller (see
+        # _report_division_problem), so that a goal proved several times over
+        # does not repeat the diagnostic.
+        if sym == '//' and ((ok1 and v1 != int(v1)) or (ok2 and v2 != int(v2))):
             return False, 0.0
         if ok2 and v2 == 0:
             return False, 0.0
         if ok1 and ok2:
-            return True, _int_div(v1, v2)
+            return True, _int_div(v1, v2) if sym == '//' else v1 / v2
 
     if sym in ops2 and ok1 and ok2:
         try:
@@ -2120,37 +2118,38 @@ def _get_linear_coeff(expr, x_var, eng):
 _NO_SOLUTION = object()
 
 
-def _report_int_div_problem(t: 'PsiTerm', eng, _depth: int = 0) -> bool:
-    """Report the first fault in a `//` sub-term of t, if there is one.
+def _report_division_problem(t: 'PsiTerm', eng, _depth: int = 0) -> bool:
+    """Report the first fault in a division sub-term of t, if there is one.
 
-    Integer division needs integer arguments and a non-zero divisor.  Either
-    fault is decidable as soon as the offending argument is known, with the
-    other one still free, so reporting it here lets the caller fail a goal
-    rather than suspend on a constraint that can never hold.  Returns True
-    when something was reported.
+    No division takes a zero divisor, and integer division additionally needs
+    integer arguments.  Either fault is decidable as soon as the offending
+    argument is known, with the other one still free, so reporting it here
+    lets the caller fail a goal rather than suspend on a constraint that can
+    never hold.  Returns True when something was reported.
     """
     if t is None or _depth > 10:
         return False
     t = t.deref()
     if t.type is None:
         return False
-    if _get_sym(t) == '//':
+    if _get_sym(t) in ('//', '/'):
         import sys as _sys_div
         a1, a2 = t.attr_list.get('1'), t.attr_list.get('2')
         ok1, v1 = _eval_arith(a1, eng) if a1 is not None else (False, 0.0)
         ok2, v2 = _eval_arith(a2, eng) if a2 is not None else (False, 0.0)
-        for arg, ok, val in ((a1, ok1, v1), (a2, ok2, v2)):
-            if ok and val != int(val):
-                _sys_div.stderr.write(
-                    f"*** Warning: argument '{_term_to_str(arg.deref(), eng)}' "
-                    f"of integer division is not an integer.\n")
-                return True
+        if _get_sym(t) == '//':
+            for arg, ok, val in ((a1, ok1, v1), (a2, ok2, v2)):
+                if ok and val != int(val):
+                    _sys_div.stderr.write(
+                        f"*** Warning: argument '{_term_to_str(arg.deref(), eng)}' "
+                        f"of integer division is not an integer.\n")
+                    return True
         if ok2 and v2 == 0:
             _sys_div.stderr.write(
                 f"*** Error: division by zero in {_term_to_str(t, eng)}.\n")
             return True
     for sub in t.attr_list.values():
-        if _report_int_div_problem(sub, eng, _depth + 1):
+        if _report_division_problem(sub, eng, _depth + 1):
             return True
     return False
 
@@ -2227,13 +2226,16 @@ def _try_solve_nonlinear(expr, x_var, v_lhs, eng):
             ok1, v1 = _eval_arith(arg1, eng)
             if ok1:
                 return _solve_int_div_divisor(v1, v_lhs)
-    # x * x = 0 → x = 0
     if sym == '*':
         arg1_d = arg1.deref()
         arg2_d = arg2.deref()
         if id(arg1_d) == id(x_var) and id(arg2_d) == id(x_var):
+            # x * x = v
+            if v_lhs < 0:
+                return _NO_SOLUTION   # no real number squares to a negative
             if abs(v_lhs) < 1e-12:
                 return 0.0
+            # A positive v has two roots, so leave it for the constraint.
     # Could extend with x^n etc., but division covers the main arith cases
     return None
 
@@ -2342,7 +2344,7 @@ def _linear_decompose_psi(expr, x_var, eng, wl):
             if r1 is None:
                 return None
             ok_b, v_b = _eval_arith(r1[1], eng)
-            b_psi = _make_number(eng, r1[1] * v2) if ok_b else r1[1]
+            b_psi = _make_number(eng, v_b * v2) if ok_b else r1[1]
             return (r1[0] * v2, b_psi)
         return None
     elif sym == '/':
@@ -5226,7 +5228,7 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                         # non-numeric atom argument).  Check if any immediate
                         # arg is a concrete non-numeric atom — if so, emit the
                         # standard Wild Life warning.
-                        if _report_int_div_problem(b_d, eng):
+                        if _report_division_problem(b_d, eng):
                             return False
                         _b_sym_fail = (b_d.type.keyword.symbol
                                        if (b_d.type and b_d.type.keyword) else '')
@@ -5260,7 +5262,7 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                         # A constraint that can never hold, such as a division
                         # by a divisor already known to be zero, fails now
                         # instead of suspending on its remaining free vars.
-                        if _report_int_div_problem(b_d, eng):
+                        if _report_division_problem(b_d, eng):
                             return False
                         # `0 // X` is zero for every divisor that divides at
                         # all, so a free left side takes that value rather than
