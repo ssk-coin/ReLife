@@ -1847,22 +1847,17 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         '>>': lambda a, b: float(int(a) >> int(b)),
         '<<': lambda a, b: float(int(a) << int(b)),
     }
-    if sym == '//' and ok1 and ok2:
-        # C Wild Life's integer division reports a non-integer argument and a
-        # zero divisor, and leaves the expression unevaluated either way, which
-        # fails the goal that asked for it.
-        import sys as _sys_div
-        for _arg, _val in ((arg1, v1), (arg2, v2)):
-            if _val != int(_val):
-                _sys_div.stderr.write(
-                    f"*** Warning: argument '{_term_to_str(_arg.deref(), eng)}' "
-                    f"of integer division is not an integer.\n")
-                return False, 0.0
-        if v2 == 0:
-            _sys_div.stderr.write(
-                f"*** Error: division by zero in {_term_to_str(t, eng)}.\n")
+    if sym == '//' and (ok1 or ok2):
+        # Integer division needs integer arguments and a non-zero divisor;
+        # either fault leaves the expression unevaluated and is reported by the
+        # caller (see _report_int_div_problem), so that a goal proved several
+        # times over does not repeat the diagnostic.
+        if (ok1 and v1 != int(v1)) or (ok2 and v2 != int(v2)):
             return False, 0.0
-        return True, _int_div(v1, v2)
+        if ok2 and v2 == 0:
+            return False, 0.0
+        if ok1 and ok2:
+            return True, _int_div(v1, v2)
 
     if sym in ops2 and ok1 and ok2:
         try:
@@ -2086,6 +2081,41 @@ def _get_linear_coeff(expr, x_var, eng):
 # Returned by a solver that has shown the equation has no solution at all,
 # as opposed to None, which only says this solver could not find one.
 _NO_SOLUTION = object()
+
+
+def _report_int_div_problem(t: 'PsiTerm', eng, _depth: int = 0) -> bool:
+    """Report the first fault in a `//` sub-term of t, if there is one.
+
+    Integer division needs integer arguments and a non-zero divisor.  Either
+    fault is decidable as soon as the offending argument is known, with the
+    other one still free, so reporting it here lets the caller fail a goal
+    rather than suspend on a constraint that can never hold.  Returns True
+    when something was reported.
+    """
+    if t is None or _depth > 10:
+        return False
+    t = t.deref()
+    if t.type is None:
+        return False
+    if _get_sym(t) == '//':
+        import sys as _sys_div
+        a1, a2 = t.attr_list.get('1'), t.attr_list.get('2')
+        ok1, v1 = _eval_arith(a1, eng) if a1 is not None else (False, 0.0)
+        ok2, v2 = _eval_arith(a2, eng) if a2 is not None else (False, 0.0)
+        for arg, ok, val in ((a1, ok1, v1), (a2, ok2, v2)):
+            if ok and val != int(val):
+                _sys_div.stderr.write(
+                    f"*** Warning: argument '{_term_to_str(arg.deref(), eng)}' "
+                    f"of integer division is not an integer.\n")
+                return True
+        if ok2 and v2 == 0:
+            _sys_div.stderr.write(
+                f"*** Error: division by zero in {_term_to_str(t, eng)}.\n")
+            return True
+    for sub in t.attr_list.values():
+        if _report_int_div_problem(sub, eng, _depth + 1):
+            return True
+    return False
 
 
 def _solve_int_div_divisor(dividend: float, quotient: float):
@@ -5151,11 +5181,11 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                     # drop only when truly cyclic (a_coeff==1 with no const solution).
                     if not vars_in_expr:
                         # Concrete but unevaluable (e.g. division by zero,
-                        # non-numeric atom argument).  The evaluation above
-                        # already failed on it, so re-evaluating here would only
-                        # repeat whatever diagnostic it printed.  Check if any
-                        # immediate arg is a concrete non-numeric atom — if so,
-                        # emit the standard Wild Life warning.
+                        # non-numeric atom argument).  Check if any immediate
+                        # arg is a concrete non-numeric atom — if so, emit the
+                        # standard Wild Life warning.
+                        if _report_int_div_problem(b_d, eng):
+                            return False
                         _b_sym_fail = (b_d.type.keyword.symbol
                                        if (b_d.type and b_d.type.keyword) else '')
                         if _b_sym_fail in _ARITH_OPS_SET:
@@ -5185,6 +5215,20 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                                       f"'{_expr_str_w}'.", file=_sys_w.stderr)
                         return False
                     else:
+                        # A constraint that can never hold, such as a division
+                        # by a divisor already known to be zero, fails now
+                        # instead of suspending on its remaining free vars.
+                        if _report_int_div_problem(b_d, eng):
+                            return False
+                        # `0 // X` is zero for every divisor that divides at
+                        # all, so a free left side takes that value rather than
+                        # suspending on the divisor.
+                        if a_d_is_free and _get_sym(b_d) == '//':
+                            _zd = b_d.attr_list.get('1')
+                            _zd_ok, _zd_v = (_eval_arith(_zd, eng) if _zd is not None
+                                             else (False, 0.0))
+                            if _zd_ok and _zd_v == 0:
+                                return _unify(eng, a_d_final, _make_number(eng, 0.0))
                         from wild_life.data_structures import Goal, Residuation
                         eq_defn = getattr(wl, 'eqsym', None) or wl.syntax_module.symbol_table.get('=')
                         eq_term = PsiTerm(type_def=eq_defn)
