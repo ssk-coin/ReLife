@@ -630,3 +630,14 @@ def make_list(items: List[PsiTerm]) -> PsiTerm:
         cons.attr_list = {"1": item, "2": result}
         result = cons
     return result
+
+
+def int_div(a, b) -> float:
+    """LIFE's `//`: integer division truncating toward zero.
+
+    Python's `//` floors instead, which disagrees on mixed signs —
+    `23 // -4` is -5 in LIFE and -6 in Python.
+    """
+    ia, ib = int(a), int(b)
+    q = abs(ia) // abs(ib)
+    return float(-q if (ia < 0) != (ib < 0) else q)

@@ -9,7 +9,7 @@ from typing import Optional, Dict, Set, List, Tuple, IO
 
 # Avoid circular imports at module level
 from wild_life.data_structures import (
-    PsiTerm, Definition, OperatorType
+    PsiTerm, Definition, OperatorType, int_div as _int_div
 )
 
 PRINT_DEPTH = 200   # max nesting depth; list length is unlimited
@@ -78,7 +78,7 @@ def _eval_pure_arith(t: 'PsiTerm', wl, _depth: int = 0):
         '-': lambda a, b: a - b,
         '*': lambda a, b: a * b,
         '/': lambda a, b: a / b if b != 0 else None,
-        '//': lambda a, b: float(int(a) // int(b)) if b != 0 else None,
+        '//': lambda a, b: _int_div(a, b) if b != 0 else None,
         'mod': lambda a, b: float(int(a) % int(b)) if b != 0 else None,
         '**': lambda a, b: a ** b,
         '^': lambda a, b: a ** b,

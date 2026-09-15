@@ -20,7 +20,8 @@ import io
 from typing import Optional, Tuple
 
 from wild_life.data_structures import (
-    PsiTerm, Definition, GoalType, DefType, FACT, QUERY, ERROR
+    PsiTerm, Definition, GoalType, DefType, FACT, QUERY, ERROR,
+    int_div as _int_div
 )
 from wild_life.unification import (
     UnificationFailure, CutException, HaltException, AbortException,
@@ -1830,7 +1831,7 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         '-': lambda a, b: a - b,
         '*': lambda a, b: a * b,
         '/': lambda a, b: a / b if b != 0 else float('inf'),
-        '//': lambda a, b: float(int(a) // int(b)) if b != 0 else 0.0,
+        '//': lambda a, b: _int_div(a, b) if b != 0 else 0.0,
         'mod': lambda a, b: float(int(a) % int(b)) if b != 0 else 0.0,
         '**': lambda a, b: a ** b,
         '^': lambda a, b: a ** b,
@@ -2062,6 +2063,26 @@ def _get_linear_coeff(expr, x_var, eng):
     return None
 
 
+def _solve_int_div_divisor(dividend: float, quotient: float):
+    """Solve `dividend // x == quotient` for x, if exactly one integer fits.
+
+    `//` truncates toward zero, so |x| ranges over (|a|/(|v|+1), |a|/|v|] and x
+    takes the sign of a*v.  A zero quotient only says |x| exceeds |a|, and a
+    wider range leaves several divisors — neither is a solution, so both are
+    left for the constraint to residuate on.
+    """
+    if dividend != int(dividend) or quotient != int(quotient):
+        return None
+    a, v = abs(int(dividend)), abs(int(quotient))
+    if a == 0 or v == 0:
+        return None
+    lo = a // (v + 1) + 1
+    hi = a // v
+    if lo != hi:
+        return None
+    return float(lo if (dividend > 0) == (quotient > 0) else -lo)
+
+
 def _try_solve_nonlinear(expr, x_var, v_lhs, eng):
     """Try to solve expr = v_lhs for x_var when the expression is not linear.
 
@@ -2103,6 +2124,12 @@ def _try_solve_nonlinear(expr, x_var, v_lhs, eng):
             ok1, v1 = _eval_arith(arg1, eng)
             if ok1 and v_lhs != 0.0:
                 return v1 / v_lhs
+    if sym == '//':
+        # a // x = v  →  x, when exactly one integer divisor gives v
+        if id(arg2.deref()) == id(x_var):
+            ok1, v1 = _eval_arith(arg1, eng)
+            if ok1:
+                return _solve_int_div_divisor(v1, v_lhs)
     # x * x = 0 → x = 0
     if sym == '*':
         arg1_d = arg1.deref()
@@ -3635,7 +3662,7 @@ def _eval_arith_psi(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
                 '+': lambda a, b: a + b, '-': lambda a, b: a - b,
                 '*': lambda a, b: a * b,
                 '/': lambda a, b: a / b if b != 0 else float('inf'),
-                '//': lambda a, b: float(int(a) // int(b)) if b != 0 else 0.0,
+                '//': lambda a, b: _int_div(a, b) if b != 0 else 0.0,
                 'mod': lambda a, b: float(int(a) % int(b)) if b != 0 else 0.0,
                 '**': lambda a, b: a ** b, '^': lambda a, b: a ** b,
                 'max': lambda a, b: max(a, b), 'min': lambda a, b: min(a, b),
@@ -3853,6 +3880,121 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng) -> 'Optional[PsiTerm]':
     return fresh
 
 
+def _has_disjunctive_body(t: PsiTerm, wl) -> bool:
+    """True when t is a function whose rule reduces to a disjunction.
+
+    `sgn -> {1;-1}.` is 0-arity, so the synchronous path that normally
+    evaluates such functions would have to pick one alternative and keep it;
+    only an EVAL goal gives each alternative its own choice point.
+    """
+    rules = t.type.rule if t.type is not None else None
+    if not rules:
+        return False
+    for _head, body in rules:
+        if body is None:
+            continue
+        body_d = body.deref()
+        if body_d.type is not None and body_d.type in (wl.disjunction, wl.life_or):
+            return True
+    return False
+
+
+def _expand_disjunctions_in_place(lhs: PsiTerm, rhs: PsiTerm, eng):
+    """Prove `lhs = rhs` once per combination of the disjunctions inside them.
+
+    Each disjunction node is swapped (trailed) for a fresh variable, so an
+    alternative can be picked by an ordinary unification goal.  That keeps the
+    choice visible through the terms themselves: `X:(3*sgn)` IS the expression
+    node, so X reads as 3 for one alternative and -3 for the next, where
+    unifying a copy of the expression would have left X as the disjunction.
+
+    Returns True once the goals are pushed, or None when neither side holds a
+    disjunction and the caller should carry on.
+    """
+    from wild_life.inference import _DEFRULES as _DR
+    wl = eng.wl
+    slots = []   # [(fresh var standing in for a disjunction, its alternatives)]
+
+    def collect(t, depth=0):
+        if depth > 10 or not t.attr_list:
+            return
+        for key in list(t.attr_list.keys()):
+            sub = t.attr_list[key].deref()
+            if sub.type is not None and sub.type is wl.disjunction:
+                elems = _collect_disjunction(sub, eng)
+                if len(elems) > 1:
+                    fresh = PsiTerm(type_def=wl.top)
+                    eng.unifier.set_attr(t, key, fresh)
+                    slots.append((fresh, elems))
+                    continue
+            collect(sub, depth + 1)
+
+    collect(lhs)
+    collect(rhs)
+    if not slots:
+        return None
+
+    eq_defn = getattr(wl, 'eqsym', None) or wl.syntax_module.symbol_table.get('=')
+
+    def conjoin(goals):
+        joined = goals[-1]
+        for goal in reversed(goals[:-1]):
+            conj = PsiTerm(type_def=wl.commasym)
+            conj.attr_list = {'1': goal, '2': joined}
+            joined = conj
+        return joined
+
+    def equation(lhs, rhs):
+        eq = PsiTerm(type_def=eq_defn)
+        eq.attr_list = {'1': lhs, '2': rhs}
+        return eq
+
+    import itertools
+    combos = [
+        conjoin([equation(slots[i][0], choice) for i, choice in enumerate(combo)]
+                + [equation(lhs, rhs)])
+        for combo in itertools.product(*[elems for _, elems in slots])
+    ]
+    for alt in reversed(combos[1:]):
+        eng.push_choice_point(GoalType.PROVE, alt, _DR, None)
+    eng.push_goal(GoalType.PROVE, combos[0], _DR, None)
+    return True
+
+
+def _inline_disjunctive_funcs(t: PsiTerm, eng, depth: int = 0) -> bool:
+    """Replace sub-terms of t that are functions reducing to a disjunction.
+
+    `3 * sgn` with `sgn -> {1;-1}.` has to read as `3 * {1;-1}` before the
+    disjunction expansion can give each alternative its own choice point.
+    The reduction's bindings are undone again: only the value is wanted, not
+    the coref linking the function atom to its rule-head copy.
+    """
+    if depth > 20 or not t.attr_list:
+        return False
+    wl = eng.wl
+    changed = False
+    for key in list(t.attr_list.keys()):
+        sub = t.attr_list[key].deref()
+        if _is_user_function(sub):
+            # Reduce a copy: _eval_user_func_sync rewrites its argument's
+            # features in place, which is not undone by the trail.
+            probe = PsiTerm(type_def=sub.type, value=sub.value,
+                            attr_list=dict(sub.attr_list))
+            probe.flags = sub.flags
+            mark = eng.trail.mark()
+            evaled = _eval_user_func_sync(probe, eng, 0)
+            eng.trail.undo_to(mark)
+            evaled = evaled.deref() if evaled is not None else None
+            if (evaled is not None and evaled.type is not None
+                    and evaled.type in (wl.disjunction, wl.life_or)):
+                t.attr_list[key] = evaled
+                changed = True
+                continue
+        if _inline_disjunctive_funcs(sub, eng, depth + 1):
+            changed = True
+    return changed
+
+
 def bi_unify(goal: PsiTerm, eng) -> bool:
     """X = Y — LIFE sort unification (with functional evaluation)."""
     a, b = _get_two_args(goal)
@@ -3993,7 +4135,10 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     # evaluation (line ~4061), NOT via an EVAL goal.  Using EVAL goals for them
     # would create arithmetic constraints when the stored value is an arithmetic
     # expression with unbound variables, causing spurious `real~` display.
-    if _is_user_function(b_d) and b_d.attr_list:
+    # A 0-arity function whose value is a disjunction is the one exception to
+    # that exception: `sgn -> {1;-1}.` needs a choice point per alternative,
+    # which only the EVAL goal sets up.
+    if _is_user_function(b_d) and (b_d.attr_list or _has_disjunctive_body(b_d, eng.wl)):
         result = PsiTerm(type_def=eng.wl.top)
         # LIFO: push UNIFY first, then EVAL on top (EVAL executes first)
         eng.push_goal(GoalType.UNIFY, a_d, result, None)
@@ -4001,7 +4146,7 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         return True
 
     # Try to evaluate a as a user-defined function call
-    if _is_user_function(a_d) and a_d.attr_list:
+    if _is_user_function(a_d) and (a_d.attr_list or _has_disjunctive_body(a_d, eng.wl)):
         result = PsiTerm(type_def=eng.wl.top)
         eng.push_goal(GoalType.UNIFY, result, b_d, None)
         eng.push_goal(GoalType.EVAL, a_d, result, a_d.type.rule)
@@ -4346,20 +4491,37 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                 eng.push_choice_point(GoalType.UNIFY, alt, b_d, None)
             return _unify(eng, elems[0], b_d)
 
-    # Handle embedded disjunctions in RHS (e.g. [{1;2;3}|T] → [1|T], [2|T], [3|T])
-    # Only do this when LHS is an unbound variable (binding case)
+    # Handle disjunctions embedded in either side (e.g. [{1;2;3}|T] → [1|T],
+    # [2|T], [3|T]): solve the equation once per combination.
     a_is_var = (a_d.type is None or (a_d.type is eng.wl.top and not a_d.attr_list))
-    if a_is_var and b_d.type is not None and _term_contains_disjunction(b_d, eng):
-        alts = _expand_term_disjunctions(b_d, eng)
-        if len(alts) > 1:
-            # Evaluate embedded user function calls in each alternative in-place.
-            # This ensures s(f(1)) → s(1) rather than leaving f unevaluated.
-            # (e.g. A=s(f({1;2})) gives s(1) s(2), not s(f(1)) s(f(2)))
-            for _alt_ev in alts:
-                _eval_embedded_user_funcs(_alt_ev, eng, 0, set())
-            for alt in reversed(alts[1:]):
-                eng.push_choice_point(GoalType.UNIFY, a_d, alt, None)
-            return _unify(eng, a_d, alts[0])
+    b_is_var = (b_d.type is None or (b_d.type is eng.wl.top and not b_d.attr_list))
+    _disj_sides = [_t for _t in (a_d, b_d) if _t.type is not None and _t.attr_list]
+    for _side in _disj_sides:
+        # Only inside arithmetic, where a disjunction has to surface before the
+        # expression can distribute over it.  Elsewhere the function call is
+        # left for the ordinary evaluation to reduce.
+        if _get_sym(_side) in _ARITH_OPS_SET:
+            _inline_disjunctive_funcs(_side, eng)
+    if not a_is_var and not b_is_var:
+        # Two arithmetic terms, so there is no variable to bind a rebuilt copy
+        # to: pick the alternatives inside the terms themselves, which is also
+        # what lets `X:(3*sgn)` read as 3 rather than as the whole disjunction.
+        if all(_get_sym(_t) in _ARITH_OPS_SET for _t in (a_d, b_d)) and any(
+                _term_contains_disjunction(_side, eng) for _side in _disj_sides):
+            if _expand_disjunctions_in_place(a_d, b_d, eng):
+                return True
+    else:
+        _expr, _var = (b_d, a_d) if a_is_var else (a_d, b_d)
+        if _expr.type is not None and _term_contains_disjunction(_expr, eng):
+            alts = _expand_term_disjunctions(_expr, eng)
+            if len(alts) > 1:
+                # Evaluate embedded user function calls in each alternative
+                # in-place, so that s(f(1)) reduces to s(1).
+                for _alt_ev in alts:
+                    _eval_embedded_user_funcs(_alt_ev, eng, 0, set())
+                for alt in reversed(alts[1:]):
+                    eng.push_choice_point(GoalType.UNIFY, _var, alt, None)
+                return _unify(eng, _var, alts[0])
 
     # Pre-check: detect concrete non-boolean arguments in and/or expressions.
     # Wild Life emits "Non-boolean argument or result in '...'." when any direct
@@ -4708,7 +4870,12 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
             if _a_could_eval_lhs and not _a_is_ufn_lhs and not _a_is_nst_lhs:
                 _a_arith_lhs = _try_eval_arith_to_term(a_d, eng)
                 if _a_arith_lhs is not None:
-                    return _unify(eng, _a_arith_lhs, b_d)
+                    # Re-enter as an equation: the RHS may still be a
+                    # constraint to solve (`3*1 = 10//A`), which plain
+                    # unification against a number could only fail on.
+                    _eq_lhs = PsiTerm(type_def=goal.type)
+                    _eq_lhs.attr_list = {'1': _a_arith_lhs, '2': b_d}
+                    return bi_unify(_eq_lhs, eng)
         # Arithmetic expression that couldn't be fully evaluated (has variables).
         wl = eng.wl
         b_sym = b_d.type.keyword.symbol if b_d.type and b_d.type.keyword else ''
