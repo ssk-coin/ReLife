@@ -1510,6 +1510,16 @@ class Engine:
         from wild_life.data_structures import SORT_VAR as _SORT_VAR_FLAG
         _head_orig_d = head_orig  # head_orig is the stored (un-copied) head
         _will_bfsv = ((_head_orig_d.flags & _SORT_VAR_FLAG) and _head_orig_d.type is not None and not _head_orig_d.attr_list)
+        # A rule whose head is a bare sort (`X:sum -> ...`, `foo -> ...`) binds
+        # its head variable to the call itself, so the body reads funct as a
+        # term rather than as a call.  Reducing it again in there would restart
+        # this very rule instead of reading the term's features.
+        if not _head_orig_d.attr_list:
+            from wild_life.data_structures import REDUCED as _REDUCED_FLAG
+            if not (funct.flags & _REDUCED_FLAG):
+                self.trail.trail_psi(funct, 'flags')
+                funct.flags |= _REDUCED_FLAG
+
         if _will_bfsv:
             _sort_type = _head_orig_d.type
             _sv_visited: set = set()

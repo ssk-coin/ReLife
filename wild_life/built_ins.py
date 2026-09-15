@@ -2653,8 +2653,13 @@ def _is_user_function(t: PsiTerm) -> bool:
         return False
     t = t.deref()
     # Backtick-quoted terms (QUOTED_TRUE) are sort references, not function calls
-    from wild_life.data_structures import QUOTED_TRUE
+    from wild_life.data_structures import QUOTED_TRUE, REDUCED
     if t.flags & QUOTED_TRUE:
+        return False
+    # A call being reduced is the value its own rule body sees: `X:sum -> f(X)`
+    # binds X to the very sum term under evaluation, and reducing it again
+    # there would restart the rule instead of reading the term's features.
+    if t.flags & REDUCED:
         return False
     defn = t.type
     if defn is None:
@@ -5625,6 +5630,54 @@ def bi_call(goal: PsiTerm, eng) -> bool:
     return True  # will be continued in main loop
 
 
+def _subsumes(pattern: PsiTerm, term: PsiTerm, eng, depth: int = 0) -> bool:
+    """True when pattern is at least as general as term.
+
+    The call's sort must be a sub-sort of the pattern's, its value must be the
+    one the pattern asks for if it asks for one, and every feature the pattern
+    names must be present and covered in turn.
+    """
+    if depth > 20:
+        return True
+    pattern = pattern.deref()
+    term = term.deref()
+    if pattern is term:
+        return True
+    if pattern.type is not None and pattern.type is not eng.wl.top:
+        if term.type is None or not term.type.is_subtype_of(pattern.type):
+            return False
+    if pattern.value is not None and pattern.value != term.value:
+        return False
+    for key, sub in pattern.attr_list.items():
+        other = term.attr_list.get(key)
+        if other is None or not _subsumes(sub, other, eng, depth + 1):
+            return False
+    return True
+
+
+def bi_implies(goal: PsiTerm, eng) -> bool:
+    """implies(Goal) — prove Goal by matching instead of unification.
+
+    A clause applies only where its head covers the call: the head may be more
+    general than the call, never the other way round.  So `implies(a(int))`
+    skips `a(X:0)`, whose head asks for something narrower than int, and runs
+    `a(X:int)` and `a(X:real)`, which cover it.
+    """
+    arg = _get_one_arg(goal)
+    if arg is None:
+        return False
+    call = arg.deref()
+    rules = getattr(call.type, 'rule', None) if call.type is not None else None
+    if not rules:
+        return bi_call(goal, eng)   # not a user predicate — an ordinary call
+    covering = [(h, b) for (h, b) in rules
+                if h is not None and _subsumes(h, call, eng)]
+    if not covering:
+        return False
+    eng.push_goal(GoalType.PROVE, call, covering, None)
+    return True
+
+
 def bi_and(goal: PsiTerm, eng) -> bool:
     """and(A, B) — Boolean conjunction as a goal: succeed iff both A and B hold.
 
@@ -8226,7 +8279,7 @@ def register_all(wl) -> None:
     _reg('and', bi_and)
     _reg('or', bi_or)
     _reg('call', bi_call)
-    _reg('implies', bi_call)   # implies(Goal) is an alias for call(Goal)
+    _reg('implies', bi_implies)
     _reg('once', bi_once)
     _reg('cond', bi_cond)
     _reg('findall', bi_findall)
@@ -8364,7 +8417,16 @@ def register_all(wl) -> None:
     _reg('non_strict', _bi_non_strict)
 
     def _bi_delay_check(goal, eng):
-        """delay_check(P): register delay checking for P. No-op here."""
+        """delay_check(S): hold S's delay rules until a term narrows past S.
+
+        Without it a term reaching S fires them straight away.  Under it a
+        term that is merely S may still narrow further, so the rules wait for
+        a proper sub-sort: `A = person` stays person, while a term that turns
+        out to be cleopatra fires person's rule.
+        """
+        arg = _get_one_arg(goal)
+        if arg is not None and arg.type is not None:
+            arg.type.always_check = False
         return True
     _reg('delay_check', _bi_delay_check)
 
