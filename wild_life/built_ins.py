@@ -1879,6 +1879,45 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
             return False, 0.0
         return _eval_arith(a1d, eng, _depth + 1)
 
+    ops1 = {
+        '-': lambda a: -a,
+        'abs': lambda a: abs(a),
+        'sqrt': lambda a: math.sqrt(a),
+        'sin': lambda a: math.sin(a),
+        'cos': lambda a: math.cos(a),
+        'tan': lambda a: math.tan(a),
+        'asin': lambda a: math.asin(a),
+        'acos': lambda a: math.acos(a),
+        'atan': lambda a: math.atan(a),
+        'exp': lambda a: math.exp(a),
+        'log': lambda a: math.log(a),
+        'floor': lambda a: math.floor(a),
+        'ceiling': lambda a: math.ceil(a),
+        'round': lambda a: round(a),
+        'truncate': lambda a: math.trunc(a),
+        'float': lambda a: float(a),
+        'integer': lambda a: float(int(a)),
+        'float_integer_part': lambda a: float(math.trunc(a)),
+        'float_fractional_part': lambda a: a - math.trunc(a),
+        'sign': lambda a: (1.0 if a > 0 else (-1.0 if a < 0 else 0.0)),
+        'msb': lambda a: int(math.log2(max(1, int(a)))),
+        # Bitwise NOT
+        '\\': lambda a: float(~int(a)),
+    }
+    # Unary arithmetic functions are applied here, ahead of the binary-operator
+    # early exit below: that exit rejects every symbol outside the binary set,
+    # which is all of floor, sqrt, abs and the rest.
+    if sym in ops1:
+        _un1, _un2 = _get_two_args(t)
+        if _un2 is None and _un1 is not None:
+            _un_ok, _un_v = _eval_arith(_un1, eng, _depth + 1)
+            if not _un_ok:
+                return False, 0.0
+            try:
+                return True, float(ops1[sym](_un_v))
+            except Exception:
+                return False, 0.0
+
     # Binary operators — early exit if sym is not a known arithmetic binary op.
     # This prevents infinite recursion on cyclic terms like cons(A,A) where
     # the 'cons' symbol is not arithmetic but the pre-check would recurse forever.
@@ -1937,31 +1976,6 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         except Exception:
             return False, 0.0
 
-    ops1 = {
-        '-': lambda a: -a,
-        'abs': lambda a: abs(a),
-        'sqrt': lambda a: math.sqrt(a),
-        'sin': lambda a: math.sin(a),
-        'cos': lambda a: math.cos(a),
-        'tan': lambda a: math.tan(a),
-        'asin': lambda a: math.asin(a),
-        'acos': lambda a: math.acos(a),
-        'atan': lambda a: math.atan(a),
-        'exp': lambda a: math.exp(a),
-        'log': lambda a: math.log(a),
-        'floor': lambda a: math.floor(a),
-        'ceiling': lambda a: math.ceil(a),
-        'round': lambda a: round(a),
-        'truncate': lambda a: math.trunc(a),
-        'float': lambda a: float(a),
-        'integer': lambda a: float(int(a)),
-        'float_integer_part': lambda a: float(math.trunc(a)),
-        'float_fractional_part': lambda a: a - math.trunc(a),
-        'sign': lambda a: (1.0 if a > 0 else (-1.0 if a < 0 else 0.0)),
-        'msb': lambda a: int(math.log2(max(1, int(a)))),
-        # Bitwise NOT
-        '\\': lambda a: float(~int(a)),
-    }
     if sym in ops1 and ok1 and arg2 is None:
         try:
             return True, float(ops1[sym](v1))
