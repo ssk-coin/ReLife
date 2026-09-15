@@ -660,7 +660,7 @@ class Engine:
         self.goal_stack = g
         return g
 
-    def push_choice_point(self, gtype: GoalType, a=None, b=None, c=None) -> None:
+    def push_choice_point(self, gtype: GoalType, a=None, b=None, c=None) -> ChoicePoint:
         """Create a choice point with an alternative goal."""
         alt = Goal(gtype, a, b, c)
         alt.next = self.goal_stack
@@ -671,6 +671,25 @@ class Engine:
             next=self.choice_stack
         )
         self.choice_stack = cp
+        return cp
+
+    def drop_choice_point(self, cp) -> None:
+        """Unlink one choice point, keeping the ones created after it.
+
+        Unlike cut_to this is a 'soft cut': it only discards the alternative
+        held by `cp` itself.  A guarded function rule uses it to commit to its
+        clause while the choice points its guard created stay re-satisfiable.
+        """
+        if cp is None:
+            return
+        if self.choice_stack is cp:
+            self.choice_stack = cp.next
+            return
+        prev = self.choice_stack
+        while prev is not None and prev.next is not cp:
+            prev = prev.next
+        if prev is not None:
+            prev.next = cp.next
 
     def backtrack(self) -> bool:
         """Undo to the previous choice point and set goal_stack to its alt."""
@@ -1449,8 +1468,13 @@ class Engine:
             return False
 
         head_orig, body_orig = active[0]
+        # Choice point level before the remaining-clause alternatives are
+        # pushed.  A guarded rule (`f(X) -> Val | Guard`) commits to its clause
+        # once head matching and the guard both succeed, so the guard is
+        # followed by a cut back to this level.
+        _rule_cp = None
         if len(active) > 1:
-            self.push_choice_point(GoalType.EVAL, funct, result, active[1:])
+            _rule_cp = self.push_choice_point(GoalType.EVAL, funct, result, active[1:])
 
         _vm: dict = {}
         head = copy_term(head_orig, _vm)
@@ -1546,6 +1570,8 @@ class Engine:
                     self.push_goal(GoalType.UNIFY, val_part, result, None)
                 else:
                     self.push_goal(GoalType.SUCHTHAT_VAL, val_part, result, _st_call)
+                if _rule_cp is not None:
+                    self.push_goal(GoalType.EVAL_COMMIT, _rule_cp, None, None)
                 self.push_goal(GoalType.PROVE, _cond_d, _DEFRULES, None)
                 return True
 
@@ -2143,6 +2169,11 @@ class Engine:
                     self.goal_stack = self.aim.next
                     self.goal_count += 1
                     self.cut_to(self.aim.a)
+
+                elif gtype == GoalType.EVAL_COMMIT:
+                    self.goal_stack = self.aim.next
+                    self.goal_count += 1
+                    self.drop_choice_point(self.aim.a)
 
                 else:
                     print(f"*** Error: unknown goal type {gtype}", file=sys.stderr)
