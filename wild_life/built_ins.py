@@ -1923,7 +1923,12 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     # the 'cons' symbol is not arithmetic but the pre-check would recurse forever.
     _arith_binary_syms = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
                                      'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
-    if sym not in _arith_binary_syms:
+    # The handlers further down (strlen, asc, int, real and the 0-ary
+    # cpu_time / real_time / genint) sit past this exit, so they are named
+    # here — otherwise none of them would ever be reached.
+    _arith_late_syms = frozenset(('strlen', 'asc', 'int', 'real',
+                                  'cpu_time', 'real_time', 'genint'))
+    if sym not in _arith_binary_syms and sym not in _arith_late_syms:
         return False, 0.0
     arg1, arg2 = _get_two_args(t)
     ok1, v1 = _eval_arith(arg1, eng, _depth + 1) if arg1 else (False, 0.0)
