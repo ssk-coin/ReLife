@@ -5928,7 +5928,16 @@ def bi_cond(goal: PsiTerm, eng) -> bool:
             return True
         # Cond is true → evaluate Then as a boolean function
         then_result = _eval_as_bool_func(then_g, eng)
-        return then_result is True
+        if then_result is not None:
+            return then_result
+        # A plain predicate call has no boolean value to read; it is proved,
+        # which is how `cond(true, foo(X))` binds X at all.  Anything else
+        # unresolvable stays a failure, as a conjunction of goals would be.
+        if (then_g.type is not None and then_g.type.type == DefType.PREDICATE
+                and then_g.type._builtin_func is None):
+            eng.push_goal(GoalType.PROVE, then_g, _DEFRULES_SENTINEL, None)
+            return True
+        return False
 
     # ── 3-arg form: predicate if-then-else ──
     from wild_life.inference import prove_cond as _prove_cond

@@ -31,6 +31,30 @@ _ARITH_OPS_NON_STRICT = frozenset((
     'round', 'truncate', 'exp', 'log', 'sin', 'cos', 'tan',
 ))
 
+def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
+    """Freeze the arithmetic that a non-strict call's arguments stand for.
+
+    A predicate declared non_strict does not evaluate what it is given, and in
+    C Wild Life that reaches the whole clause the call sits in: once `foo(N)`
+    is non-strict, the `N:(2*4)` elsewhere in the same clause reads as `2 * 4`
+    for every other call too, since both are the one variable.
+    """
+    non_strict = getattr(eng, 'non_strict_set', None)
+    if not non_strict or t is None:
+        return
+    if visited is None:
+        visited = set()
+    t = t.deref()
+    if id(t) in visited:
+        return
+    visited.add(id(t))
+    if t.type in non_strict:
+        for arg in t.attr_list.values():
+            _mark_arith_non_strict(arg)
+    for sub in t.attr_list.values():
+        _mark_non_strict_args(sub, eng, visited)
+
+
 def _mark_arith_non_strict(t: PsiTerm, visited: set = None) -> None:
     """Recursively mark arithmetic operator psiterms with NON_STRICT_TERM.
 
@@ -669,6 +693,7 @@ class Engine:
                  typ: DefType) -> bool:
         """Add a clause to the database (implements assert_clause logic)."""
         wl = self.wl
+        _mark_non_strict_args(body, self)
         head = head.deref()
         defn = head.type
         if defn is None:
@@ -2151,6 +2176,7 @@ class Engine:
             Pass engine.choice_stack to prevent this fresh query from
             consuming choice points that belong to an enclosing query.
         """
+        _mark_non_strict_args(goal, self)
         self.push_goal(GoalType.PROVE, goal, _DEFRULES, None)
         return self.run(cs_barrier=cs_barrier)
 

@@ -590,7 +590,12 @@ class Unifier:
             # Skip if engine is in non-strict call context (engine.no_arith_eval=True).
             from wild_life.data_structures import SORT_VAR as _SORT_VAR_FLAG
             v_is_sort_var = bool(v.flags & _SORT_VAR_FLAG) and v.type is not WL.top
-            _skip_arith = getattr(self.engine, 'no_arith_eval', False) if self.engine else False
+            # A term frozen by a non-strict call keeps its shape: binding it
+            # to a variable is how it reaches the rest of the clause, and
+            # evaluating it here would undo the freeze.
+            from wild_life.data_structures import NON_STRICT_TERM as _NST_BIND
+            _skip_arith = (getattr(self.engine, 'no_arith_eval', False)
+                           if self.engine else False) or bool(u.flags & _NST_BIND)
             if self.engine is not None and not u_is_var and not _skip_arith:
                 _arith_ops = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
                                         'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
