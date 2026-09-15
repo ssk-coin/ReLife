@@ -1864,6 +1864,21 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
             return _eval_arith(feat_val, eng, _depth + 1)
         return False, 0.0
 
+    # eval(Expr) — evaluate arithmetic expression (also unwraps backtick-quoted terms)
+    if sym == 'eval':
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return False, 0.0
+        a1d = a1.deref()
+        # If arg is a backtick-quoted term `(Expr), unwrap it before evaluating
+        a1_sym = a1d.type.keyword.symbol if a1d.type and a1d.type.keyword else ''
+        if a1_sym == '`':
+            inner = a1d.attr_list.get('1')
+            if inner is not None:
+                return _eval_arith(inner.deref(), eng, _depth + 1)
+            return False, 0.0
+        return _eval_arith(a1d, eng, _depth + 1)
+
     # Binary operators — early exit if sym is not a known arithmetic binary op.
     # This prevents infinite recursion on cyclic terms like cons(A,A) where
     # the 'cons' symbol is not arithmetic but the pre-check would recurse forever.
@@ -1952,21 +1967,6 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
             return True, float(ops1[sym](v1))
         except Exception:
             return False, 0.0
-
-    # eval(Expr) — evaluate arithmetic expression (also unwraps backtick-quoted terms)
-    if sym == 'eval':
-        a1 = t.attr_list.get('1')
-        if a1 is None:
-            return False, 0.0
-        a1d = a1.deref()
-        # If arg is a backtick-quoted term `(Expr), unwrap it before evaluating
-        a1_sym = a1d.type.keyword.symbol if a1d.type and a1d.type.keyword else ''
-        if a1_sym == '`':
-            inner = a1d.attr_list.get('1')
-            if inner is not None:
-                return _eval_arith(inner.deref(), eng, _depth + 1)
-            return False, 0.0
-        return _eval_arith(a1d, eng, _depth + 1)
 
     # strlen(String) — length of string as integer
     if sym == 'strlen':
