@@ -311,6 +311,151 @@ def prove_cond(cond_g: 'PsiTerm', eng) -> bool:
     return ok
 
 
+def _same_psi_term(a: 'PsiTerm', b: 'PsiTerm', is_open, seen=None, depth: int = 0) -> bool:
+    """True when a and b are the same term down to the variables in them.
+
+    Two terms that agree this way stay equal however their variables are
+    bound later, because each variable is one and the same psi-term in both.
+    Two *distinct* variables never agree, however alike they look now: either
+    can still be narrowed on its own and take the two terms apart.
+    """
+    if depth > 30:
+        return True
+    a = a.deref()
+    b = b.deref()
+    if a is b:
+        return True
+    if is_open(a) or is_open(b):
+        return False
+    if seen is None:
+        seen = set()
+    key = (id(a), id(b))
+    if key in seen:
+        return True           # a cycle both sides walk alike
+    seen.add(key)
+    if a.type is not b.type or a.value != b.value:
+        return False
+    if a.attr_list.keys() != b.attr_list.keys():
+        return False
+    return all(_same_psi_term(v, b.attr_list[k], is_open, seen, depth + 1)
+               for k, v in a.attr_list.items())
+
+
+def _can_unify(a: 'PsiTerm', b: 'PsiTerm', eng, seen=None, depth: int = 0) -> bool:
+    """Whether two terms could be made one, without binding anything.
+
+    Trying a real unification and undoing it would wake the residuations on
+    the variables it touched, and those wake-ups are not undone by the trail —
+    a call testing its own feasibility would keep re-firing itself.
+    """
+    if depth > 30:
+        return True
+    a = a.deref()
+    b = b.deref()
+    if a is b:
+        return True
+    if seen is None:
+        seen = set()
+    key = (id(a), id(b))
+    if key in seen:
+        return True
+    seen.add(key)
+    wl = eng.wl
+    ta, tb = a.type, b.type
+    if (ta is not None and tb is not None
+            and ta is not wl.top and tb is not wl.top
+            and not ta.is_subtype_of(tb) and not tb.is_subtype_of(ta)):
+        from wild_life.unification import compute_glb
+        if compute_glb(ta, tb) is None:
+            return False
+    if a.value is not None and b.value is not None and a.value != b.value:
+        return False
+    for key_a, av in a.attr_list.items():
+        bv = b.attr_list.get(key_a)
+        if bv is not None and not _can_unify(av, bv, eng, seen, depth + 1):
+            return False
+    return True
+
+
+def _head_repeat_status(head: 'PsiTerm', call: 'PsiTerm', eng):
+    """How a head's repeated variable stands against the call's arguments.
+
+    A head naming the same variable twice asks for the very same psi-term in
+    both places, so `f(X,X)` applies to `f(A,B)` only once A and B are one
+    term.  Returns 'ready' when they already are (or the head has no repeat),
+    'fail' when no binding could ever make the arguments agree, 'stuck' when
+    they agree on everything still bindable yet remain two terms, and
+    otherwise the variables whose binding could still settle it — residuating
+    on those is what makes the call retry.
+    """
+    if head is None or call is None or not head.attr_list:
+        return 'ready'
+    wl = eng.wl
+
+    def is_open(t):
+        """A variable proper: it can still be narrowed on its own."""
+        from wild_life.data_structures import SORT_VAR as _SV
+        return (not t.attr_list and t.value is None
+                and (t.type is None or t.type is wl.top or bool(t.flags & _SV)))
+
+    def is_unsettled(t):
+        """A leaf whose sort could still be narrowed further.
+
+        A variable already narrowed to a sort still counts: the sort may have
+        sub-sorts, so the two arguments can still be told apart, and the call
+        has to keep waiting on it.
+        """
+        return not t.attr_list and t.value is None
+
+    def open_vars(t, out, seen, depth=0):
+        if depth > 30:
+            return
+        t = t.deref()
+        if id(t) in seen:
+            return
+        seen.add(id(t))
+        if is_unsettled(t):
+            out.append(t)
+            return
+        for sub in t.attr_list.values():
+            open_vars(sub, out, seen, depth + 1)
+
+    # Group the head's argument positions by the variable each one is.
+    positions: dict = {}
+    for key, arg in head.attr_list.items():
+        arg_d = arg.deref()
+        if is_open(arg_d):
+            positions.setdefault(id(arg_d), []).append(key)
+
+    blockers: list = []
+    stuck = False
+    for keys in positions.values():
+        if len(keys) < 2:
+            continue
+        terms = []
+        for key in keys:
+            ref = call.attr_list.get(key)
+            if ref is None:
+                break
+            terms.append(ref.deref())
+        else:
+            first = terms[0]
+            if all(t is first for t in terms[1:]):
+                continue      # the call already supplies one and the same term
+            if not all(_can_unify(first, t, eng) for t in terms[1:]):
+                return 'fail'
+            if all(_same_psi_term(first, t, is_open) for t in terms[1:]):
+                # Equal down to their variables, yet still two terms: no
+                # binding can make them one, so waiting would not help.
+                stuck = True
+                continue
+            for t in terms:
+                open_vars(t, blockers, set())
+    if blockers:
+        return blockers
+    return 'stuck' if stuck else 'ready'
+
+
 def _eval_cond_functional(cond_term: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
     """Evaluate cond(C, T [, E]) as a functional expression, binding result.
 
@@ -1438,36 +1583,61 @@ class Engine:
             # More rules exist; skip this one (try next via choice point).
             return False
 
+        # A rule head that names the same variable twice asks for the very same
+        # psi-term in both places.  `f(X,X)` therefore does not apply to
+        # `f(a(a(X1)), a(a(X2)))` however alike the two arguments look, and
+        # unifying them would answer a question the call has not settled — so
+        # the call residuates on the variables that keep them apart, and is
+        # retried when one of them is bound.
+        _repeat = _head_repeat_status(_head_d_arity, funct, self)
+        if _repeat == 'fail':
+            return False
+        if _repeat == 'stuck':
+            # Nothing left to bind can make the head's repeats agree, so the
+            # call neither applies the rule nor waits: it simply has no value.
+            return True
+        _free_args_for_resid = _repeat if isinstance(_repeat, list) else None
+
         # Residuation check: if funct has completely free (unbound) arguments,
         # don't eagerly bind them to sorts just to match a head pattern.
         # Instead, suspend (residuate) on those free variables so that when they
         # get bound (by a later goal), the function is re-evaluated.
         # "Completely free" = type is top, no attrs, no value, no sort constraint.
-        _free_args_for_resid = []
-        for _fk_r, _fv_r_psi in funct.attr_list.items():
-            _fv_r = _fv_r_psi.deref()
-            _fv_r_is_free = (
-                (_fv_r.type is None or _fv_r.type is wl.top) and
-                not _fv_r.attr_list and
-                _fv_r.value is None
-            )
-            if _fv_r_is_free:
+        if _free_args_for_resid is None:
+            _free_args_for_resid = []
+            for _fk_r, _fv_r_psi in funct.attr_list.items():
+                _fv_r = _fv_r_psi.deref()
+                _fv_r_is_free = (
+                    (_fv_r.type is None or _fv_r.type is wl.top) and
+                    not _fv_r.attr_list and
+                    _fv_r.value is None
+                )
+                if not _fv_r_is_free:
+                    continue
                 # Check if the corresponding head arg is a non-top constraint.
                 _head_r_arg = _head_d_arity.attr_list.get(_fk_r)
-                if _head_r_arg is not None:
-                    _head_r_d = _head_r_arg.deref()
-                    _head_r_is_constrained = (
-                        _head_r_d.type is not None and _head_r_d.type is not wl.top
-                    )
-                    if _head_r_is_constrained:
-                        _free_args_for_resid.append(_fv_r)
+                if _head_r_arg is None:
+                    continue
+                _head_r_d = _head_r_arg.deref()
+                if _head_r_d.type is not None and _head_r_d.type is not wl.top:
+                    _free_args_for_resid.append(_fv_r)
         if _free_args_for_resid:
             # Set up residuation: attach a pending EVAL goal to each free variable.
             # When the variable gets bound, _wakeup_resid will push the EVAL goal
             # back onto the goal stack and f(bound_val) will be re-evaluated.
             from wild_life.data_structures import Goal as _ResidGoal, Residuation as _ResidR, SORT_VAR as _SV_R
-            _pending_eval = _ResidGoal(GoalType.EVAL, funct, result, rules, pending=True)
-            _pending_eval._resid_marker = True  # mark as residuation so re-fire knows
+            # Reuse the call's own pending goal across re-fires.  A fresh one
+            # each time would never compare equal to the goals already on the
+            # variables, so every re-evaluation would pile another copy on and
+            # the term would show a tilde per round.
+            _pending_eval = getattr(funct, '_resid_eval_goal', None)
+            if _pending_eval is None:
+                _pending_eval = _ResidGoal(GoalType.EVAL, funct, result, rules, pending=True)
+                _pending_eval._resid_marker = True  # mark as residuation so re-fire knows
+                funct._resid_eval_goal = _pending_eval
+            # Firing the goal clears its pending flag; the call is suspending
+            # again, so it is pending again — and shows a tilde again.
+            _pending_eval.pending = True
             # Mark funct so eval_aim can detect resid re-fire even from a freshly pushed Goal.
             # _wakeup_resid calls push_goal(g.type, g.a, g.b, g.c) which creates a new Goal
             # without _resid_marker, so we propagate via funct (which is g.a and is preserved).
