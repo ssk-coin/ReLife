@@ -568,7 +568,7 @@ class Engine:
                 # Facts: body = succeed
                 body_copy = wl.make_atom('succeed', wl.bi_module)
                 if body_copy is None:
-                    body_copy = PsiTerm(type=wl.succeed)
+                    body_copy = PsiTerm(type_def=wl.succeed)
             rules_to_add.append((head_copy, body_copy))
 
         if self.assert_first:
