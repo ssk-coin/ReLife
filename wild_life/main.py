@@ -178,6 +178,10 @@ def run_repl(
     # ---- Nested constraint session state -----------------------------------
     frame_stack: list[Frame] = []
     depth = 0
+    # True once the level we are sitting at has reported *** No, which happens
+    # when a deeper level is popped back into it.  A spent level has nothing
+    # left to backtrack into, so RETURN there only re-shows the prompt.
+    level_spent = False
 
     def _pop_frame() -> str:
         """Pop one depth level: undo trail, restore choice_stack, return parent bindings.
@@ -185,7 +189,7 @@ def run_repl(
         NOTE: print_depth is NOT restored on pop — pd changes are global in C Wild Life,
         not frame-local. The saved_pd in Frame is kept for informational purposes only.
         """
-        nonlocal depth
+        nonlocal depth, level_spent
         if not frame_stack:
             return ""
         frame = frame_stack.pop()
@@ -193,6 +197,7 @@ def run_repl(
         engine.choice_stack = frame.cs_before
         engine.goal_stack = None
         depth -= 1
+        level_spent = True   # the level we land on has just reported *** No
         # Return parent frame's bindings (if any)
         return frame_stack[-1].bindings_str if frame_stack else ""
 
@@ -241,16 +246,15 @@ def run_repl(
 
             # ---- Blank line --------------------------------------------------
             if not line_stripped:
-                if depth <= 1:
-                    # At top level or depth-1, blank just re-shows the prompt.
-                    # C Wild Life does not pop below depth 1 on a blank line:
-                    # depth 0 blank → re-show "> "
-                    # depth 1 blank → re-show "--1> " (stay inside the outer query)
+                if depth == 0 or (depth == 1 and level_spent):
+                    # Nothing left to leave: the top level, or the outermost
+                    # query once it has reported *** No.  RETURN there only
+                    # re-shows the prompt.
                     _write_prompt(depth)
                 else:
-                    # At depth > 1, blank pops one level.
+                    # RETURN closes the current level: *** No, the parent's
+                    # bindings, then the level below.
                     # TRUE MODEL: *** Yes was already shown at frame-push time.
-                    # Blank at depth>1 shows *** No + parent bindings, then pops.
                     parent_bindings = _pop_frame()   # depth becomes N-1, pd restored
                     sys.stdout.write("\n*** No\n")
                     if parent_bindings:
@@ -306,6 +310,7 @@ def run_repl(
                     if frame_stack:
                         frame_stack[-1] = frame_stack[-1]._replace(
                             bindings_str=bindings_str)
+                    level_spent = False
                     sys.stdout.write("\n*** Yes\n")
                     if bindings_str:
                         sys.stdout.write(bindings_str + "\n")
@@ -332,6 +337,10 @@ def run_repl(
                         sys.stdout.write(parent_bindings + "\n")
                     _write_prompt(depth)
                 continue
+
+            # A query or fact gives the current level something to backtrack
+            # into again, so RETURN there asks for the next solution.
+            level_spent = False
 
             # ---- Multi-line input accumulation ----------------------------
             # If this line does not end with '.' or '?', it is the start
@@ -492,6 +501,7 @@ def run_repl(
                         saved_pd = engine.wl.print_depth
                         frame_stack.append(Frame(pre_mark, bindings_str, cs_before, var_tree, saved_pd))
                         depth += 1
+                        level_spent = False
                         # TRUE MODEL: write *** Yes + bindings + prompt immediately on frame push.
                         sys.stdout.write("\n*** Yes\n")
                         if bindings_str:

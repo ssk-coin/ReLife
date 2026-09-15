@@ -20,7 +20,8 @@ import io
 from typing import Optional, Tuple
 
 from wild_life.data_structures import (
-    PsiTerm, Definition, GoalType, DefType, FACT, QUERY, ERROR
+    PsiTerm, Definition, GoalType, DefType, FACT, QUERY, ERROR,
+    int_div as _int_div
 )
 from wild_life.unification import (
     UnificationFailure, CutException, HaltException, AbortException,
@@ -812,6 +813,32 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         }
         return lt
 
+    elif sym == 'length' and len(t.attr_list) == 1:
+        # length(L) -> number of elements, the functional form of length/2.
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return None
+        lst = a1.deref()
+        if lst.type is None or not lst.type.is_subtype_of(eng.wl.alist):
+            return None
+        return eng.wl.make_integer(len(_list_to_python(lst, eng)))
+
+    elif sym == 'append' and len(t.attr_list) == 2:
+        # append(L1, L2) -> L1 with L2 appended, the functional form of
+        # append/3.  L2 becomes the tail as-is, so the result shares it, and
+        # the elements of L1 are shared rather than copied.
+        a1 = t.attr_list.get('1')
+        a2 = t.attr_list.get('2')
+        if a1 is None or a2 is None:
+            return None
+        head = a1.deref()
+        if head.type is None or not head.type.is_subtype_of(eng.wl.alist):
+            return None
+        result = a2.deref()
+        for item in reversed(_list_to_python(head, eng)):
+            result = eng.wl.make_cons(item, result)
+        return result
+
     elif sym == 'features':
         # features(T[, MOD]) -> list of attribute labels (sorted: positional first, then named)
         # If MOD is given, only includes features visible from module MOD,
@@ -1391,7 +1418,10 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
 
 def _term_to_str(t: PsiTerm, eng, quoted=True) -> str:
     from wild_life.print_term import term_to_string
-    return term_to_string(t, quoted=quoted, wl=eng.wl)
+    # Pass the query's variables so a diagnostic names them as the user wrote
+    # them (`B`) rather than by an internal label (`_A`).
+    return term_to_string(t, quoted=quoted, wl=eng.wl,
+                          var_tree=getattr(eng, '_last_var_tree', None))
 
 
 def _is_var(t: PsiTerm, eng) -> bool:
@@ -1804,7 +1834,7 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         '-': lambda a, b: a - b,
         '*': lambda a, b: a * b,
         '/': lambda a, b: a / b if b != 0 else float('inf'),
-        '//': lambda a, b: float(int(a) // int(b)) if b != 0 else 0.0,
+        '//': lambda a, b: _int_div(a, b) if b != 0 else 0.0,
         'mod': lambda a, b: float(int(a) % int(b)) if b != 0 else 0.0,
         '**': lambda a, b: a ** b,
         '^': lambda a, b: a ** b,
@@ -1817,6 +1847,18 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         '>>': lambda a, b: float(int(a) >> int(b)),
         '<<': lambda a, b: float(int(a) << int(b)),
     }
+    if sym == '//' and (ok1 or ok2):
+        # Integer division needs integer arguments and a non-zero divisor;
+        # either fault leaves the expression unevaluated and is reported by the
+        # caller (see _report_int_div_problem), so that a goal proved several
+        # times over does not repeat the diagnostic.
+        if (ok1 and v1 != int(v1)) or (ok2 and v2 != int(v2)):
+            return False, 0.0
+        if ok2 and v2 == 0:
+            return False, 0.0
+        if ok1 and ok2:
+            return True, _int_div(v1, v2)
+
     if sym in ops2 and ok1 and ok2:
         try:
             _result_val = float(ops2[sym](v1, v2))
@@ -2036,6 +2078,71 @@ def _get_linear_coeff(expr, x_var, eng):
     return None
 
 
+# Returned by a solver that has shown the equation has no solution at all,
+# as opposed to None, which only says this solver could not find one.
+_NO_SOLUTION = object()
+
+
+def _report_int_div_problem(t: 'PsiTerm', eng, _depth: int = 0) -> bool:
+    """Report the first fault in a `//` sub-term of t, if there is one.
+
+    Integer division needs integer arguments and a non-zero divisor.  Either
+    fault is decidable as soon as the offending argument is known, with the
+    other one still free, so reporting it here lets the caller fail a goal
+    rather than suspend on a constraint that can never hold.  Returns True
+    when something was reported.
+    """
+    if t is None or _depth > 10:
+        return False
+    t = t.deref()
+    if t.type is None:
+        return False
+    if _get_sym(t) == '//':
+        import sys as _sys_div
+        a1, a2 = t.attr_list.get('1'), t.attr_list.get('2')
+        ok1, v1 = _eval_arith(a1, eng) if a1 is not None else (False, 0.0)
+        ok2, v2 = _eval_arith(a2, eng) if a2 is not None else (False, 0.0)
+        for arg, ok, val in ((a1, ok1, v1), (a2, ok2, v2)):
+            if ok and val != int(val):
+                _sys_div.stderr.write(
+                    f"*** Warning: argument '{_term_to_str(arg.deref(), eng)}' "
+                    f"of integer division is not an integer.\n")
+                return True
+        if ok2 and v2 == 0:
+            _sys_div.stderr.write(
+                f"*** Error: division by zero in {_term_to_str(t, eng)}.\n")
+            return True
+    for sub in t.attr_list.values():
+        if _report_int_div_problem(sub, eng, _depth + 1):
+            return True
+    return False
+
+
+def _solve_int_div_divisor(dividend: float, quotient: float):
+    """Solve `dividend // x == quotient` for x.
+
+    `//` truncates toward zero, so |x| ranges over (|a|/(|v|+1), |a|/|v|] and x
+    takes the sign of a*v.  Exactly one integer in that range is the solution;
+    an empty range means the equation has none (_NO_SOLUTION); a wider one
+    leaves several divisors, so the constraint residuates instead (None).
+    A zero dividend is the degenerate case C Wild Life answers with 0.
+    """
+    if dividend != int(dividend) or quotient != int(quotient):
+        return None
+    a, v = abs(int(dividend)), abs(int(quotient))
+    if a == 0:
+        return 0.0
+    if v == 0:
+        return _NO_SOLUTION
+    lo = a // (v + 1) + 1
+    hi = a // v
+    if lo > hi:
+        return _NO_SOLUTION
+    if lo != hi:
+        return None
+    return float(lo if (dividend > 0) == (quotient > 0) else -lo)
+
+
 def _try_solve_nonlinear(expr, x_var, v_lhs, eng):
     """Try to solve expr = v_lhs for x_var when the expression is not linear.
 
@@ -2077,6 +2184,12 @@ def _try_solve_nonlinear(expr, x_var, v_lhs, eng):
             ok1, v1 = _eval_arith(arg1, eng)
             if ok1 and v_lhs != 0.0:
                 return v1 / v_lhs
+    if sym == '//':
+        # a // x = v  →  x, when exactly one integer divisor gives v
+        if id(arg2.deref()) == id(x_var):
+            ok1, v1 = _eval_arith(arg1, eng)
+            if ok1:
+                return _solve_int_div_divisor(v1, v_lhs)
     # x * x = 0 → x = 0
     if sym == '*':
         arg1_d = arg1.deref()
@@ -3609,7 +3722,7 @@ def _eval_arith_psi(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
                 '+': lambda a, b: a + b, '-': lambda a, b: a - b,
                 '*': lambda a, b: a * b,
                 '/': lambda a, b: a / b if b != 0 else float('inf'),
-                '//': lambda a, b: float(int(a) // int(b)) if b != 0 else 0.0,
+                '//': lambda a, b: _int_div(a, b) if b != 0 else 0.0,
                 'mod': lambda a, b: float(int(a) % int(b)) if b != 0 else 0.0,
                 '**': lambda a, b: a ** b, '^': lambda a, b: a ** b,
                 'max': lambda a, b: max(a, b), 'min': lambda a, b: min(a, b),
@@ -3827,6 +3940,121 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng) -> 'Optional[PsiTerm]':
     return fresh
 
 
+def _has_disjunctive_body(t: PsiTerm, wl) -> bool:
+    """True when t is a function whose rule reduces to a disjunction.
+
+    `sgn -> {1;-1}.` is 0-arity, so the synchronous path that normally
+    evaluates such functions would have to pick one alternative and keep it;
+    only an EVAL goal gives each alternative its own choice point.
+    """
+    rules = t.type.rule if t.type is not None else None
+    if not rules:
+        return False
+    for _head, body in rules:
+        if body is None:
+            continue
+        body_d = body.deref()
+        if body_d.type is not None and body_d.type in (wl.disjunction, wl.life_or):
+            return True
+    return False
+
+
+def _expand_disjunctions_in_place(lhs: PsiTerm, rhs: PsiTerm, eng):
+    """Prove `lhs = rhs` once per combination of the disjunctions inside them.
+
+    Each disjunction node is swapped (trailed) for a fresh variable, so an
+    alternative can be picked by an ordinary unification goal.  That keeps the
+    choice visible through the terms themselves: `X:(3*sgn)` IS the expression
+    node, so X reads as 3 for one alternative and -3 for the next, where
+    unifying a copy of the expression would have left X as the disjunction.
+
+    Returns True once the goals are pushed, or None when neither side holds a
+    disjunction and the caller should carry on.
+    """
+    from wild_life.inference import _DEFRULES as _DR
+    wl = eng.wl
+    slots = []   # [(fresh var standing in for a disjunction, its alternatives)]
+
+    def collect(t, depth=0):
+        if depth > 10 or not t.attr_list:
+            return
+        for key in list(t.attr_list.keys()):
+            sub = t.attr_list[key].deref()
+            if sub.type is not None and sub.type is wl.disjunction:
+                elems = _collect_disjunction(sub, eng)
+                if len(elems) > 1:
+                    fresh = PsiTerm(type_def=wl.top)
+                    eng.unifier.set_attr(t, key, fresh)
+                    slots.append((fresh, elems))
+                    continue
+            collect(sub, depth + 1)
+
+    collect(lhs)
+    collect(rhs)
+    if not slots:
+        return None
+
+    eq_defn = getattr(wl, 'eqsym', None) or wl.syntax_module.symbol_table.get('=')
+
+    def conjoin(goals):
+        joined = goals[-1]
+        for goal in reversed(goals[:-1]):
+            conj = PsiTerm(type_def=wl.commasym)
+            conj.attr_list = {'1': goal, '2': joined}
+            joined = conj
+        return joined
+
+    def equation(lhs, rhs):
+        eq = PsiTerm(type_def=eq_defn)
+        eq.attr_list = {'1': lhs, '2': rhs}
+        return eq
+
+    import itertools
+    combos = [
+        conjoin([equation(slots[i][0], choice) for i, choice in enumerate(combo)]
+                + [equation(lhs, rhs)])
+        for combo in itertools.product(*[elems for _, elems in slots])
+    ]
+    for alt in reversed(combos[1:]):
+        eng.push_choice_point(GoalType.PROVE, alt, _DR, None)
+    eng.push_goal(GoalType.PROVE, combos[0], _DR, None)
+    return True
+
+
+def _inline_disjunctive_funcs(t: PsiTerm, eng, depth: int = 0) -> bool:
+    """Replace sub-terms of t that are functions reducing to a disjunction.
+
+    `3 * sgn` with `sgn -> {1;-1}.` has to read as `3 * {1;-1}` before the
+    disjunction expansion can give each alternative its own choice point.
+    The reduction's bindings are undone again: only the value is wanted, not
+    the coref linking the function atom to its rule-head copy.
+    """
+    if depth > 20 or not t.attr_list:
+        return False
+    wl = eng.wl
+    changed = False
+    for key in list(t.attr_list.keys()):
+        sub = t.attr_list[key].deref()
+        if _is_user_function(sub):
+            # Reduce a copy: _eval_user_func_sync rewrites its argument's
+            # features in place, which is not undone by the trail.
+            probe = PsiTerm(type_def=sub.type, value=sub.value,
+                            attr_list=dict(sub.attr_list))
+            probe.flags = sub.flags
+            mark = eng.trail.mark()
+            evaled = _eval_user_func_sync(probe, eng, 0)
+            eng.trail.undo_to(mark)
+            evaled = evaled.deref() if evaled is not None else None
+            if (evaled is not None and evaled.type is not None
+                    and evaled.type in (wl.disjunction, wl.life_or)):
+                t.attr_list[key] = evaled
+                changed = True
+                continue
+        if _inline_disjunctive_funcs(sub, eng, depth + 1):
+            changed = True
+    return changed
+
+
 def bi_unify(goal: PsiTerm, eng) -> bool:
     """X = Y — LIFE sort unification (with functional evaluation)."""
     a, b = _get_two_args(goal)
@@ -3967,7 +4195,10 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     # evaluation (line ~4061), NOT via an EVAL goal.  Using EVAL goals for them
     # would create arithmetic constraints when the stored value is an arithmetic
     # expression with unbound variables, causing spurious `real~` display.
-    if _is_user_function(b_d) and b_d.attr_list:
+    # A 0-arity function whose value is a disjunction is the one exception to
+    # that exception: `sgn -> {1;-1}.` needs a choice point per alternative,
+    # which only the EVAL goal sets up.
+    if _is_user_function(b_d) and (b_d.attr_list or _has_disjunctive_body(b_d, eng.wl)):
         result = PsiTerm(type_def=eng.wl.top)
         # LIFO: push UNIFY first, then EVAL on top (EVAL executes first)
         eng.push_goal(GoalType.UNIFY, a_d, result, None)
@@ -3975,7 +4206,7 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         return True
 
     # Try to evaluate a as a user-defined function call
-    if _is_user_function(a_d) and a_d.attr_list:
+    if _is_user_function(a_d) and (a_d.attr_list or _has_disjunctive_body(a_d, eng.wl)):
         result = PsiTerm(type_def=eng.wl.top)
         eng.push_goal(GoalType.UNIFY, result, b_d, None)
         eng.push_goal(GoalType.EVAL, a_d, result, a_d.type.rule)
@@ -4320,20 +4551,39 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                 eng.push_choice_point(GoalType.UNIFY, alt, b_d, None)
             return _unify(eng, elems[0], b_d)
 
-    # Handle embedded disjunctions in RHS (e.g. [{1;2;3}|T] → [1|T], [2|T], [3|T])
-    # Only do this when LHS is an unbound variable (binding case)
+    # Handle disjunctions embedded in either side (e.g. [{1;2;3}|T] → [1|T],
+    # [2|T], [3|T]): solve the equation once per combination.
     a_is_var = (a_d.type is None or (a_d.type is eng.wl.top and not a_d.attr_list))
-    if a_is_var and b_d.type is not None and _term_contains_disjunction(b_d, eng):
-        alts = _expand_term_disjunctions(b_d, eng)
-        if len(alts) > 1:
-            # Evaluate embedded user function calls in each alternative in-place.
-            # This ensures s(f(1)) → s(1) rather than leaving f unevaluated.
-            # (e.g. A=s(f({1;2})) gives s(1) s(2), not s(f(1)) s(f(2)))
-            for _alt_ev in alts:
-                _eval_embedded_user_funcs(_alt_ev, eng, 0, set())
-            for alt in reversed(alts[1:]):
-                eng.push_choice_point(GoalType.UNIFY, a_d, alt, None)
-            return _unify(eng, a_d, alts[0])
+    b_is_var = (b_d.type is None or (b_d.type is eng.wl.top and not b_d.attr_list))
+    _disj_sides = [_t for _t in (a_d, b_d) if _t.type is not None and _t.attr_list]
+    for _side in _disj_sides:
+        # Only inside arithmetic, where a disjunction has to surface before the
+        # expression can distribute over it.  Elsewhere the function call is
+        # left for the ordinary evaluation to reduce.
+        if _get_sym(_side) in _ARITH_OPS_SET:
+            _inline_disjunctive_funcs(_side, eng)
+    if not a_is_var and not b_is_var:
+        # Two arithmetic terms, so there is no variable to bind a rebuilt copy
+        # to: pick the alternatives inside the terms themselves, which is also
+        # what lets `X:(3*sgn)` read as 3 rather than as the whole disjunction.
+        _disj_arith = [_side for _side in _disj_sides
+                       if _term_contains_disjunction(_side, eng)]
+        if _disj_arith and all(_get_sym(_side) in _ARITH_OPS_SET
+                               for _side in _disj_arith):
+            if _expand_disjunctions_in_place(a_d, b_d, eng):
+                return True
+    else:
+        _expr, _var = (b_d, a_d) if a_is_var else (a_d, b_d)
+        if _expr.type is not None and _term_contains_disjunction(_expr, eng):
+            alts = _expand_term_disjunctions(_expr, eng)
+            if len(alts) > 1:
+                # Evaluate embedded user function calls in each alternative
+                # in-place, so that s(f(1)) reduces to s(1).
+                for _alt_ev in alts:
+                    _eval_embedded_user_funcs(_alt_ev, eng, 0, set())
+                for alt in reversed(alts[1:]):
+                    eng.push_choice_point(GoalType.UNIFY, _var, alt, None)
+                return _unify(eng, _var, alts[0])
 
     # Pre-check: detect concrete non-boolean arguments in and/or expressions.
     # Wild Life emits "Non-boolean argument or result in '...'." when any direct
@@ -4682,7 +4932,12 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
             if _a_could_eval_lhs and not _a_is_ufn_lhs and not _a_is_nst_lhs:
                 _a_arith_lhs = _try_eval_arith_to_term(a_d, eng)
                 if _a_arith_lhs is not None:
-                    return _unify(eng, _a_arith_lhs, b_d)
+                    # Re-enter as an equation: the RHS may still be a
+                    # constraint to solve (`3*1 = 10//A`), which plain
+                    # unification against a number could only fail on.
+                    _eq_lhs = PsiTerm(type_def=goal.type)
+                    _eq_lhs.attr_list = {'1': _a_arith_lhs, '2': b_d}
+                    return bi_unify(_eq_lhs, eng)
         # Arithmetic expression that couldn't be fully evaluated (has variables).
         wl = eng.wl
         b_sym = b_d.type.keyword.symbol if b_d.type and b_d.type.keyword else ''
@@ -4762,6 +5017,8 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                                                 return False
                             # Try non-linear inversion (e.g. a/x = v → x = a/v)
                             x_val = _try_solve_nonlinear(b_d, x_var, v_lhs, eng)
+                            if x_val is _NO_SOLUTION:
+                                return False   # the equation has no solution
                             if x_val is not None:
                                 x_term = _make_number(eng, x_val)
                                 solved = True
@@ -4923,43 +5180,55 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                     # Re-suspension is correct even for is_resid_refiring cases:
                     # drop only when truly cyclic (a_coeff==1 with no const solution).
                     if not vars_in_expr:
-                        # No free vars in expression — evaluate it and unify.
-                        ok_eval, v_eval = _eval_arith(b_d, eng)
-                        if ok_eval:
-                            b_d = _make_number(eng, v_eval)
-                        else:
-                            # Concrete but unevaluable (e.g. division by zero, non-numeric
-                            # atom argument).  Check if any immediate arg is a concrete
-                            # non-numeric atom — if so, emit the standard Wild Life warning.
-                            _b_sym_fail = (b_d.type.keyword.symbol
-                                           if (b_d.type and b_d.type.keyword) else '')
-                            if _b_sym_fail in _ARITH_OPS_SET:
-                                _fa1, _fa2 = _get_two_args(b_d)
-                                # Evaluate each arg to its concrete form (resolving dot
-                                # accesses, feature lookups, etc.) for the display message.
-                                def _eval_arg_for_warn(a_ref):
-                                    if a_ref is None:
-                                        return None
-                                    a_d_w = a_ref.deref()
-                                    _ev_w = _try_eval_string_func(a_d_w, eng)
-                                    return _ev_w if _ev_w is not None else a_d_w
-                                _fa1_ev = _eval_arg_for_warn(_fa1)
-                                _fa2_ev = _eval_arg_for_warn(_fa2)
-                                # Build a normalised copy of b_d with evaluated args.
-                                _b_norm_w = PsiTerm()
-                                _b_norm_w.type = b_d.type
-                                _b_norm_w.attr_list = {}
-                                if _fa1_ev is not None:
-                                    _b_norm_w.attr_list['1'] = _fa1_ev
-                                if _fa2_ev is not None:
-                                    _b_norm_w.attr_list['2'] = _fa2_ev
-                                if _has_concrete_non_numeric_arg(_b_norm_w, eng):
-                                    import sys as _sys_w
-                                    _expr_str_w = _term_to_str(_b_norm_w, eng, quoted=True)
-                                    print(f"*** Warning: non-numeric argument(s) in "
-                                          f"'{_expr_str_w}'.", file=_sys_w.stderr)
+                        # Concrete but unevaluable (e.g. division by zero,
+                        # non-numeric atom argument).  Check if any immediate
+                        # arg is a concrete non-numeric atom — if so, emit the
+                        # standard Wild Life warning.
+                        if _report_int_div_problem(b_d, eng):
                             return False
+                        _b_sym_fail = (b_d.type.keyword.symbol
+                                       if (b_d.type and b_d.type.keyword) else '')
+                        if _b_sym_fail in _ARITH_OPS_SET:
+                            _fa1, _fa2 = _get_two_args(b_d)
+                            # Evaluate each arg to its concrete form (resolving dot
+                            # accesses, feature lookups, etc.) for the display message.
+                            def _eval_arg_for_warn(a_ref):
+                                if a_ref is None:
+                                    return None
+                                a_d_w = a_ref.deref()
+                                _ev_w = _try_eval_string_func(a_d_w, eng)
+                                return _ev_w if _ev_w is not None else a_d_w
+                            _fa1_ev = _eval_arg_for_warn(_fa1)
+                            _fa2_ev = _eval_arg_for_warn(_fa2)
+                            # Build a normalised copy of b_d with evaluated args.
+                            _b_norm_w = PsiTerm()
+                            _b_norm_w.type = b_d.type
+                            _b_norm_w.attr_list = {}
+                            if _fa1_ev is not None:
+                                _b_norm_w.attr_list['1'] = _fa1_ev
+                            if _fa2_ev is not None:
+                                _b_norm_w.attr_list['2'] = _fa2_ev
+                            if _has_concrete_non_numeric_arg(_b_norm_w, eng):
+                                import sys as _sys_w
+                                _expr_str_w = _term_to_str(_b_norm_w, eng, quoted=True)
+                                print(f"*** Warning: non-numeric argument(s) in "
+                                      f"'{_expr_str_w}'.", file=_sys_w.stderr)
+                        return False
                     else:
+                        # A constraint that can never hold, such as a division
+                        # by a divisor already known to be zero, fails now
+                        # instead of suspending on its remaining free vars.
+                        if _report_int_div_problem(b_d, eng):
+                            return False
+                        # `0 // X` is zero for every divisor that divides at
+                        # all, so a free left side takes that value rather than
+                        # suspending on the divisor.
+                        if a_d_is_free and _get_sym(b_d) == '//':
+                            _zd = b_d.attr_list.get('1')
+                            _zd_ok, _zd_v = (_eval_arith(_zd, eng) if _zd is not None
+                                             else (False, 0.0))
+                            if _zd_ok and _zd_v == 0:
+                                return _unify(eng, a_d_final, _make_number(eng, 0.0))
                         from wild_life.data_structures import Goal, Residuation
                         eq_defn = getattr(wl, 'eqsym', None) or wl.syntax_module.symbol_table.get('=')
                         eq_term = PsiTerm(type_def=eq_defn)
@@ -6279,11 +6548,15 @@ def bi_term_to_atom(goal: PsiTerm, eng) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _list_to_python(t: PsiTerm, eng):
-    """Convert WL list to Python list."""
+    """Convert WL list to Python list.
+
+    A sub-sort of cons is walked like a cons cell, so `int_cons <| cons.`
+    makes an int_cons spine just as traversable as a plain list.
+    """
     wl = eng.wl
     items = []
     cur = t.deref()
-    while cur.type == wl.alist:
+    while cur.type is not None and cur.type.is_subtype_of(wl.alist):
         h = cur.attr_list.get('1')
         t2 = cur.attr_list.get('2')
         if h:

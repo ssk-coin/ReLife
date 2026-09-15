@@ -275,6 +275,8 @@ class Unifier:
         # If we encounter the same pair again (via circular attrs), we return True
         # immediately (the rational-tree assumption: cyclic terms can be unified).
         self._unifying_pairs: set = set()
+        # ids of psi-terms whose :: Sort(attrs). prototype is being applied.
+        self._applying_proto: set = set()
 
     def bind(self, var: PsiTerm, val: PsiTerm):
         """変数 var を val に束縛する (バックトラック可能)
@@ -288,6 +290,38 @@ class Unifier:
         """PsiTerm の型を変更する (バックトラック可能)"""
         self.trail.trail_psi(t, 'type')
         t.type = new_type
+
+    def _apply_prototype_attrs(self, t: PsiTerm) -> bool:
+        """Constrain t's features by the `:: Sort(attrs).` prototype of its sort.
+
+        Declaring `:: int_cons(int, int_list).` gives every int_cons an int
+        head and an int_list tail, so narrowing one list cell to int_cons
+        narrows the rest of the spine along with it.  Features the prototype
+        names but t lacks are added; the ones it already has are unified with
+        the prototype, which is what fails an incompatible narrowing.
+        """
+        proto = getattr(t.type, 'prototype_attrs', None) if t.type is not None else None
+        if not proto:
+            return True
+        # A cyclic term would otherwise re-enter through the recursive unify
+        # below; the guard is per-unification, so a later retry still applies.
+        if id(t) in self._applying_proto:
+            return True
+        self._applying_proto.add(id(t))
+        try:
+            # One shared var_map so variables the prototype shares across
+            # features stay shared in the copies.
+            var_map: dict = {}
+            for key, proto_val in proto.items():
+                copy = copy_term(proto_val, var_map)
+                existing = t.attr_list.get(key)
+                if existing is None:
+                    self.set_attr(t, key, copy)
+                elif not self.unify(existing, copy):
+                    return False
+            return True
+        finally:
+            self._applying_proto.discard(id(t))
 
     def bind_value(self, t: PsiTerm, new_value: Any):
         """PsiTerm の値を変更する (バックトラック可能)"""
@@ -824,10 +858,10 @@ class Unifier:
         # 一方が top (@) → もう一方の型に制約
         if du is WL.top:
             self.bind_type(u, dv)
-            return True
+            return self._apply_prototype_attrs(u)
         if dv is WL.top:
             self.bind_type(v, du)
-            return True
+            return self._apply_prototype_attrs(v)
 
         # サブタイプ関係: より特殊な型 (GLB) を採用
         if du.is_subtype_of(dv):
@@ -840,7 +874,7 @@ class Unifier:
                 import math as _math_ut
                 if not _math_ut.isfinite(v.value) or v.value != int(v.value):
                     return False
-            return True
+            return self._apply_prototype_attrs(v)
         if dv.is_subtype_of(du):
             self.bind_type(u, dv)   # u の型を dv (より特殊) に引き上げ
             # Numeric value compatibility: if u has a concrete numeric value,
@@ -849,7 +883,7 @@ class Unifier:
                 import math as _math_ut
                 if not _math_ut.isfinite(u.value) or u.value != int(u.value):
                     return False
-            return True
+            return self._apply_prototype_attrs(u)
 
         # 直交した型 (どちらもサブタイプでない) → 互換性チェック
         # ユーザー定義の共通サブタイプがあれば GLB が存在する
@@ -873,7 +907,7 @@ class Unifier:
         glb = glbs[0]
         self.bind_type(u, glb)
         self.bind_type(v, glb)
-        return True
+        return self._apply_prototype_attrs(u) and self._apply_prototype_attrs(v)
 
     def _unify_values(self, u: PsiTerm, v: PsiTerm) -> bool:
         """値 (数値・文字列) を単一化する"""
