@@ -1424,7 +1424,8 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
     # C Wild Life's write/1 does NOT pretty-print (no line-wrapping). Only
     # pretty_write/1 produces multi-line indented output.  compact=True disables
     # line-wrapping (max_col=1_000_000); compact=False uses the default 79-char limit.
-    _mc = 1_000_000 if compact else _MAX_COL
+    _mc = (1_000_000 if compact
+           else max(1, getattr(eng.wl, 'page_width', 80) - 1))
     write_term(t, outfile=stream or sys.stdout, quoted=quoted, wl=eng.wl,
                var_tree=var_tree, print_depth=_pd, max_col=_mc)
 
@@ -1609,6 +1610,32 @@ def bi_writeln(goal: PsiTerm, eng) -> bool:
     bi_write(goal, eng)
     print()
     return True
+
+
+def bi_page_width(goal: PsiTerm, eng) -> bool:
+    """page_width / page_width(N) — get or set the line width used when
+    a term is written out over several lines.
+
+    0-arity resets the width to its 80-column default.
+    """
+    wl = eng.wl
+    arg = _get_one_arg(goal)
+    if arg is None:
+        if not goal.deref().attr_list:
+            wl.page_width = 80
+            return True
+        return False
+    arg = arg.deref()
+    if arg.value is not None and arg.type and arg.type.is_subtype_of(wl.real):
+        n = int(float(arg.value))
+        if n <= 0:
+            return False
+        wl.page_width = n
+        return True
+    # Unbound argument: report the width in force.
+    if _term_is_unbound(arg, eng):
+        return _unify(eng, arg, wl.make_integer(getattr(wl, 'page_width', 80)))
+    return False
 
 
 def bi_print_depth(goal: PsiTerm, eng) -> bool:
@@ -8466,6 +8493,7 @@ def register_all(wl) -> None:
     _reg('write_canonical', bi_write_canonical)
     _reg('print', bi_print)
     _reg('print_depth', bi_print_depth)
+    _reg('page_width', bi_page_width)
     _reg('nl', bi_nl)
     _reg('write_err', bi_write_err)
     _reg('writeln', bi_writeln)
