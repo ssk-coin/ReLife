@@ -6005,8 +6005,38 @@ def _collect_solutions(template: PsiTerm, g: PsiTerm, eng) -> list:
     while True:
         result = eng.run()
         if result:
-            # Copy template_copy with current bindings resolved
-            collected.append(copy_term(template_copy))
+            # Copy template_copy with current bindings resolved.  A template
+            # written as a call through a functor variable — `bagof(F(5),q(F))`
+            # parses as apply(5,functor => F) — is evaluated once F is known,
+            # because built_ins.lf collects `evalin(A)` rather than A.
+            _elem = template_copy.deref()
+            _mark_ev = eng.trail.mark()
+            if getattr(wl, 'apply', None) is not None and _elem.type is wl.apply:
+                _gs_ev, _cs_ev = eng.goal_stack, eng.choice_stack
+                _ok_ev = eng.main_loop_ok
+                try:
+                    _eq_defn = (getattr(wl, 'eqsym', None)
+                                or wl.syntax_module.symbol_table.get('='))
+                    _fresh_ev = PsiTerm(type_def=wl.top)
+                    _eq_ev = PsiTerm(type_def=_eq_defn)
+                    _eq_ev.attr_list = {'1': _fresh_ev, '2': _elem}
+                    eng.goal_stack = None
+                    if bi_unify(_eq_ev, eng):
+                        # The unification may leave goals (the EVAL of the
+                        # reconstructed call) to run before the value is there.
+                        if eng.goal_stack is not None:
+                            from wild_life.inference import (
+                                _INNER_RUN_BARRIER as _IRB_ev)
+                            eng.run(cs_barrier=_cs_ev if _cs_ev is not None
+                                    else _IRB_ev)
+                        _elem = _fresh_ev.deref()
+                except Exception:
+                    pass
+                finally:
+                    eng.goal_stack, eng.choice_stack = _gs_ev, _cs_ev
+                    eng.main_loop_ok = _ok_ev
+            collected.append(copy_term(_elem))
+            eng.trail.undo_to(_mark_ev)
             if not eng.choice_stack or eng.choice_stack is cp_save:
                 break
             eng.backtrack()
