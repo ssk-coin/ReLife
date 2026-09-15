@@ -2063,21 +2063,31 @@ def _get_linear_coeff(expr, x_var, eng):
     return None
 
 
+# Returned by a solver that has shown the equation has no solution at all,
+# as opposed to None, which only says this solver could not find one.
+_NO_SOLUTION = object()
+
+
 def _solve_int_div_divisor(dividend: float, quotient: float):
-    """Solve `dividend // x == quotient` for x, if exactly one integer fits.
+    """Solve `dividend // x == quotient` for x.
 
     `//` truncates toward zero, so |x| ranges over (|a|/(|v|+1), |a|/|v|] and x
-    takes the sign of a*v.  A zero quotient only says |x| exceeds |a|, and a
-    wider range leaves several divisors — neither is a solution, so both are
-    left for the constraint to residuate on.
+    takes the sign of a*v.  Exactly one integer in that range is the solution;
+    an empty range means the equation has none (_NO_SOLUTION); a wider one
+    leaves several divisors, so the constraint residuates instead (None).
+    A zero dividend is the degenerate case C Wild Life answers with 0.
     """
     if dividend != int(dividend) or quotient != int(quotient):
         return None
     a, v = abs(int(dividend)), abs(int(quotient))
-    if a == 0 or v == 0:
-        return None
+    if a == 0:
+        return 0.0
+    if v == 0:
+        return _NO_SOLUTION
     lo = a // (v + 1) + 1
     hi = a // v
+    if lo > hi:
+        return _NO_SOLUTION
     if lo != hi:
         return None
     return float(lo if (dividend > 0) == (quotient > 0) else -lo)
@@ -4506,8 +4516,10 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         # Two arithmetic terms, so there is no variable to bind a rebuilt copy
         # to: pick the alternatives inside the terms themselves, which is also
         # what lets `X:(3*sgn)` read as 3 rather than as the whole disjunction.
-        if all(_get_sym(_t) in _ARITH_OPS_SET for _t in (a_d, b_d)) and any(
-                _term_contains_disjunction(_side, eng) for _side in _disj_sides):
+        _disj_arith = [_side for _side in _disj_sides
+                       if _term_contains_disjunction(_side, eng)]
+        if _disj_arith and all(_get_sym(_side) in _ARITH_OPS_SET
+                               for _side in _disj_arith):
             if _expand_disjunctions_in_place(a_d, b_d, eng):
                 return True
     else:
@@ -4955,6 +4967,8 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                                                 return False
                             # Try non-linear inversion (e.g. a/x = v → x = a/v)
                             x_val = _try_solve_nonlinear(b_d, x_var, v_lhs, eng)
+                            if x_val is _NO_SOLUTION:
+                                return False   # the equation has no solution
                             if x_val is not None:
                                 x_term = _make_number(eng, x_val)
                                 solved = True
