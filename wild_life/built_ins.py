@@ -7489,9 +7489,35 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
                   f"worth *null psi_term*.")
         elif defn is not None and defn.type == DefType.UNDEF:
             # UNDEF の場合:
+            #   グローバル遅延規則 (:: X:bar | Goal.) の宛先ソート → その規則を列挙
             #   clash_blocked スタブ → 衝突検出で作成済みのブロック → 無音成功
             #   それ以外 (未定義/非公開) → "% 'name' is undefined." を表示
-            if not getattr(defn, 'clash_blocked', False):
+            _delay_for_sort = [
+                _dr for _dr in (getattr(wl, 'delay_rules', None) or [])
+                if (_dr.attr_list.get('1') is not None
+                    and _dr.attr_list['1'].deref().type is defn)
+            ]
+            if _delay_for_sort:
+                flush_imported()
+                name = defn.keyword.symbol if defn.keyword else '?'
+                print()
+                for _dr in _delay_for_sort:
+                    _dpat = _dr.attr_list.get('1')
+                    _dgoal = _dr.attr_list.get('2')
+                    if _dpat is None or _dgoal is None:
+                        continue
+                    _dpat_str, _dgoal_strs = _rule_to_string(_dpat.deref(),
+                                                             _dgoal, wl)
+                    print(f":: {_dpat_str} | {', '.join(_dgoal_strs)}.")
+                # A sort named only by a delay rule sits directly under @.
+                _dparents = defn.parents or []
+                if _dparents:
+                    for _parent in _dparents:
+                        _pname = _parent.keyword.symbol if _parent.keyword else '@'
+                        print(f"{name} <| {_pname}.")
+                else:
+                    print(f"{name} <| @.")
+            elif not getattr(defn, 'clash_blocked', False):
                 func_name = defn.keyword.symbol if defn.keyword else '?'
                 flush_imported()
                 print()   # プロンプト行の末尾に改行を入れる
