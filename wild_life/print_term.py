@@ -1000,7 +1000,8 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
     _arith_syms_display = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
                                       'max', 'min', 'abs', 'sqrt', 'floor', 'ceiling',
                                       '/\\', '\\/', 'xor', '>>', '<<'))
-    if (_psym in _arith_syms_display and t.value is None and t.attr_list):
+    if (_psym in _arith_syms_display and t.value is None and t.attr_list
+            and not ps.no_arith_eval):
         from wild_life.data_structures import NON_STRICT_TERM as _NST_DISP
         if not (t.flags & _NST_DISP):
             _arith_val = _eval_pure_arith(t, wl)

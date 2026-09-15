@@ -7209,6 +7209,9 @@ def _rule_to_string(h, b, wl):
     ps = PrintState(outfile=io.StringIO())
     ps.const_quote = True
     ps.indent = False
+    # A listing shows the clause as written: `a(1+2).` lists as `a(1 + 2)`,
+    # not as the 3 it would evaluate to when the clause is used.
+    ps.no_arith_eval = True
 
     ps.go_through(h)
     for g in body_goals:
@@ -7356,6 +7359,32 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
                     print(f"% '{func_name}' is a user-defined predicate with an empty definition.\n")
                 else:
                     _bi_listing_one(defn, wl, imported=False)
+        elif defn is not None and defn.type == DefType.TYPE:
+            # A sort lists as its membership condition, if it was defined with
+            # one, followed by the sorts it sits under.
+            flush_imported()
+            name = defn.keyword.symbol if defn.keyword else '?'
+            print()
+            for _pat, _cond in (defn.rule or []):
+                if _pat is None or _cond is None:
+                    continue
+                # The pattern is shown as the sort being defined, not as the
+                # sort it was written against: `positive := I:int | I > 0`
+                # lists as `:: _A: positive | _A > 0`.  The swap is on the
+                # pattern itself, so that it and the condition still share the
+                # variable and print under one name.
+                from wild_life.data_structures import SORT_VAR as _SV_LST
+                _pat_d = _pat.deref()
+                _was_type, _was_flags = _pat_d.type, _pat_d.flags
+                _pat_d.type, _pat_d.flags = defn, _pat_d.flags | _SV_LST
+                try:
+                    _pat_str, _cond_strs = _rule_to_string(_pat_d, _cond, wl)
+                finally:
+                    _pat_d.type, _pat_d.flags = _was_type, _was_flags
+                print(f":: {_pat_str} | {', '.join(_cond_strs)}.")
+            for _parent in defn.parents:
+                _pname = _parent.keyword.symbol if _parent.keyword else '@'
+                print(f"{name} <| {_pname}.")
         elif defn is not None and defn.type == DefType.GLOBAL:
             # C Wild Life lists a global by name only — it does not report the
             # value the cell currently holds.
