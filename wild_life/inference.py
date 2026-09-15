@@ -2027,9 +2027,15 @@ class Engine:
                     sys.stdout.flush()
                     raise HaltException(1)
             elif sort == QUERY:
-                # Execute query; push as goal
+                # Execute query; push as goal.  A query in a file runs for its
+                # first solution only: the alternatives it leaves behind are
+                # dropped, so they do not turn the prompt that follows the load
+                # into a '--1>' continuation of the file's last query.
+                _cs_before = self.choice_stack
                 self.push_goal(GoalType.PROVE, t, _DEFRULES, None)
-                self.run()
+                self.run(cs_barrier=_cs_before)
+                self.choice_stack = _cs_before
+                self.goal_stack = None
         return True
 
     # ─── main loop ──────────────────────────────────────────────────────────
