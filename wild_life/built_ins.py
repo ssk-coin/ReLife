@@ -880,14 +880,10 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1.type and a1.type.keyword and a1.type.keyword.module:
             term_type_mod = a1.type.keyword.module
 
-        all_keys = list(a1.attr_list.keys())
-        # Sort: positional (non-negative integers) first, then named alphabetically
-        pos_keys = sorted(
-            [k for k in all_keys if k.lstrip('-').isdigit() and int(k) >= 0],
-            key=lambda x: int(x))
-        named_keys = sorted(
-            [k for k in all_keys if not (k.lstrip('-').isdigit() and int(k) >= 0)])
-        sorted_keys = pos_keys + named_keys
+        # Feature order — the same order the printer lays attributes out in,
+        # so features(@('' => A,0 => 22)) is ['',0] rather than [0,''].
+        from wild_life.data_structures import featcmp_key as _featcmp_key
+        sorted_keys = sorted(a1.attr_list.keys(), key=_featcmp_key)
 
         lst = PsiTerm()
         lst.type = wl.nil
@@ -8758,8 +8754,11 @@ def register_all(wl) -> None:
         _t_ev = _try_eval_string_func(t, eng)
         if _t_ev is not None:
             t = _t_ev
-        # Build list of attribute keys
-        keys = list(t.attr_list.keys())
+        # Build list of attribute keys, in feature order (the same order the
+        # printer uses), not in insertion order: features(@('' => A,0 => 22))
+        # is ['',0].
+        from wild_life.data_structures import featcmp_key as _featcmp_key
+        keys = sorted(t.attr_list.keys(), key=_featcmp_key)
         # Build WL list from keys
         wl = eng.wl
         lst = wl.nil
