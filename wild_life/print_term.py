@@ -1279,6 +1279,7 @@ def _pretty_attr(ps: PrintState, attr_list: dict, depth: int, wl,
     flat_ps.print_depth = ps.print_depth
     flat_ps.const_quote = ps.const_quote
     flat_ps.write_resids = ps.write_resids
+    flat_ps.no_arith_eval = ps.no_arith_eval  # propagate frozen context
     flat_ps.pointer_names = ps.pointer_names
     flat_ps.printed_pointers = dict(ps.printed_pointers)
     flat_ps.col = ps.col            # column before '('
