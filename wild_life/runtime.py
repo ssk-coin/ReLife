@@ -156,6 +156,8 @@ class WildLifeRuntime:
         self.delay_rules: list = []  # list of PsiTerm (:: | (Pattern, Goal))
         # :: Sort(attrs). で登録されるソートのレジストリ (prototype_attrs を持つ Definition)
         self.proto_sorts: list = []  # list of Definition that have prototype_attrs
+        # global(X). で宣言されたグローバル変数の Definition
+        self.global_defs: list = []
 
         # ==================== 組み込み関数テーブル ====================
         self.builtin_table: Dict[Definition, Callable] = {}

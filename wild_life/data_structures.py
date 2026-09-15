@@ -244,11 +244,11 @@ class PsiTerm:
       - resid: 残留ゴールのリスト
 
     例:
-      整数 42:     PsiTerm(type=integer, value=42.0)
-      文字列 "hi": PsiTerm(type=quoted_string, value="hi")
-      変数 X:      PsiTerm(type=variable)  [coref=None initially]
-      top (@):     PsiTerm(type=top)
-      リスト [a,b]: PsiTerm(type=alist, attr_list={"1":..., "2":...})
+      整数 42:     PsiTerm(type_def=integer, value=42.0)
+      文字列 "hi": PsiTerm(type_def=quoted_string, value="hi")
+      変数 X:      PsiTerm(type_def=variable)  [coref=None initially]
+      top (@):     PsiTerm(type_def=top)
+      リスト [a,b]: PsiTerm(type_def=alist, attr_list={"1":..., "2":...})
     """
 
     _id_counter = 0  # デバッグ用ID

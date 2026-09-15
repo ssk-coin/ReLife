@@ -627,6 +627,10 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     if t is None:
         return None
     t = t.deref()
+    # A global variable name stands for its cell.
+    cell = _global_cell(t, eng)
+    if cell is not None:
+        return cell
     sym = _get_sym(t)
 
     if sym == 'psi2str':
@@ -1416,6 +1420,34 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
                var_tree=var_tree, print_depth=_pd, max_col=_mc)
 
 
+def _note_global_used(eng, defn) -> None:
+    """Record that a global which predates this query was read or assigned.
+
+    A query that only declares new globals leaves nothing behind worth
+    keeping; one that uses a global already in scope does, since that cell's
+    value would be undone along with the query.
+    """
+    pre = getattr(eng, 'pre_query_globals', None)
+    if pre is not None and id(defn) in pre:
+        eng.used_existing_global = True
+
+
+def _global_cell(t: PsiTerm, eng) -> Optional[PsiTerm]:
+    """The cell a global variable name stands for, or None for anything else.
+
+    Every reference reads the same psi-term, so what one name binds is visible
+    through the others — that is what makes a global assignable.
+    """
+    from wild_life.data_structures import DefType as _DT_g
+    if t is None:
+        return None
+    t = t.deref()
+    if t.attr_list or t.type is None or t.type.type is not _DT_g.GLOBAL:
+        return None
+    _note_global_used(eng, t.type)
+    return t.type.global_value
+
+
 def _term_to_str(t: PsiTerm, eng, quoted=True) -> str:
     from wild_life.print_term import term_to_string
     # Pass the query's variables so a diagnostic names them as the user wrote
@@ -1667,15 +1699,15 @@ def bi_read(goal: PsiTerm, eng) -> bool:
         line = ''
     if not line:
         wl = eng.wl
-        result = PsiTerm(type=wl.eof)
+        result = PsiTerm(type_def=wl.eof)
     else:
         ts = tokenizer_from_string(line)
         p = Parser(ts)
         try:
             t, _ = p.parse()
-            result = t or PsiTerm(type=eng.wl.top)
+            result = t or PsiTerm(type_def=eng.wl.top)
         except Exception:
-            result = PsiTerm(type=eng.wl.top)
+            result = PsiTerm(type_def=eng.wl.top)
     return _unify(eng, arg, result) if arg else bool(result)
 
 
@@ -1722,6 +1754,11 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     if t is None or _depth > 40:
         return False, 0.0
     t = t.deref()
+    # A global variable name stands for its cell, so `b <- a+a` reads a's
+    # value rather than treating a as a non-numeric atom.
+    cell = _global_cell(t, eng)
+    if cell is not None:
+        return _eval_arith(cell, eng, _depth + 1)
     wl = eng.wl
     sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
 
@@ -6337,7 +6374,7 @@ def bi_functor(goal: PsiTerm, eng) -> bool:
         except Exception:
             return False
         defn = wl.update_symbol(wl.user_module, sym)
-        result = PsiTerm(type=defn)
+        result = PsiTerm(type_def=defn)
         return _unify(eng, t, result)
 
 
@@ -6398,7 +6435,7 @@ def bi_univ(goal: PsiTerm, eng) -> bool:
         defn = functor.type if functor.type else None
         if defn is None:
             return False
-        result = PsiTerm(type=defn)
+        result = PsiTerm(type_def=defn)
         for i, arg in enumerate(items[1:], 1):
             result.attr_list[str(i)] = arg
         return _unify(eng, a1, result)
@@ -6633,7 +6670,7 @@ def bi_length(goal: PsiTerm, eng) -> bool:
         nil = wl.make_nil()
         lst = nil
         for _ in range(n):
-            var = PsiTerm(type=wl.top)
+            var = PsiTerm(type_def=wl.top)
             lst = wl.make_cons(var, lst)
         return _unify(eng, a1, lst)
     return False
@@ -7303,6 +7340,17 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
                     print(f"% '{func_name}' is a user-defined predicate with an empty definition.\n")
                 else:
                     _bi_listing_one(defn, wl, imported=False)
+        elif defn is not None and defn.type == DefType.GLOBAL:
+            # C Wild Life lists a global by name only — it does not report the
+            # value the cell currently holds.
+            flush_imported()
+            _note_global_used(eng, defn)
+            name = defn.keyword.symbol if defn.keyword else '?'
+            # The leading blank ends the prompt line for the first entry and
+            # separates the entries after that.
+            print()
+            print(f"% '{name}' is a user-defined global variable "
+                  f"worth *null psi_term*.")
         elif defn is not None and defn.type == DefType.UNDEF:
             # UNDEF の場合:
             #   clash_blocked スタブ → 衝突検出で作成済みのブロック → 無音成功
@@ -7548,7 +7596,7 @@ def bi_functor_of(goal: PsiTerm, eng) -> bool:
     defn = t.type
     if defn is None:
         return False
-    result = PsiTerm(type=defn)
+    result = PsiTerm(type_def=defn)
     return _unify(eng, a2, result)
 
 
@@ -8086,71 +8134,101 @@ def bi_residuate(goal: PsiTerm, eng) -> bool:
 def bi_global(goal: PsiTerm, eng) -> bool:
     """global(X1, X2, ...) — declare and optionally initialise global variables.
 
-    Each argument is either:
-      - An atom name: declare it as a global (0-ary predicate returning its value)
-      - A term  X <- Value: declare X and set its initial value to Value
-      - A term  <-(X):     declare X as a global reference
+    Each argument is either a name to declare, or `X <- Value` to declare X
+    with an initial value.  A name that already means something else cannot
+    become a global, and neither can a literal, so every argument is checked
+    before any of them is declared: one bad argument leaves the whole
+    declaration undone, which is why `global(q1,...,5,...,q8)` declares none
+    of the q's.
     """
     wl = eng.wl
+    from wild_life.data_structures import DefType as _DT
 
-    def _do_global_arg(a):
+    def _reject(what: str) -> None:
+        line = getattr(wl, 'line_count', 0)
+        sys.stderr.write(f"*** Error: {what} (near line {line}).\n")
+
+    _KIND = {_DT.FUNCTION: 'function', _DT.TYPE: 'sort', _DT.PREDICATE: 'predicate'}
+
+    def _target(a):
+        """The name `a` would declare, or None once the reason is reported."""
         a = a.deref()
         sym = a.type.keyword.symbol if (a.type and a.type.keyword) else ''
-
-        # Form: X <- Value
         if sym == '<-':
-            lhs_ref = a.attr_list.get('1')
-            rhs_ref = a.attr_list.get('2')
-            if lhs_ref is None:
-                return True
-            lhs = lhs_ref.deref()
-            lhs_sym = lhs.type.keyword.symbol if (lhs.type and lhs.type.keyword) else ''
-            if not lhs_sym:
-                return True
-            # Evaluate rhs as arithmetic if possible
-            rhs = None
-            if rhs_ref is not None:
-                rhs_d = rhs_ref.deref()
+            if a.attr_list.get('2') is None or a.attr_list.get('1') is None:
+                _reject(f"{_term_to_str(a, eng)} is an incorrect global "
+                        f"variable declaration")
+                return None
+            a = a.attr_list['1'].deref()
+            sym = a.type.keyword.symbol if (a.type and a.type.keyword) else ''
+        disp = _term_to_str(a, eng)
+        if a.value is not None or not sym:
+            # A literal stands for its own sort, so it cannot name a global.
+            _reject(f"sort {disp} cannot be redeclared as a global variable")
+            return None
+        defn = wl.current_module.symbol_table.get(sym)
+        if defn is None and a.type is not None:
+            defn = a.type
+        kind = _KIND.get(defn.type) if defn is not None else None
+        # An arithmetic operator is a function whatever its symbol table entry
+        # says: it is only registered there as an operator.
+        if kind is None and sym in _ARITH_OPS_SET:
+            kind = 'function'
+        if kind is not None:
+            _reject(f"{kind} {disp} cannot be redeclared as a global variable")
+            return None
+        return sym
+
+    def _cell_for(sym: str) -> PsiTerm:
+        """The cell named sym, declaring it on first mention."""
+        defn = wl.update_symbol(wl.current_module, sym)
+        if defn.type is not _DT.GLOBAL or defn.global_value is None:
+            defn.type = _DT.GLOBAL
+            defn.global_value = PsiTerm(type_def=wl.top)
+        if defn not in wl.global_defs:
+            wl.global_defs.append(defn)
+        return defn.global_value
+
+    def _declare(a) -> None:
+        a = a.deref()
+        sym = a.type.keyword.symbol if (a.type and a.type.keyword) else ''
+        value = None
+        if sym == '<-':
+            lhs = a.attr_list['1'].deref()
+            sym = lhs.type.keyword.symbol if (lhs.type and lhs.type.keyword) else ''
+            rhs_d = a.attr_list['2'].deref()
+            # `global(b <- a)` makes b share a's cell rather than hold a's
+            # name, so whatever binds a later is what b reads.
+            value = _global_cell(rhs_d, eng)
+            if value is None:
                 ok, val = _eval_arith(rhs_d, eng)
-                if ok:
-                    rhs = _make_number(eng, val)
-                else:
-                    rhs = rhs_d
-            # Register as a 0-ary function in current module
-            defn = wl.update_symbol(wl.current_module, lhs_sym)
-            from wild_life.data_structures import DefType as _DT
-            defn.type = _DT.FUNCTION
-            result_term = rhs if rhs is not None else PsiTerm(type=wl.top)
-            defn.rule = [(PsiTerm(type=defn), result_term)]
-            return True
-
-        # Form: <-(X) — declare X as global reference
-        if sym == '<-' and not a.attr_list.get('2'):
-            inner = a.attr_list.get('1')
-            if inner is not None:
-                return _do_global_arg(inner)
-            return True
-
-        # Bare atom: declare as global (no initial value — evaluates to itself)
-        if sym:
+                value = _make_number(eng, val) if ok else rhs_d
+        # A global is a cell, not a rule: every reference reads the same
+        # psi-term, so binding it through one name is visible through all the
+        # others (`global(a, b<-a)` then `a=23` shows 23 for b too).
+        if value is not None:
             defn = wl.update_symbol(wl.current_module, sym)
-            from wild_life.data_structures import DefType as _DT
-            if defn.type == _DT.UNDEF:
-                defn.type = _DT.FUNCTION
-                head = PsiTerm(type=defn)
-                defn.rule = [(head, head)]  # f -> f (returns itself)
-            return True
+            _note_global_used(eng, defn)
+            defn.global_value = value
 
-        return True
-
-    # Iterate over positional arguments 1, 2, 3, ...
+    args = []
     i = 1
     while True:
         arg_ref = goal.attr_list.get(str(i))
         if arg_ref is None:
             break
-        _do_global_arg(arg_ref)
+        args.append(arg_ref)
         i += 1
+
+    names = [_target(arg) for arg in args]
+    if any(name is None for name in names):
+        return False
+    # Give every name its cell before any initial value is worked out, so that
+    # `global(e <- f, f)` lets e share the cell f is about to get.
+    for name in names:
+        _cell_for(name)
+    for arg in args:
+        _declare(arg)
     return True
 
 

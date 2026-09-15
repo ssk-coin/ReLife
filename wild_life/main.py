@@ -422,6 +422,12 @@ def run_repl(
                 engine._last_var_tree = var_tree
                 cs_before = engine.choice_stack   # ChoicePoint or None
                 pre_mark = engine.trail.mark()
+                # Track use of globals that predate this query: their cells
+                # would be undone at pre_mark, so a query that reads or
+                # assigns one has to open a level to keep it.
+                engine.pre_query_globals = {
+                    id(d) for d in getattr(engine.wl, 'global_defs', ())}
+                engine.used_existing_global = False
 
                 saved_noisy = engine.noisy
                 engine.noisy = False
@@ -491,7 +497,8 @@ def run_repl(
                     # Check if the CURRENT QUERY has own named variables
                     # (not just inherited from parent frames)
                     own_bindings_str = _format_bindings(var_tree, engine)
-                    if own_bindings_str or has_new_choices:
+                    if (own_bindings_str or has_new_choices
+                            or engine.used_existing_global):
                         # Query has own bindings or new choice points → enter a new depth level.
                         # TRUE MODEL: compute bindings at current print_depth, save pd in Frame,
                         # then immediately write *** Yes + bindings + prompt at the new depth.
