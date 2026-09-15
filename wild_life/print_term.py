@@ -543,7 +543,26 @@ def _opcheck(t: 'PsiTerm') -> Tuple[int, int, OperatorType]:
                 return PREFIX, op_data.precedence, op
             op_data = op_data.next if hasattr(op_data, 'next') else None
 
-        # Has FX prefix but no FY: curried infix → NOTOP (function-call display).
+        # Has FX prefix but no FY.  When the symbol also has an infix reading
+        # (as arithmetic '+' does), one argument means a curried infix, which
+        # displays as a function call.  A symbol declared only as fx — such as
+        # `op(600,fx,go)?` — has no such reading, so it prints as a prefix
+        # operator: `go swimming`, not `go(swimming)`.
+        _has_infix = False
+        op_data = defn.op_data
+        while op_data is not None:
+            op = op_data.type if hasattr(op_data, 'type') else OperatorType.NOP
+            if op in (OperatorType.XFX, OperatorType.XFY, OperatorType.YFX):
+                _has_infix = True
+                break
+            op_data = op_data.next if hasattr(op_data, 'next') else None
+        if not _has_infix:
+            op_data = defn.op_data
+            while op_data is not None:
+                op = op_data.type if hasattr(op_data, 'type') else OperatorType.NOP
+                if op is OperatorType.FX:
+                    return PREFIX, op_data.precedence, op
+                op_data = op_data.next if hasattr(op_data, 'next') else None
         return NOTOP, 0, OperatorType.NOP
 
     # numarg == 3 (infix)
