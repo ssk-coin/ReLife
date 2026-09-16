@@ -362,6 +362,10 @@ def _is_open_head_var(h: 'PsiTerm', wl) -> bool:
             and (h.type is None or h.type is wl.top or bool(h.flags & _SV)))
 
 
+class DeclarationError(Exception):
+    """A declaration the reader could parse but that says too little."""
+
+
 def _is_open_call_term(c: 'PsiTerm', wl) -> bool:
     """Whether the call's own term can still become something narrower.
 
@@ -998,6 +1002,14 @@ class Engine:
         def get_two(attrs):
             return attrs.get('1'), attrs.get('2')
 
+        # A sort declaration says which sort stands under which, and needs
+        # both of them: `<|(2 => s)` names neither, so there is nothing to
+        # declare and the interpreter says so.
+        if sym in ('<|', ':=') and not ('1' in t.attr_list and '2' in t.attr_list):
+            raise DeclarationError('argument missing in sort declaration')
+        if sym == '::' and '1' not in t.attr_list:
+            raise DeclarationError('argument missing in sort declaration')
+
         if sym == ':-':
             h, b = get_two(t.attr_list)
             if h and b:
@@ -1090,9 +1102,20 @@ class Engine:
             # Store the (pattern, condition) pair as a sort-membership rule on
             # super_def; also add the pattern's sort as a parent of super_def so
             # that type-compatibility checks work.
-            if arg2.type is not None and arg2.type is self.wl.such_that:
-                pat  = arg2.attr_list.get('1')  # e.g. P:posint
-                cond = arg2.attr_list.get('2')  # e.g. number_of_factors(P) = one
+            # `S := T` with a single sort or term on the right is the same
+            # shape without a condition: S is a T, and takes what T states.
+            _plain_rhs = (arg2.type is not None
+                          and arg2.type is not self.wl.such_that
+                          and arg2.type is not self.wl.disjunction)
+            if (arg2.type is not None and arg2.type is self.wl.such_that) or _plain_rhs:
+                if _plain_rhs:
+                    pat = t.attr_list.get('2')
+                    cond = self.wl.make_atom('succeed', self.wl.bi_module)
+                    if cond is None:
+                        cond = PsiTerm(type_def=self.wl.succeed)
+                else:
+                    pat  = arg2.attr_list.get('1')  # e.g. P:posint
+                    cond = arg2.attr_list.get('2')  # e.g. number_of_factors(P) = one
                 if pat is not None:
                     _ct2 = copy_term  # copy_term imported at module level
                     pat_d = pat.deref()

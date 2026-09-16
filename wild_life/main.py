@@ -131,7 +131,7 @@ def run_repl(
     # Deferred imports to avoid circular-import issues at module level
     from wild_life.runtime import WL
     from wild_life.built_ins import register_all
-    from wild_life.inference import Engine
+    from wild_life.inference import Engine, DeclarationError
     from wild_life.parser_ import parse_string
     from wild_life.unification import HaltException, AbortException, SortCycleException
     from wild_life.data_structures import QUERY, FACT, ERROR
@@ -552,6 +552,7 @@ def run_repl(
             # ---- Fact / rule: assert into database ------------------------
             elif sort == FACT:
                 try:
+                    WL.line_count = repl_line_number
                     engine.assert_clause(term)
                     sys.stdout.write("\n*** Yes\n")
                     # An assertion made while an outer query is still open
@@ -563,6 +564,10 @@ def run_repl(
                                                      extra_var_trees=_fact_trees)
                         if _fact_str:
                             sys.stdout.write(_fact_str + "\n")
+                except DeclarationError as _de:
+                    sys.stderr.write(
+                        f"*** Error: {_de} (near line {repl_line_number}).\n")
+                    sys.stdout.write("\n*** No\n")
                 except SortCycleException:
                     # Sort cycle detected interactively: error already written to
                     # stderr by _assert_type.  Do NOT output *** Yes/No or a prompt;

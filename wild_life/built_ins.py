@@ -7923,6 +7923,10 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
             for _pat, _cond in (defn.rule or []):
                 if _pat is None or _cond is None:
                     continue
+                # `s := t` carries no membership condition; it says only that
+                # an s is a t, which the `<|` lines below already report.
+                if _cond.deref().type is wl.succeed:
+                    continue
                 # The pattern is shown as the sort being defined, not as the
                 # sort it was written against: `positive := I:int | I > 0`
                 # lists as `:: _A: positive | _A > 0`.  The swap is on the
@@ -7937,9 +7941,17 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
                 finally:
                     _pat_d.type, _pat_d.flags = _was_type, _was_flags
                 print(f":: {_pat_str} | {', '.join(_cond_strs)}.")
-            for _parent in defn.parents:
-                _pname = _parent.keyword.symbol if _parent.keyword else '@'
-                print(f"{name} <| {_pname}.")
+            if defn.parents:
+                for _parent in defn.parents:
+                    _pname = _parent.keyword.symbol if _parent.keyword else '@'
+                    print(f"{name} <| {_pname}.")
+            else:
+                print(f"{name} <| @.")
+            # The sorts that sit under this one are part of what it is, so
+            # listing a sort shows them too.
+            for _child in getattr(defn, 'children', []):
+                _cname = _child.keyword.symbol if _child.keyword else '@'
+                print(f"{_cname} <| {name}.")
         elif defn is not None and defn.type == DefType.GLOBAL:
             # C Wild Life lists a global by name only — it does not report the
             # value the cell currently holds.
