@@ -7721,7 +7721,13 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
                 # 自モジュール述語が来たらインポート分を先に出力
                 flush_imported()
                 func_name = defn.keyword.symbol if defn.keyword else '?'
-                if not active_rules:
+                if not active_rules and getattr(defn, 'is_persistent', False):
+                    # A global that has not been assigned yet holds a plain @.
+                    _note_global_used(eng, defn)
+                    print()
+                    print(f"% '{func_name}' is a user-defined global variable "
+                          f"worth @.")
+                elif not active_rules:
                     print(f"% '{func_name}' is a user-defined predicate with an empty definition.\n")
                 else:
                     _bi_listing_one(defn, wl, imported=False)
@@ -9012,24 +9018,33 @@ def register_all(wl) -> None:
     _reg('dynamic', _bi_dynamic)
 
     def _bi_persistent(goal, eng):
-        """persistent(P): declare P as a persistent (global) function variable.
+        """persistent(X1, X2, ...) — declare global variables that keep their
+        value across garbage collection.
 
-        This initializes P's definition as a FUNCTION with an empty rule list
-        so that subsequent `P <<- Value` calls use the global-variable (Mode 1)
-        assignment path in bi_store_arrow — updating the shared Definition's
-        rule list rather than destructively modifying a single PsiTerm instance.
+        Each name's definition is initialised as a FUNCTION with an empty rule
+        list, so that a later `X <<- Value` takes the global-variable path in
+        bi_store_arrow, and is recorded as a global so that a query reading one
+        is worth keeping.
         """
-        arg = goal.attr_list.get('1')
-        if arg is None:
-            return True
-        arg_d = arg.deref()
-        defn = arg_d.type
-        if defn is not None:
-            # Ensure the definition is typed as FUNCTION with an initialized rule list
+        if not goal.attr_list:
+            return False
+        i = 1
+        while True:
+            arg = goal.attr_list.get(str(i))
+            if arg is None:
+                break
+            i += 1
+            arg_d = arg.deref()
+            defn = arg_d.type
+            if defn is None:
+                continue
             if defn.rule is None:
                 defn.rule = []
             if defn.type not in (DefType.FUNCTION, DefType.PREDICATE):
                 defn.type = DefType.FUNCTION
+            defn.is_persistent = True
+            if defn not in wl.global_defs:
+                wl.global_defs.append(defn)
         return True
     _reg('persistent', _bi_persistent)
 
