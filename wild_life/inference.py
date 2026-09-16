@@ -1415,6 +1415,47 @@ class Engine:
         """
         return _push_embedded_func_goals(t, self, visited)
 
+    def _preeval_funct_args(self, funct: 'PsiTerm') -> None:
+        """Reduce the call's arguments before its head is matched.
+
+        This enables patterns like f(g(x)) where g(x) has to be evaluated
+        before pattern matching against f's head (e.g. rev(reverse(L),[])).
+
+        The reduced argument is written back through the trail.  A rule whose
+        head does not match undoes what the reduction bound on its way out, so
+        an untrailed write would leave the next rule looking at the reduced
+        term with its bindings gone — `split(2,[],ll(C,[1|l(C)]))` would see a
+        couple whose left feature had become @ again.
+        """
+        from wild_life.built_ins import (
+            _eval_user_func_sync, _is_user_function,
+            _try_eval_string_func, _try_eval_arith_to_term,
+            _eval_embedded_user_funcs,
+        )
+        for _key in list(funct.attr_list.keys()):
+            _attr = funct.attr_list[_key].deref()
+            if _is_user_function(_attr):
+                _evaled = _eval_user_func_sync(_attr, self)
+                if _evaled is not None and _evaled is not _attr:
+                    self.unifier.set_attr(funct, _key, _evaled)
+            else:
+                # Try built-in function evaluation (features, root_sort, etc.)
+                _evaled = _try_eval_string_func(_attr, self)
+                if _evaled is not None:
+                    self.unifier.set_attr(funct, _key, _evaled)
+                else:
+                    _evaled = _try_eval_arith_to_term(_attr, self)
+                    if _evaled is not None:
+                        self.unifier.set_attr(funct, _key, _evaled)
+                    elif _attr.attr_list:
+                        # Compound arg: synchronously evaluate any embedded
+                        # user-function calls so that e.g.
+                        #   where((B,Table) & copy_body(...))
+                        # gets copy_body evaluated BEFORE where's body (@)
+                        # discards the argument.  Without this, bodify_list(B)
+                        # would run on the goal stack with B still unbound.
+                        _eval_embedded_user_funcs(_attr, self, 0, set())
+
     def eval_aim(self) -> bool:
         """Handle an 'eval' goal (function evaluation)."""
         wl = self.wl
@@ -1602,30 +1643,7 @@ class Engine:
             _eval_user_func_sync, _is_user_function,
             _try_eval_string_func, _try_eval_arith_to_term,
         )
-        for _key in list(funct.attr_list.keys()):
-            _attr = funct.attr_list[_key].deref()
-            if _is_user_function(_attr):
-                _evaled = _eval_user_func_sync(_attr, self)
-                if _evaled is not None and _evaled is not _attr:
-                    funct.attr_list[_key] = _evaled
-            else:
-                # Try built-in function evaluation (features, root_sort, etc.)
-                _evaled = _try_eval_string_func(_attr, self)
-                if _evaled is not None:
-                    funct.attr_list[_key] = _evaled
-                else:
-                    _evaled = _try_eval_arith_to_term(_attr, self)
-                    if _evaled is not None:
-                        funct.attr_list[_key] = _evaled
-                    elif _attr.attr_list:
-                        # Compound arg: synchronously evaluate any embedded
-                        # user-function calls so that e.g.
-                        #   where((B,Table) & copy_body(...))
-                        # gets copy_body evaluated BEFORE where's body (@)
-                        # discards the argument.  Without this, bodify_list(B)
-                        # would run on the goal stack with B still unbound.
-                        from wild_life.built_ins import _eval_embedded_user_funcs
-                        _eval_embedded_user_funcs(_attr, self, 0, set())
+        self._preeval_funct_args(funct)
 
         # Arity check: if head has feature keys not present in funct, this rule
         # requires arguments that the call doesn't provide.  Skip the rule —

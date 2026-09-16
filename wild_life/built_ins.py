@@ -5565,6 +5565,7 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         a_str = _try_eval_string_func(a_d, eng)
         if a_str is not None:
             a_d = a_str
+
     return _unify(eng, a_d, b_d)
 
 
