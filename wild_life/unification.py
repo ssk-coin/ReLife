@@ -469,6 +469,30 @@ class Unifier:
                 # No engine: cannot set up residuations; treat as compound unification
                 pass
 
+        # Sort conjunction: a stored clause head can carry an unevaluated `&`
+        # term — asserting `b(A & int,S).` with A bound to real keeps
+        # `real & int` in the database — and unifying against it has to use the
+        # meet of the two sides, so that b(C,D) answers C = int.
+        if self.engine is not None and WL.and_sym is not None:
+            from wild_life.data_structures import QUOTED_TRUE as _QT_CJ, \
+                NON_STRICT_TERM as _NST_CJ
+            from wild_life.built_ins import _eval_and_conjunction as _eac
+
+            def _meet_conj(x):
+                if (x.type is WL.and_sym and '1' in x.attr_list
+                        and '2' in x.attr_list
+                        and not (x.flags & (_QT_CJ | _NST_CJ))):
+                    m = _eac(x, self.engine)
+                    if m is not None:
+                        return m.deref()
+                return x
+
+            u2, v2 = _meet_conj(u), _meet_conj(v)
+            if u2 is not u or v2 is not v:
+                u, v = u2, v2
+                if u is v:
+                    return True
+
         # 変数の処理
         u_is_var = (u.type is WL.top and not u.attr_list and not u.resid)
         v_is_var = (v.type is WL.top and not v.attr_list and not v.resid)

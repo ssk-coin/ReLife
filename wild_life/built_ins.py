@@ -97,6 +97,8 @@ _ARITH_OPS_SET = frozenset((
     'cpu_time', 'real_time',
     # Global integer counter (0-ary; increments each evaluation)
     'genint',
+    # Random integer draw (unary)
+    'random',
 ))
 
 
@@ -118,7 +120,7 @@ def _is_complete_arith_expr(t: 'PsiTerm') -> bool:
     # Unary-only operators: need exactly '1' arg
     _unary_only = frozenset(('abs', 'sqrt', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
                               'exp', 'log', 'floor', 'ceiling', 'round', 'truncate',
-                              'float', 'integer', 'sign', 'msb', '\\'))
+                              'float', 'integer', 'sign', 'msb', 'random', '\\'))
     if sym in _unary_only:
         return '1' in t.attr_list
     # '-' is both unary and binary: valid with 1 arg (unary) or 2 args (binary)
@@ -880,14 +882,10 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1.type and a1.type.keyword and a1.type.keyword.module:
             term_type_mod = a1.type.keyword.module
 
-        all_keys = list(a1.attr_list.keys())
-        # Sort: positional (non-negative integers) first, then named alphabetically
-        pos_keys = sorted(
-            [k for k in all_keys if k.lstrip('-').isdigit() and int(k) >= 0],
-            key=lambda x: int(x))
-        named_keys = sorted(
-            [k for k in all_keys if not (k.lstrip('-').isdigit() and int(k) >= 0)])
-        sorted_keys = pos_keys + named_keys
+        # Feature order — the same order the printer lays attributes out in,
+        # so features(@('' => A,0 => 22)) is ['',0] rather than [0,''].
+        from wild_life.data_structures import featcmp_key as _featcmp_key
+        sorted_keys = sorted(a1.attr_list.keys(), key=_featcmp_key)
 
         lst = PsiTerm()
         lst.type = wl.nil
@@ -1149,20 +1147,28 @@ def _eval_and_conjunction(t: PsiTerm, eng) -> Optional[PsiTerm]:
             return None  # empty disjunction = fail (No)
         return _make_disjunction_psi(surviving, wl)
 
-    # Unify t1 and t2 through a fresh variable to find their meet
-    fresh = PsiTerm()
-    fresh.type = wl.top
-    mark = eng.trail.mark()
-    ok1 = eng.unifier.unify(fresh, t1)
-    if not ok1:
-        eng.trail.undo_to(mark)
-        return None
-    fresh_d = fresh.deref()
-    ok2 = eng.unifier.unify(fresh_d, t2)
-    if not ok2:
-        eng.trail.undo_to(mark)
-        return None
-    return fresh.deref()
+    # Unify t1 and t2 through a fresh variable to find their meet.
+    # The order the two sides reach the fresh variable matters for a sort
+    # carrying a membership condition (`posint := X:int | X>=0`): the condition
+    # is proven the moment the variable takes that sort, so a still-uninstantiated
+    # variable would be judged against it.  `posint & 2` therefore feeds the
+    # concrete side in first, exactly as `2 & posint` already did.
+    def _meet(first: PsiTerm, second: PsiTerm) -> Optional[PsiTerm]:
+        fresh = PsiTerm()
+        fresh.type = wl.top
+        mark = eng.trail.mark()
+        if not eng.unifier.unify(fresh, first):
+            eng.trail.undo_to(mark)
+            return None
+        if not eng.unifier.unify(fresh.deref(), second):
+            eng.trail.undo_to(mark)
+            return None
+        return fresh.deref()
+
+    _r = _meet(t1, t2)
+    if _r is None:
+        _r = _meet(t2, t1)
+    return _r
 
 
 def _has_concrete_non_numeric_arg(t: PsiTerm, eng) -> bool:
@@ -1420,7 +1426,8 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
     # C Wild Life's write/1 does NOT pretty-print (no line-wrapping). Only
     # pretty_write/1 produces multi-line indented output.  compact=True disables
     # line-wrapping (max_col=1_000_000); compact=False uses the default 79-char limit.
-    _mc = 1_000_000 if compact else _MAX_COL
+    _mc = (1_000_000 if compact
+           else max(1, getattr(eng.wl, 'page_width', 80) - 1))
     write_term(t, outfile=stream or sys.stdout, quoted=quoted, wl=eng.wl,
                var_tree=var_tree, print_depth=_pd, max_col=_mc)
 
@@ -1607,6 +1614,32 @@ def bi_writeln(goal: PsiTerm, eng) -> bool:
     return True
 
 
+def bi_page_width(goal: PsiTerm, eng) -> bool:
+    """page_width / page_width(N) — get or set the line width used when
+    a term is written out over several lines.
+
+    0-arity resets the width to its 80-column default.
+    """
+    wl = eng.wl
+    arg = _get_one_arg(goal)
+    if arg is None:
+        if not goal.deref().attr_list:
+            wl.page_width = 80
+            return True
+        return False
+    arg = arg.deref()
+    if arg.value is not None and arg.type and arg.type.is_subtype_of(wl.real):
+        n = int(float(arg.value))
+        if n <= 0:
+            return False
+        wl.page_width = n
+        return True
+    # Unbound argument: report the width in force.
+    if _term_is_unbound(arg, eng):
+        return _unify(eng, arg, wl.make_integer(getattr(wl, 'page_width', 80)))
+    return False
+
+
 def bi_print_depth(goal: PsiTerm, eng) -> bool:
     """print_depth / print_depth(N) — get/set the global print depth limit.
 
@@ -1754,6 +1787,40 @@ def bi_parse(goal: PsiTerm, eng) -> bool:
 
 _ARITH_DEBUG = False  # Set True to debug arithmetic evaluation
 
+def _apply_to_call(t: PsiTerm, eng) -> Optional[PsiTerm]:
+    """Rebuild F(Args) from an apply(Args, functor => F) term.
+
+    The parser turns a call through a functor variable, `F(A)`, into
+    apply(A, functor => F).  Once F is bound this gives back the call it
+    stands for; it returns None while F is still unknown.
+    """
+    wl = eng.wl if eng is not None else None
+    if wl is None or getattr(wl, 'apply', None) is None or t.type is not wl.apply:
+        return None
+    key = (wl.functor.symbol
+           if (getattr(wl, 'functor', None) and wl.functor and wl.functor.keyword)
+           else 'functor')
+    fa = t.attr_list.get(key)
+    if fa is None:
+        return None
+    fv = fa.deref()
+    if fv.type is None or _term_is_unbound(fv, eng):
+        return None
+    call = PsiTerm()
+    call.type = fv.type
+    for k, v in t.attr_list.items():
+        if k != key:
+            call.attr_list[k] = v
+    # Features the functor already carries (a partial application such as *(23))
+    for k, v in fv.attr_list.items():
+        if k not in call.attr_list:
+            call.attr_list[k] = v
+    from wild_life.data_structures import NON_STRICT_TERM as _NST_AP
+    if fv.flags & _NST_AP:
+        call.flags |= _NST_AP
+    return call
+
+
 def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     """Evaluate an arithmetic expression. Returns (ok, value)."""
     if t is None or _depth > 40:
@@ -1766,6 +1833,14 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         return _eval_arith(cell, eng, _depth + 1)
     wl = eng.wl
     sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
+
+    # A call written through a functor variable evaluates once the functor is
+    # known, so that `F(A)*F(C) > 0` can be computed at all.
+    if getattr(wl, 'apply', None) is not None and t.type is wl.apply:
+        _ap_call = _apply_to_call(t, eng)
+        if _ap_call is None:
+            return False, 0.0
+        return _eval_arith(_ap_call, eng, _depth + 1)
 
     if t.value is not None and t.type and t.type.is_subtype_of(wl.real):
         # Fire int/real delay rule for parsed literal integers (not computed by _make_number).
@@ -1860,12 +1935,71 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
             return _eval_arith(feat_val, eng, _depth + 1)
         return False, 0.0
 
+    # eval(Expr) — evaluate arithmetic expression (also unwraps backtick-quoted terms)
+    if sym == 'eval':
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return False, 0.0
+        a1d = a1.deref()
+        # If arg is a backtick-quoted term `(Expr), unwrap it before evaluating
+        a1_sym = a1d.type.keyword.symbol if a1d.type and a1d.type.keyword else ''
+        if a1_sym == '`':
+            inner = a1d.attr_list.get('1')
+            if inner is not None:
+                return _eval_arith(inner.deref(), eng, _depth + 1)
+            return False, 0.0
+        return _eval_arith(a1d, eng, _depth + 1)
+
+    ops1 = {
+        '-': lambda a: -a,
+        'abs': lambda a: abs(a),
+        'sqrt': lambda a: math.sqrt(a),
+        'sin': lambda a: math.sin(a),
+        'cos': lambda a: math.cos(a),
+        'tan': lambda a: math.tan(a),
+        'asin': lambda a: math.asin(a),
+        'acos': lambda a: math.acos(a),
+        'atan': lambda a: math.atan(a),
+        'exp': lambda a: math.exp(a),
+        'log': lambda a: math.log(a),
+        'floor': lambda a: math.floor(a),
+        'ceiling': lambda a: math.ceil(a),
+        'round': lambda a: round(a),
+        'truncate': lambda a: math.trunc(a),
+        'float': lambda a: float(a),
+        'integer': lambda a: float(int(a)),
+        'float_integer_part': lambda a: float(math.trunc(a)),
+        'float_fractional_part': lambda a: a - math.trunc(a),
+        'sign': lambda a: (1.0 if a > 0 else (-1.0 if a < 0 else 0.0)),
+        'msb': lambda a: int(math.log2(max(1, int(a)))),
+        # Bitwise NOT
+        '\\': lambda a: float(~int(a)),
+    }
+    # Unary arithmetic functions are applied here, ahead of the binary-operator
+    # early exit below: that exit rejects every symbol outside the binary set,
+    # which is all of floor, sqrt, abs and the rest.
+    if sym in ops1:
+        _un1, _un2 = _get_two_args(t)
+        if _un2 is None and _un1 is not None:
+            _un_ok, _un_v = _eval_arith(_un1, eng, _depth + 1)
+            if not _un_ok:
+                return False, 0.0
+            try:
+                return True, float(ops1[sym](_un_v))
+            except Exception:
+                return False, 0.0
+
     # Binary operators — early exit if sym is not a known arithmetic binary op.
     # This prevents infinite recursion on cyclic terms like cons(A,A) where
     # the 'cons' symbol is not arithmetic but the pre-check would recurse forever.
     _arith_binary_syms = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
                                      'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
-    if sym not in _arith_binary_syms:
+    # The handlers further down (strlen, asc, int, real and the 0-ary
+    # cpu_time / real_time / genint) sit past this exit, so they are named
+    # here — otherwise none of them would ever be reached.
+    _arith_late_syms = frozenset(('strlen', 'asc', 'int', 'real', 'random',
+                                  'cpu_time', 'real_time', 'genint'))
+    if sym not in _arith_binary_syms and sym not in _arith_late_syms:
         return False, 0.0
     arg1, arg2 = _get_two_args(t)
     ok1, v1 = _eval_arith(arg1, eng, _depth + 1) if arg1 else (False, 0.0)
@@ -1918,51 +2052,11 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         except Exception:
             return False, 0.0
 
-    ops1 = {
-        '-': lambda a: -a,
-        'abs': lambda a: abs(a),
-        'sqrt': lambda a: math.sqrt(a),
-        'sin': lambda a: math.sin(a),
-        'cos': lambda a: math.cos(a),
-        'tan': lambda a: math.tan(a),
-        'asin': lambda a: math.asin(a),
-        'acos': lambda a: math.acos(a),
-        'atan': lambda a: math.atan(a),
-        'exp': lambda a: math.exp(a),
-        'log': lambda a: math.log(a),
-        'floor': lambda a: math.floor(a),
-        'ceiling': lambda a: math.ceil(a),
-        'round': lambda a: round(a),
-        'truncate': lambda a: math.trunc(a),
-        'float': lambda a: float(a),
-        'integer': lambda a: float(int(a)),
-        'float_integer_part': lambda a: float(math.trunc(a)),
-        'float_fractional_part': lambda a: a - math.trunc(a),
-        'sign': lambda a: (1.0 if a > 0 else (-1.0 if a < 0 else 0.0)),
-        'msb': lambda a: int(math.log2(max(1, int(a)))),
-        # Bitwise NOT
-        '\\': lambda a: float(~int(a)),
-    }
     if sym in ops1 and ok1 and arg2 is None:
         try:
             return True, float(ops1[sym](v1))
         except Exception:
             return False, 0.0
-
-    # eval(Expr) — evaluate arithmetic expression (also unwraps backtick-quoted terms)
-    if sym == 'eval':
-        a1 = t.attr_list.get('1')
-        if a1 is None:
-            return False, 0.0
-        a1d = a1.deref()
-        # If arg is a backtick-quoted term `(Expr), unwrap it before evaluating
-        a1_sym = a1d.type.keyword.symbol if a1d.type and a1d.type.keyword else ''
-        if a1_sym == '`':
-            inner = a1d.attr_list.get('1')
-            if inner is not None:
-                return _eval_arith(inner.deref(), eng, _depth + 1)
-            return False, 0.0
-        return _eval_arith(a1d, eng, _depth + 1)
 
     # strlen(String) — length of string as integer
     if sym == 'strlen':
@@ -2026,6 +2120,17 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         if ok:
             return True, float(v)
         return False, 0.0
+
+    # random(N) — a random integer in [0,N), drawn from the generator that
+    # initrandom(Seed) seeds, so that the same seed replays the same sequence.
+    if sym == 'random':
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return False, 0.0
+        ok, v = _eval_arith(a1.deref(), eng)
+        if not ok or v <= 0:
+            return False, 0.0
+        return True, float(_random_gen(eng).randrange(int(v)))
 
     # cpu_time — 0-ary function returning process CPU time in seconds
     if sym == 'cpu_time' and not t.attr_list:
@@ -2124,25 +2229,44 @@ _NO_SOLUTION = object()
 
 
 def _report_division_problem(t: 'PsiTerm', eng, _depth: int = 0) -> bool:
-    """Report the first fault in a division sub-term of t, if there is one.
+    """Report the first arithmetic fault in a sub-term of t, if there is one.
 
-    No division takes a zero divisor, and integer division additionally needs
-    integer arguments.  Either fault is decidable as soon as the offending
-    argument is known, with the other one still free, so reporting it here
-    lets the caller fail a goal rather than suspend on a constraint that can
-    never hold.  Returns True when something was reported.
+    No division takes a zero divisor, integer division additionally needs
+    integer arguments, and neither a square root of a negative number nor a
+    logarithm of zero or less has a value.  Each fault is decidable as soon as
+    the offending argument is known, with any other one still free, so
+    reporting it here lets the caller fail a goal rather than suspend on a
+    constraint that can never hold.  Returns True when something was reported.
     """
     if t is None or _depth > 10:
         return False
     t = t.deref()
     if t.type is None:
         return False
-    if _get_sym(t) in ('//', '/'):
+    _sym_rp = _get_sym(t)
+    if _sym_rp in ('sqrt', 'log'):
+        import sys as _sys_rp
+        _a1_rp = t.attr_list.get('1')
+        _ok_rp, _v_rp = (_eval_arith(_a1_rp, eng) if _a1_rp is not None
+                         else (False, 0.0))
+        if _ok_rp:
+            _msg_rp = None
+            if _sym_rp == 'sqrt' and _v_rp < 0:
+                _msg_rp = 'square root of negative number'
+            elif _sym_rp == 'log' and _v_rp == 0:
+                _msg_rp = 'logarithm of zero'
+            elif _sym_rp == 'log' and _v_rp < 0:
+                _msg_rp = 'logarithm of negative number'
+            if _msg_rp is not None:
+                _sys_rp.stderr.write(
+                    f"*** Error: {_msg_rp} in {_term_to_str(t, eng)}.\n")
+                return True
+    if _sym_rp in ('//', '/'):
         import sys as _sys_div
         a1, a2 = t.attr_list.get('1'), t.attr_list.get('2')
         ok1, v1 = _eval_arith(a1, eng) if a1 is not None else (False, 0.0)
         ok2, v2 = _eval_arith(a2, eng) if a2 is not None else (False, 0.0)
-        if _get_sym(t) == '//':
+        if _sym_rp == '//':
             for arg, ok, val in ((a1, ok1, v1), (a2, ok2, v2)):
                 if ok and val != int(val):
                     _sys_div.stderr.write(
@@ -2746,6 +2870,13 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
         head = copy_term(h0, _vm)
         body = copy_term(b0, _vm)
         body_d = body.deref()
+
+        # A rule whose head asks for features the call does not supply belongs
+        # to a partial application: `e5(F,A) -> F(A)` passes `p` as a value, and
+        # reducing it against `p(X) -> …` here would both give `p` an argument
+        # it was never called with and hand back p's body as the value of F.
+        if set(head.deref().attr_list.keys()) - set(t.attr_list.keys()):
+            continue
 
         # Handle conditional rule: body = val_part | guard
         # Run the guard with an inner proof and return the value part.
@@ -5987,8 +6118,38 @@ def _collect_solutions(template: PsiTerm, g: PsiTerm, eng) -> list:
     while True:
         result = eng.run()
         if result:
-            # Copy template_copy with current bindings resolved
-            collected.append(copy_term(template_copy))
+            # Copy template_copy with current bindings resolved.  A template
+            # written as a call through a functor variable — `bagof(F(5),q(F))`
+            # parses as apply(5,functor => F) — is evaluated once F is known,
+            # because built_ins.lf collects `evalin(A)` rather than A.
+            _elem = template_copy.deref()
+            _mark_ev = eng.trail.mark()
+            if getattr(wl, 'apply', None) is not None and _elem.type is wl.apply:
+                _gs_ev, _cs_ev = eng.goal_stack, eng.choice_stack
+                _ok_ev = eng.main_loop_ok
+                try:
+                    _eq_defn = (getattr(wl, 'eqsym', None)
+                                or wl.syntax_module.symbol_table.get('='))
+                    _fresh_ev = PsiTerm(type_def=wl.top)
+                    _eq_ev = PsiTerm(type_def=_eq_defn)
+                    _eq_ev.attr_list = {'1': _fresh_ev, '2': _elem}
+                    eng.goal_stack = None
+                    if bi_unify(_eq_ev, eng):
+                        # The unification may leave goals (the EVAL of the
+                        # reconstructed call) to run before the value is there.
+                        if eng.goal_stack is not None:
+                            from wild_life.inference import (
+                                _INNER_RUN_BARRIER as _IRB_ev)
+                            eng.run(cs_barrier=_cs_ev if _cs_ev is not None
+                                    else _IRB_ev)
+                        _elem = _fresh_ev.deref()
+                except Exception:
+                    pass
+                finally:
+                    eng.goal_stack, eng.choice_stack = _gs_ev, _cs_ev
+                    eng.main_loop_ok = _ok_ev
+            collected.append(copy_term(_elem))
+            eng.trail.undo_to(_mark_ev)
             if not eng.choice_stack or eng.choice_stack is cp_save:
                 break
             eng.backtrack()
@@ -7252,9 +7413,13 @@ def _bi_listing_one(defn, wl, imported: bool = False) -> None:
     is_function = (defn.type == DefType.FUNCTION)
     succeed_sym = wl.succeed.keyword.symbol if wl.succeed and wl.succeed.keyword else 'succeed'
 
-    if not imported:
-        # 自モジュール述語: dynamic 宣言ヘッダを表示
-        print(f"\ndynamic({func_name})?")
+    # 各定義の前に空行 (built_ins.lf の listing_2 が挟む nl に相当)。
+    print()
+    if getattr(defn, 'is_dynamic', False):
+        # `dynamic(P)?` を宣言された述語だけがヘッダを持つ (assert2.lf 末尾の
+        # dynamic(p)? / dynamic(f)? がその例)。宣言のない long.lf の q は
+        # ヘッダなしで列挙される。
+        print(f"dynamic({func_name})?")
 
     for h, b in active_rules:
         head_str, goal_strs = _rule_to_string(h, b, wl)
@@ -7262,23 +7427,11 @@ def _bi_listing_one(defn, wl, imported: bool = False) -> None:
         if is_function:
             vs = goal_strs[0] if goal_strs else 'true'
             print(f"{head_str} -> {vs}.")
-        elif imported:
-            # インポート述語: 常に ':-' ボディ付きで表示 (各ゴール改行)
-            if goal_strs:
-                bs = ',\n        '.join(goal_strs)
-            else:
-                bs = 'succeed'
-            print(f"{head_str} :-\n        {bs}.")
         else:
-            # 自モジュール述語: succeed ボディは省略
-            has_body = (b is not None and b.type is not None
-                        and b.type.keyword is not None
-                        and b.type.keyword.symbol != succeed_sym)
-            if has_body:
-                bs = ',\n        '.join(goal_strs) if goal_strs else 'succeed'
-                print(f"{head_str} :-\n        {bs}.")
-            else:
-                print(f"{head_str}.")
+            # 述語: ボディは常に ':-' 付きで表示 (各ゴール改行)。
+            # ファクトも `HEAD :- succeed.` として列挙される。
+            bs = ',\n        '.join(goal_strs) if goal_strs else 'succeed'
+            print(f"{head_str} :-\n        {bs}.")
 
 
 def _bi_listing_all(eng, wl) -> None:
@@ -7326,11 +7479,8 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
     imported_pending = []   # list of defn (imported, with rules)
 
     def flush_imported():
-        """collected imported entries を空行区切りで出力してリセット"""
-        for k, d in enumerate(imported_pending):
-            # k==0: プロンプト直後なので改行1つでプロンプト行を終わらせる
-            # k>0 : 前エントリの末尾 \n に続く空行区切り
-            print()
+        """collected imported entries を出力してリセット"""
+        for d in imported_pending:
             _bi_listing_one(d, wl, imported=True)
         imported_pending.clear()
 
@@ -7398,9 +7548,35 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
                   f"worth *null psi_term*.")
         elif defn is not None and defn.type == DefType.UNDEF:
             # UNDEF の場合:
+            #   グローバル遅延規則 (:: X:bar | Goal.) の宛先ソート → その規則を列挙
             #   clash_blocked スタブ → 衝突検出で作成済みのブロック → 無音成功
             #   それ以外 (未定義/非公開) → "% 'name' is undefined." を表示
-            if not getattr(defn, 'clash_blocked', False):
+            _delay_for_sort = [
+                _dr for _dr in (getattr(wl, 'delay_rules', None) or [])
+                if (_dr.attr_list.get('1') is not None
+                    and _dr.attr_list['1'].deref().type is defn)
+            ]
+            if _delay_for_sort:
+                flush_imported()
+                name = defn.keyword.symbol if defn.keyword else '?'
+                print()
+                for _dr in _delay_for_sort:
+                    _dpat = _dr.attr_list.get('1')
+                    _dgoal = _dr.attr_list.get('2')
+                    if _dpat is None or _dgoal is None:
+                        continue
+                    _dpat_str, _dgoal_strs = _rule_to_string(_dpat.deref(),
+                                                             _dgoal, wl)
+                    print(f":: {_dpat_str} | {', '.join(_dgoal_strs)}.")
+                # A sort named only by a delay rule sits directly under @.
+                _dparents = defn.parents or []
+                if _dparents:
+                    for _parent in _dparents:
+                        _pname = _parent.keyword.symbol if _parent.keyword else '@'
+                        print(f"{name} <| {_pname}.")
+                else:
+                    print(f"{name} <| @.")
+            elif not getattr(defn, 'clash_blocked', False):
                 func_name = defn.keyword.symbol if defn.keyword else '?'
                 flush_imported()
                 print()   # プロンプト行の末尾に改行を入れる
@@ -7443,13 +7619,42 @@ def bi_succ_or_zero(goal: PsiTerm, eng) -> bool:
     return bi_succ(goal, eng)
 
 
-def bi_rand(goal: PsiTerm, eng) -> bool:
-    """random(X) — X is a random float [0,1)."""
-    import random
+def _random_gen(eng):
+    """The interpreter's random generator, seeded by initrandom/1."""
+    import random as _random_mod
+    wl = eng.wl
+    gen = getattr(wl, '_random_gen', None)
+    if gen is None:
+        gen = _random_mod.Random()
+        wl._random_gen = gen
+    return gen
+
+
+def bi_initrandom(goal: PsiTerm, eng) -> bool:
+    """initrandom(Seed) — restart the random generator from Seed, so that the
+    same seed replays the same sequence of draws."""
+    import random as _random_mod
     arg = _get_one_arg(goal)
     if arg is None:
         return False
-    return _unify(eng, arg, eng.wl.make_number(random.random()))
+    arg = arg.deref()
+    ok, v = _eval_arith(arg, eng)
+    if not ok:
+        return False
+    eng.wl._random_gen = _random_mod.Random(int(v))
+    return True
+
+
+def bi_rand(goal: PsiTerm, eng) -> bool:
+    """random(X) — X is a random float [0,1).
+
+    The functional form random(N), an integer in [0,N), is evaluated in
+    _eval_arith; this is the predicate form, which draws into an unbound X.
+    """
+    arg = _get_one_arg(goal)
+    if arg is None:
+        return False
+    return _unify(eng, arg, eng.wl.make_number(_random_gen(eng).random()))
 
 
 def bi_msort_key(goal: PsiTerm, eng) -> bool:
@@ -8330,6 +8535,7 @@ def register_all(wl) -> None:
     _reg('write_canonical', bi_write_canonical)
     _reg('print', bi_print)
     _reg('print_depth', bi_print_depth)
+    _reg('page_width', bi_page_width)
     _reg('nl', bi_nl)
     _reg('write_err', bi_write_err)
     _reg('writeln', bi_writeln)
@@ -8473,6 +8679,7 @@ def register_all(wl) -> None:
     _reg('plus', bi_plus)
     _reg('between', bi_between)
     _reg('random', bi_rand)
+    _reg('initrandom', bi_initrandom)
 
     # System
     _reg('halt', bi_halt)
@@ -8560,8 +8767,12 @@ def register_all(wl) -> None:
             return True
         arg = arg.deref()
         # If the type has no rule, set it to an empty list so assert/retract work
-        if arg.type and arg.type.rule is None:
-            arg.type.rule = []
+        if arg.type:
+            if arg.type.rule is None:
+                arg.type.rule = []
+            # listing prints a `dynamic(P)?` header for a predicate declared
+            # this way, so that its listing can be read back in.
+            arg.type.is_dynamic = True
         return True
     _reg('dynamic', _bi_dynamic)
 
@@ -8758,8 +8969,11 @@ def register_all(wl) -> None:
         _t_ev = _try_eval_string_func(t, eng)
         if _t_ev is not None:
             t = _t_ev
-        # Build list of attribute keys
-        keys = list(t.attr_list.keys())
+        # Build list of attribute keys, in feature order (the same order the
+        # printer uses), not in insertion order: features(@('' => A,0 => 22))
+        # is ['',0].
+        from wild_life.data_structures import featcmp_key as _featcmp_key
+        keys = sorted(t.attr_list.keys(), key=_featcmp_key)
         # Build WL list from keys
         wl = eng.wl
         lst = wl.nil

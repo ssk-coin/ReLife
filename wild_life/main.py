@@ -554,6 +554,15 @@ def run_repl(
                 try:
                     engine.assert_clause(term)
                     sys.stdout.write("\n*** Yes\n")
+                    # An assertion made while an outer query is still open
+                    # reports that query's bindings again, the way a nested
+                    # query does.
+                    if depth > 0:
+                        _fact_trees = [f.var_tree for f in frame_stack if f.var_tree]
+                        _fact_str = _format_bindings({}, engine,
+                                                     extra_var_trees=_fact_trees)
+                        if _fact_str:
+                            sys.stdout.write(_fact_str + "\n")
                 except SortCycleException:
                     # Sort cycle detected interactively: error already written to
                     # stderr by _assert_type.  Do NOT output *** Yes/No or a prompt;

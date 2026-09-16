@@ -441,6 +441,7 @@ class GoalType(Enum):
     FREEZE_CUT  = auto()
     IMPLIES_CUT = auto()
     GENERAL_CUT = auto()
+    EVAL_COMMIT = auto()  # Drop a function's remaining-clause choice point
     MATCH       = auto()
     TYPE_DISJ   = auto()
     CLAUSE      = auto()
