@@ -1580,6 +1580,11 @@ class Engine:
                             if val_part is None or cond_part is None:
                                 return False
                             head_d = head.deref()
+                    # Reduce the call's arguments before matching, the same as
+                    # an unguarded rule does further down: `q_sort(l(LM))` has
+                    # to become q_sort([1]) before the head `q_sort([H|T])`
+                    # can be matched against it.
+                    self._preeval_funct_args(funct)
                     mark = self.trail.mark()
                     ok = self.unifier.unify(funct, head)
                     if not ok:
