@@ -1357,11 +1357,10 @@ class Unifier:
                 pat_sort_ok = True
             else:
                 pat_sort_ok = new_sort.is_subtype_of(pat_sort)
-                # A sort under delay_check/1 holds its rules until a term
-                # narrows past it: reaching the sort itself is not yet the
-                # final word on what the term is.
-                if not pat_sort.always_check and new_sort is pat_sort:
-                    pat_sort_ok = False
+                # Whether a sort under delay_check/1 holds its rules back is
+                # decided by the caller — a bare term of such a sort does not
+                # fire them, a modified one does (see _unify_impl_inner) — so
+                # there is nothing more to check on the pattern's sort here.
             if not pat_sort_ok:
                 continue
 
