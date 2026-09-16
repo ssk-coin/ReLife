@@ -4870,6 +4870,59 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     # (and(X,Y), or(X,Y), not(X), xor(X,Y)) from psi-terms that happen to use
     # 'and'/'or' as a constructor name with the wrong arity (e.g. and(B) with
     # only 1 argument, which should be treated as a regular psi-term).
+    # An arithmetic comparison in functional position has a boolean value:
+    # `X = (1 =< 7)` answers true, and part.lf writes the test as
+    # `(1 =< X) = true`.  While an operand is still unknown the comparison
+    # suspends on it, so `leq(7,N)` can constrain N before N is known.
+    _CMP_FUNC_SYMS = frozenset(('>', '<', '>=', '=<', '=:=', '=\\='))
+
+    def _is_cmp_expr(t):
+        from wild_life.data_structures import NON_STRICT_TERM as _NST_CMP
+        return (_get_sym(t) in _CMP_FUNC_SYMS and '1' in t.attr_list
+                and '2' in t.attr_list and not (t.flags & _NST_CMP))
+
+    _b_is_cmp = _is_cmp_expr(b_d)
+    _a_is_cmp = (not _b_is_cmp) and _is_cmp_expr(a_d)
+    if _b_is_cmp or _a_is_cmp:
+        _cmp_expr, _cmp_other = (b_d, a_d) if _b_is_cmp else (a_d, b_d)
+        _ok1_cmp, _v1_cmp = _eval_arith(_cmp_expr.attr_list['1'], eng)
+        _ok2_cmp, _v2_cmp = _eval_arith(_cmp_expr.attr_list['2'], eng)
+        if _ok1_cmp and _ok2_cmp:
+            _sym_cmp = _get_sym(_cmp_expr)
+            _truth_cmp = {
+                '>': _v1_cmp > _v2_cmp, '<': _v1_cmp < _v2_cmp,
+                '>=': _v1_cmp >= _v2_cmp, '=<': _v1_cmp <= _v2_cmp,
+                '=:=': _v1_cmp == _v2_cmp, '=\\=': _v1_cmp != _v2_cmp,
+            }[_sym_cmp]
+            return _unify(eng, _cmp_other,
+                          _make_atom(eng, 'true' if _truth_cmp else 'false'))
+        # The comparison itself is not an arithmetic operator, so its two
+        # operands are walked rather than the term as a whole.
+        _cmp_vars: list = []
+        _cmp_seen: set = set()
+        for _ck in ('1', '2'):
+            _collect_arith_vars(_cmp_expr.attr_list[_ck], eng.wl,
+                                _cmp_vars, _cmp_seen)
+        if _cmp_vars:
+            from wild_life.data_structures import Goal as _CmpGoal, SORT_VAR as _SV_CMP
+            _eq_defn_cmp = (getattr(eng.wl, 'eqsym', None) or
+                            eng.wl.syntax_module.symbol_table.get('='))
+            _eq_cmp = PsiTerm(type_def=_eq_defn_cmp)
+            _eq_cmp.attr_list['1'] = _cmp_other
+            _eq_cmp.attr_list['2'] = _cmp_expr
+            _eq_cmp._resid_marker = True
+            _pend_cmp = _CmpGoal(GoalType.PROVE, _eq_cmp, None, None, pending=True)
+            for _cv in _cmp_vars:
+                _attach_arith_resid(_cv, eng.wl, _pend_cmp, eng)
+            _other_cur_cmp = _cmp_other.deref()
+            if (_other_cur_cmp.value is None and not _other_cur_cmp.attr_list
+                    and (_other_cur_cmp.type is eng.wl.top
+                         or _other_cur_cmp.type is None
+                         or bool(_other_cur_cmp.flags & _SV_CMP))):
+                _attach_bool_resid(_other_cur_cmp, eng.wl, _pend_cmp, eng)
+            return True
+        return False
+
     _b_bool_unevaluated = (b_evaled is None) and _is_proper_bool_expr(b_d)
     # Also handle: bool expr on the LHS (e.g. and(B,C) = true)
     # We check a_d only if b_d is not already a bool expr (to avoid double-handling).
