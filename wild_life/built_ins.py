@@ -2555,6 +2555,22 @@ def _push_deferred_cmp(goal: PsiTerm, eng, a, b, oka, okb) -> bool:
     if not okb and b is not None:
         if _defer(b, a, False):
             return True
+
+    # Neither side is a call waiting to be made, so what is missing is a value.
+    # The comparison suspends on the variables that hold it up and is proven
+    # again when one of them is bound, which is how `pyth(A,B,C)` can state
+    # `A*A =:= B*B+C*C` before A, B and C are known.
+    _cmp_vars: list = []
+    _cmp_seen: set = set()
+    for _side in (a, b):
+        if _side is not None:
+            _collect_arith_vars(_side, wl, _cmp_vars, _cmp_seen)
+    if _cmp_vars:
+        from wild_life.data_structures import Goal as _CmpPredGoal
+        _pend = _CmpPredGoal(GoalType.PROVE, goal, _DEFRULES, None, pending=True)
+        for _cv in _cmp_vars:
+            _attach_arith_resid(_cv, wl, _pend, eng)
+        return True
     return False
 
 
