@@ -928,6 +928,61 @@ class Unifier:
             except Exception:
                 pass
 
+        # Two arithmetic expressions meet where a shared variable reaches both
+        # slots of a clause head — `r3(X, 1+1, 2*1)` called as `r3(a,C,C)`.
+        # Neither side is a number yet, so the evaluation above passed them by;
+        # compare what they come to instead of their shape.
+        if self.engine is not None:
+            from wild_life.data_structures import NON_STRICT_TERM as _NST_AA
+            from wild_life.built_ins import (_ARITH_OPS_SET as _AOS_AA,
+                                             _eval_arith as _ea_aa,
+                                             _make_number as _mn_aa)
+
+            # A draw or a clock reads differently every time, so comparing
+            # what two of them come to says nothing about the terms.
+            _AA_EFFECTFUL = frozenset(('random', 'genint', 'cpu_time',
+                                       'real_time'))
+
+            def _is_open_arith(t):
+                sym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+                return (sym in _AOS_AA and sym not in _AA_EFFECTFUL
+                        and t.value is None and bool(t.attr_list)
+                        and not (t.flags & _NST_AA))
+
+            if _is_open_arith(u) and _is_open_arith(v):
+                _ok_u_aa, _val_u_aa = _ea_aa(u, self.engine)
+                _ok_v_aa, _val_v_aa = (_ea_aa(v, self.engine) if _ok_u_aa
+                                       else (False, 0.0))
+                if _ok_u_aa and _ok_v_aa:
+                    if _val_u_aa != _val_v_aa:
+                        return False
+                    return self.unify(_mn_aa(self.engine, _val_u_aa),
+                                      _mn_aa(self.engine, _val_v_aa))
+                # Neither has a value yet — `p(X,Y,X+Y,X*Y)` called as
+                # p(X,Y,Z,Z) before X and Y are known.  The equation suspends
+                # on the variables holding it up and is settled once they are
+                # bound, which is what lets lefun1 answer A = 2, B = 2, C = 4.
+                from wild_life.built_ins import (
+                    _collect_arith_vars as _cav_aa,
+                    _attach_arith_resid as _aar_aa,
+                )
+                _vars_aa: list = []
+                _seen_aa: set = set()
+                _cav_aa(u, WL, _vars_aa, _seen_aa)
+                _cav_aa(v, WL, _vars_aa, _seen_aa)
+                if _vars_aa:
+                    _eq_defn_aa = (getattr(WL, 'eqsym', None)
+                                   or WL.syntax_module.symbol_table.get('='))
+                    if _eq_defn_aa is not None:
+                        _eq_aa = PsiTerm(type_def=_eq_defn_aa)
+                        _eq_aa.attr_list = {'1': u, '2': v}
+                        _eq_aa._resid_marker = True
+                        _pend_aa = Goal(GoalType.PROVE, _eq_aa, None, None,
+                                        pending=True)
+                        for _v_aa in _vars_aa:
+                            _aar_aa(_v_aa, WL, _pend_aa, self.engine)
+                        return True
+
         # 型の単一化
         if not self._unify_types(u, v):
             return False
