@@ -621,6 +621,20 @@ def _term_to_display_string(t: PsiTerm, eng) -> str:
     return buf.getvalue()
 
 
+def _is_list_term(t: PsiTerm, eng) -> bool:
+    """Whether t is a list — a cons cell or the empty list.
+
+    `nil` and `cons` are separate sorts under `list`, so a check against cons
+    alone leaves out [], and `append([],L)` or `length([])` would not reduce.
+    """
+    if t is None or t.type is None:
+        return False
+    wl = eng.wl
+    if wl.nil is not None and t.type.is_subtype_of(wl.nil):
+        return True
+    return wl.alist is not None and t.type.is_subtype_of(wl.alist)
+
+
 def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     """Try to evaluate string built-in functions (psi2str, str2psi, strcon).
 
@@ -830,7 +844,7 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None:
             return None
         lst = a1.deref()
-        if lst.type is None or not lst.type.is_subtype_of(eng.wl.alist):
+        if not _is_list_term(lst, eng):
             return None
         return eng.wl.make_integer(len(_list_to_python(lst, eng)))
 
@@ -843,7 +857,7 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None or a2 is None:
             return None
         head = a1.deref()
-        if head.type is None or not head.type.is_subtype_of(eng.wl.alist):
+        if not _is_list_term(head, eng):
             return None
         result = a2.deref()
         for item in reversed(_list_to_python(head, eng)):

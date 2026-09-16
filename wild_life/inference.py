@@ -31,6 +31,14 @@ _ARITH_OPS_NON_STRICT = frozenset((
     'round', 'truncate', 'exp', 'log', 'sin', 'cos', 'tan',
 ))
 
+# Built-in functions whose reduction a such-that rule may have to wait for:
+# the guard is what binds their arguments.
+_DEFERRABLE_BUILTIN_FUNCS = frozenset((
+    'psi2str', 'str2psi', 'strcon', 'makestr', 'strlen', 'substr',
+    'root_sort', 'children', 'length', 'append', 'features', 'chr', 'int2str',
+))
+
+
 def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
     """Freeze the arithmetic that a non-strict call's arguments stand for.
 
@@ -1400,7 +1408,12 @@ class Engine:
         mark = self.trail.mark()
         # A call that cannot be reduced here stands as its own value, as it did
         # when the reduction was attempted before the guard.
-        evaled = _eval_user_func_sync(call, self) or call
+        from wild_life.built_ins import _try_eval_string_func as _tesf_stv
+        evaled = _eval_user_func_sync(call, self)
+        if evaled is None:
+            evaled = _tesf_stv(call, self)
+        if evaled is None:
+            evaled = call
         ok = (self.unifier.unify(val_part, evaled)
               and self.unifier.unify(val_part, result))
         if not ok:
@@ -1592,7 +1605,15 @@ class Engine:
                 # _eval_embedded_user_funcs already resolves `Y.A` in place.
                 _st_call = None
                 _vp_d = val_part.deref()
-                if _is_user_function(_vp_d):
+                # A built-in call standing as the value waits too: the guard is
+                # what binds its arguments, so `q_sort([H|T]) -> append(L1,
+                # [H|L2]) | …, L1 = q_sort(…), L2 = q_sort(…)` can only reduce
+                # the append once the guard has run.
+                _vp_sym = (_vp_d.type.keyword.symbol
+                           if (_vp_d.type and _vp_d.type.keyword) else '')
+                _vp_is_bi_call = (bool(_vp_d.attr_list)
+                                  and _vp_sym in _DEFERRABLE_BUILTIN_FUNCS)
+                if _is_user_function(_vp_d) or _vp_is_bi_call:
                     _st_call = PsiTerm(type_def=_vp_d.type)
                     _st_call.attr_list = dict(_vp_d.attr_list)
                     _st_call.flags = _vp_d.flags
