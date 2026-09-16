@@ -741,6 +741,14 @@ class Engine:
         wl = self.wl
         _mark_non_strict_args(body, self)
         head = head.deref()
+        # A head written through a functor variable — `X(Args)`, which parses as
+        # apply(Args, functor => X) — names the predicate X stands for, so the
+        # clause is filed under that rather than under apply.
+        if getattr(wl, 'apply', None) is not None and head.type is wl.apply:
+            from wild_life.built_ins import _apply_to_call
+            _head_call = _apply_to_call(head, self)
+            if _head_call is not None:
+                head = _head_call
         defn = head.type
         if defn is None:
             return False
