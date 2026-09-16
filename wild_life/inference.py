@@ -13,7 +13,7 @@ from typing import Optional, List, Tuple, Any, Dict
 
 from wild_life.data_structures import (
     PsiTerm, Definition, GoalType, Goal, ChoicePoint,
-    DefType, FACT, QUERY, ERROR
+    DefType, FACT, QUERY, ERROR, featcmp_key,
 )
 from wild_life.unification import (
     UnificationFailure, CutException, HaltException, AbortException,
@@ -355,149 +355,273 @@ def prove_cond(cond_g: 'PsiTerm', eng) -> bool:
     return ok
 
 
-def _same_psi_term(a: 'PsiTerm', b: 'PsiTerm', is_open, seen=None, depth: int = 0) -> bool:
-    """True when a and b are the same term down to the variables in them.
+def _is_open_head_var(h: 'PsiTerm', wl) -> bool:
+    """A head position that is a variable: matching binds it to the call's term."""
+    from wild_life.data_structures import SORT_VAR as _SV
+    return (not h.attr_list and h.value is None
+            and (h.type is None or h.type is wl.top or bool(h.flags & _SV)))
 
-    Two terms that agree this way stay equal however their variables are
-    bound later, because each variable is one and the same psi-term in both.
-    Two *distinct* variables never agree, however alike they look now: either
-    can still be narrowed on its own and take the two terms apart.
+
+def _add_blocker(out: list, t: 'PsiTerm') -> None:
+    if not any(b is t for b in out):
+        out.append(t)
+
+
+def _match_one(c: 'PsiTerm', h: 'PsiTerm', out: list, eng, seen: set,
+               bindings: dict, stuck: list, depth: int = 0):
+    """How far the call's term c already matches the head's term h.
+
+    Matching is one-way: a head position that is a variable takes the call's
+    term, and a second position naming that same variable asks for that very
+    term again — which is why `f(X,s(X))` applied to f(X',s(Z)) waits for X'
+    and Z to become one rather than making them one.  `bindings` carries what
+    each head variable has taken so far.
+
+    Returns 'never' when no narrowing of the call could ever match, and
+    otherwise whether the head's demands left anything inside c unsettled,
+    having noted in `out` the terms whose narrowing would settle it.
     """
-    if depth > 30:
-        return True
-    a = a.deref()
-    b = b.deref()
-    if a is b:
-        return True
-    if is_open(a) or is_open(b):
+    if depth > 20:
         return False
-    if seen is None:
-        seen = set()
-    key = (id(a), id(b))
+    c = c.deref()
+    h = h.deref()
+    if c is h:
+        return False
+    key = (id(c), id(h))
     if key in seen:
-        return True           # a cycle both sides walk alike
-    seen.add(key)
-    if a.type is not b.type or a.value != b.value:
         return False
-    if a.attr_list.keys() != b.attr_list.keys():
-        return False
-    return all(_same_psi_term(v, b.attr_list[k], is_open, seen, depth + 1)
-               for k, v in a.attr_list.items())
-
-
-def _can_unify(a: 'PsiTerm', b: 'PsiTerm', eng, seen=None, depth: int = 0) -> bool:
-    """Whether two terms could be made one, without binding anything.
-
-    Trying a real unification and undoing it would wake the residuations on
-    the variables it touched, and those wake-ups are not undone by the trail —
-    a call testing its own feasibility would keep re-firing itself.
-    """
-    if depth > 30:
-        return True
-    a = a.deref()
-    b = b.deref()
-    if a is b:
-        return True
-    if seen is None:
-        seen = set()
-    key = (id(a), id(b))
-    if key in seen:
-        return True
     seen.add(key)
     wl = eng.wl
-    ta, tb = a.type, b.type
-    if (ta is not None and tb is not None
-            and ta is not wl.top and tb is not wl.top
-            and not ta.is_subtype_of(tb) and not tb.is_subtype_of(ta)):
-        from wild_life.unification import compute_glb
-        if compute_glb(ta, tb) is None:
+    if _is_open_head_var(h, wl):
+        _sort_pending = False
+        if h.type is not None and h.type is not wl.top:
+            # `X:c` still asks the call's term to be under that sort.
+            if c.type is None or not c.type.is_subtype_of(h.type):
+                if not types_compatible(c.type, h.type):
+                    return 'never'
+                _add_blocker(out, c)
+                _sort_pending = True
+        taken = bindings.get(id(h))
+        if _sort_pending:
+            # The sort is not met yet, but the variable still stands for this
+            # term as far as the positions after it are concerned: `h(X:c,X)`
+            # applied to h(A:a,B) waits on B as well as on A.
+            if taken is None:
+                bindings[id(h)] = c
+                return True
+        if taken is None:
+            bindings[id(h)] = c
             return False
-    if a.value is not None and b.value is not None and a.value != b.value:
+        if taken is c:
+            return False
+        _paired = _pair_blockers(taken, c, out, set(), eng)
+        if _paired == 'never':
+            return 'never'
+        if not _paired:
+            # The two differ nowhere a binding could reach, yet they are still
+            # two terms and the head asks for one.
+            stuck[0] = True
+        # What the two terms wait on is noted between themselves; the term
+        # that holds them does not wait with them.
         return False
-    for key_a, av in a.attr_list.items():
-        bv = b.attr_list.get(key_a)
-        if bv is not None and not _can_unify(av, bv, eng, seen, depth + 1):
-            return False
-    return True
+    if h.type is not None and h.type is not wl.top:
+        if c.type is None or not c.type.is_subtype_of(h.type):
+            if not types_compatible(c.type, h.type):
+                return 'never'
+            # c can still be narrowed under h's sort; nothing below it is
+            # settled until it is.
+            _add_blocker(out, c)
+            return True
+    if h.value is not None:
+        if c.value is None:
+            _add_blocker(out, c)
+            return True
+        if c.value != h.value:
+            return 'never'
+    noted = False
+    for k, hv in h.attr_list.items():
+        cv = c.attr_list.get(k)
+        if cv is None:
+            # The call can still gain the feature.
+            _add_blocker(out, c)
+            return True
+        below = _match_one(cv, hv, out, eng, seen, bindings, stuck, depth + 1)
+        if below == 'never':
+            return 'never'
+        if below:
+            noted = True
+    if noted:
+        # Something the head asks for is unsettled inside c, so c is waiting
+        # on it too — disequality5 marks X as well as the Y within it.
+        _add_blocker(out, c)
+    return noted
 
 
-def _head_repeat_status(head: 'PsiTerm', call: 'PsiTerm', eng):
-    """How a head's repeated variable stands against the call's arguments.
+def _rule_match_status(head: 'PsiTerm', call: 'PsiTerm', eng):
+    """Whether this rule applies to the call, cannot, or is not settled yet.
 
-    A head naming the same variable twice asks for the very same psi-term in
-    both places, so `f(X,X)` applies to `f(A,B)` only once A and B are one
-    term.  Returns 'ready' when they already are (or the head has no repeat),
-    'fail' when no binding could ever make the arguments agree, 'stuck' when
-    they agree on everything still bindable yet remain two terms, and
-    otherwise the variables whose binding could still settle it — residuating
-    on those is what makes the call retry.
+    Matching is one-way: the head's variables take the call's terms, while the
+    call's own terms are never narrowed to make a rule fit.  A call that is
+    not specific enough yet therefore waits — the answer is the list of terms
+    whose narrowing would settle it — and one that no narrowing could ever
+    make fit reports 'never', so the next rule is tried.  'stuck' is the third
+    case: the call is as settled as it will get and still does not match, so
+    it neither applies the rule nor waits.
     """
     if head is None or call is None or not head.attr_list:
         return 'ready'
     wl = eng.wl
 
-    def is_open(t):
-        """A variable proper: it can still be narrowed on its own."""
-        from wild_life.data_structures import SORT_VAR as _SV
-        return (not t.attr_list and t.value is None
-                and (t.type is None or t.type is wl.top or bool(t.flags & _SV)))
+    keys = [k for k in sorted(head.attr_list, key=featcmp_key)
+            if k in call.attr_list]
+    if not keys:
+        return 'ready'
 
-    def is_unsettled(t):
-        """A leaf whose sort could still be narrowed further.
+    # Positions belong together where either side shares a term: a call that
+    # passes one term to several positions has to meet what all of them ask at
+    # once, and a head naming one variable in several positions asks those
+    # positions of the call to agree.
+    parent = {k: k for k in keys}
 
-        A variable already narrowed to a sort still counts: the sort may have
-        sub-sorts, so the two arguments can still be told apart, and the call
-        has to keep waiting on it.
-        """
-        return not t.attr_list and t.value is None
+    def find(k):
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
 
-    def open_vars(t, out, seen, depth=0):
-        if depth > 30:
-            return
-        t = t.deref()
-        if id(t) in seen:
-            return
-        seen.add(id(t))
-        if is_unsettled(t):
-            out.append(t)
-            return
-        for sub in t.attr_list.values():
-            open_vars(sub, out, seen, depth + 1)
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
 
-    # Group the head's argument positions by the variable each one is.
-    positions: dict = {}
-    for key, arg in head.attr_list.items():
-        arg_d = arg.deref()
-        if is_open(arg_d):
-            positions.setdefault(id(arg_d), []).append(key)
+    first_call: dict = {}
+    first_head: dict = {}
+    for k in keys:
+        cd = call.attr_list[k].deref()
+        hd = head.attr_list[k].deref()
+        if id(cd) in first_call:
+            union(k, first_call[id(cd)])
+        else:
+            first_call[id(cd)] = k
+        if _is_open_head_var(hd, wl):
+            if id(hd) in first_head:
+                union(k, first_head[id(hd)])
+            else:
+                first_head[id(hd)] = k
+
+    groups: dict = {}
+    for k in keys:
+        groups.setdefault(find(k), []).append(k)
+
+    # Can a group's demands be met at all?  `h(X:c,X)` asks both of h(a,b)'s
+    # arguments to be one term under c, and a and b have no common sub-sort
+    # under c, so no narrowing could ever make that rule fit.  Asked on copies,
+    # so that nothing the call carries is narrowed by the question.
+    _never_mark = eng.trail.mark()
+    _was_firing = getattr(eng, '_in_fire_delay', False)
+    # The question is asked by unifying copies, and a delay rule firing on one
+    # of them would be an answer written out to the user: manual8's
+    # `:: I:int | write(I," ")` would report the 0 in `fact(0)`'s head before
+    # the call had anything to do with it.
+    eng._in_fire_delay = True
+    try:
+        _hm: dict = {}
+        _cm: dict = {}
+        for ks in groups.values():
+            merged = PsiTerm(type_def=wl.top)
+            for k in ks:
+                try:
+                    if not eng.unifier.unify(merged,
+                                             copy_term(head.attr_list[k], _hm)):
+                        return 'never'
+                    if not eng.unifier.unify(merged,
+                                             copy_term(call.attr_list[k], _cm)):
+                        return 'never'
+                except UnificationFailure:
+                    return 'never'
+    finally:
+        eng._in_fire_delay = _was_firing
+        eng.trail.undo_to(_never_mark)
 
     blockers: list = []
-    stuck = False
-    for keys in positions.values():
-        if len(keys) < 2:
-            continue
-        terms = []
-        for key in keys:
-            ref = call.attr_list.get(key)
-            if ref is None:
-                break
-            terms.append(ref.deref())
-        else:
-            first = terms[0]
-            if all(t is first for t in terms[1:]):
-                continue      # the call already supplies one and the same term
-            if not all(_can_unify(first, t, eng) for t in terms[1:]):
-                return 'fail'
-            if all(_same_psi_term(first, t, is_open) for t in terms[1:]):
-                # Equal down to their variables, yet still two terms: no
-                # binding can make them one, so waiting would not help.
-                stuck = True
-                continue
-            for t in terms:
-                open_vars(t, blockers, set())
+    bindings: dict = {}
+    stuck = [False]
+    seen: set = set()
+    mark = eng.trail.mark()
+    try:
+        head_map: dict = {}
+        asked: dict = {}
+        for ks in groups.values():
+            merged = copy_term(head.attr_list[ks[0]], head_map)
+            for k in ks[1:]:
+                try:
+                    if not eng.unifier.unify(
+                            merged, copy_term(head.attr_list[k], head_map)):
+                        return 'never'
+                except UnificationFailure:
+                    return 'never'
+            for k in ks:
+                asked[k] = merged
+        for k in keys:
+            if _match_one(call.attr_list[k], asked[k], blockers, eng, seen,
+                          bindings, stuck) == 'never':
+                return 'never'
+    finally:
+        eng.trail.undo_to(mark)
     if blockers:
         return blockers
-    return 'stuck' if stuck else 'ready'
+    return 'stuck' if stuck[0] else 'ready'
+
+
+def _pair_blockers(a: 'PsiTerm', b: 'PsiTerm', out: list, seen: set, eng,
+                   depth: int = 0) -> bool:
+    """Note the terms whose narrowing could still make a and b one term.
+
+    Whether they can differ at all is what decides it: two terms that already
+    agree down to the very same variables are noted nowhere, because no
+    binding could bring the two of them together.  Where they do differ, every
+    term on the way down to the difference is waiting on it — which is why
+    disequality3 marks each cell of `s(a(a(a(B))))` and not only B.
+
+    Returns 'never' when no narrowing could ever bring them together, and
+    otherwise whether anything was noted.
+    """
+    if depth > 30:
+        return False
+    a = a.deref()
+    b = b.deref()
+    if a is b:
+        return False
+    key = (id(a), id(b))
+    if key in seen:
+        return False
+    seen.add(key)
+    if not types_compatible(a.type, b.type):
+        return 'never'
+    if a.value is not None and b.value is not None and a.value != b.value:
+        return 'never'
+    settled = lambda t: bool(t.attr_list) or t.value is not None
+    if not settled(a) or not settled(b):
+        # One of them is still a bare variable: it is what the call waits on,
+        # and there is nothing below it to compare.
+        _add_blocker(out, a)
+        _add_blocker(out, b)
+        return True
+    differs = (a.type is not b.type or a.value != b.value
+               or a.attr_list.keys() != b.attr_list.keys())
+    for sub_key, sub in a.attr_list.items():
+        other = b.attr_list.get(sub_key)
+        if other is None:
+            continue
+        below = _pair_blockers(sub, other, out, seen, eng, depth + 1)
+        if below == 'never':
+            return 'never'
+        if below:
+            differs = True
+    if differs:
+        _add_blocker(out, a)
+        _add_blocker(out, b)
+    return differs
 
 
 def _eval_cond_functional(cond_term: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
@@ -1743,38 +1867,21 @@ class Engine:
         # unifying them would answer a question the call has not settled — so
         # the call residuates on the variables that keep them apart, and is
         # retried when one of them is bound.
-        _repeat = _head_repeat_status(_head_d_arity, funct, self)
-        if _repeat == 'fail':
+        # Matching is one-way: the head's variables take the call's terms, and
+        # the call's own terms are never narrowed to make a rule fit.  A rule
+        # no narrowing could ever fit is passed over; one the call is not yet
+        # specific enough for makes the call wait on the terms that would
+        # settle it.
+        _match = _rule_match_status(_head_d_arity, funct, self)
+        if _match == 'never':
             return False
-        if _repeat == 'stuck':
-            # Nothing left to bind can make the head's repeats agree, so the
-            # call neither applies the rule nor waits: it simply has no value.
+        if _match == 'stuck':
+            # The call's arguments are alike down to their variables yet are
+            # still two terms, and the head asks for one: nothing left to bind
+            # can settle it, so the call neither applies the rule nor waits —
+            # it simply has no value.
             return True
-        _free_args_for_resid = _repeat if isinstance(_repeat, list) else None
-
-        # Residuation check: if funct has completely free (unbound) arguments,
-        # don't eagerly bind them to sorts just to match a head pattern.
-        # Instead, suspend (residuate) on those free variables so that when they
-        # get bound (by a later goal), the function is re-evaluated.
-        # "Completely free" = type is top, no attrs, no value, no sort constraint.
-        if _free_args_for_resid is None:
-            _free_args_for_resid = []
-            for _fk_r, _fv_r_psi in funct.attr_list.items():
-                _fv_r = _fv_r_psi.deref()
-                _fv_r_is_free = (
-                    (_fv_r.type is None or _fv_r.type is wl.top) and
-                    not _fv_r.attr_list and
-                    _fv_r.value is None
-                )
-                if not _fv_r_is_free:
-                    continue
-                # Check if the corresponding head arg is a non-top constraint.
-                _head_r_arg = _head_d_arity.attr_list.get(_fk_r)
-                if _head_r_arg is None:
-                    continue
-                _head_r_d = _head_r_arg.deref()
-                if _head_r_d.type is not None and _head_r_d.type is not wl.top:
-                    _free_args_for_resid.append(_fv_r)
+        _free_args_for_resid = _match if isinstance(_match, list) else None
         if _free_args_for_resid:
             # Set up residuation: attach a pending EVAL goal to each free variable.
             # When the variable gets bound, _wakeup_resid will push the EVAL goal
@@ -1796,6 +1903,18 @@ class Engine:
             # _wakeup_resid calls push_goal(g.type, g.a, g.b, g.c) which creates a new Goal
             # without _resid_marker, so we propagate via funct (which is g.a and is preserved).
             funct._resid_refire = True
+            # A term the call waited on last time round may not be one now:
+            # `f(X,s(X))` waits on Y until Y is s(Z), and from then on it waits
+            # on Z instead.  Drop the old marks before laying down the new
+            # ones, so that only what the call is actually waiting on shows a
+            # tilde.
+            for _old_r in getattr(funct, '_resid_marked', ()) or ():
+                if _old_r.resid and any(rv.goal is _pending_eval
+                                        for rv in _old_r.resid):
+                    self.trail.trail_copy(_old_r, 'resid')
+                    _old_r.resid = [rv for rv in _old_r.resid
+                                    if rv.goal is not _pending_eval]
+            funct._resid_marked = list(_free_args_for_resid)
             for _fv_r in _free_args_for_resid:
                 if _fv_r.resid is None:
                     self.trail.trail_psi(_fv_r, 'resid')
@@ -1804,8 +1923,14 @@ class Engine:
                     if not any(rv.goal is _pending_eval for rv in _fv_r.resid):
                         self.trail.trail_copy(_fv_r, 'resid')
                         _fv_r.resid.append(_ResidR(goal=_pending_eval))
-                # Mark with SORT_VAR-like flag so display shows @~
-                if not (_fv_r.flags & _SV_R):
+                # A plain variable is marked bindable so the unifier keeps
+                # binding it although it now carries a residuation.  A term
+                # that already has a sort, a value or features is not a
+                # variable and must not start looking like one — `b` would
+                # then let itself be narrowed to anything.
+                _fv_r_is_plain = (not _fv_r.attr_list and _fv_r.value is None
+                                  and (_fv_r.type is None or _fv_r.type is wl.top))
+                if _fv_r_is_plain and not (_fv_r.flags & _SV_R):
                     self.trail.trail_psi(_fv_r, 'flags')
                     _fv_r.flags |= _SV_R
             # result (and hence A) stays unbound — return True so the UNIFY(A,result)

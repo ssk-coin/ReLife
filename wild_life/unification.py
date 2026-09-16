@@ -1117,7 +1117,19 @@ class Unifier:
         if len(glbs) > 1 and self.engine is not None:
             for alt_glb in reversed(glbs[1:]):
                 alt_psi = PsiTerm(type_def=alt_glb)
-                self.engine.push_choice_point(GoalType.UNIFY, u, alt_psi, None)
+                # The alternative narrows u to the other greatest lower bound
+                # and then redoes the whole unification, because everything
+                # this call goes on to do — merging u and v among it — is
+                # undone on the way back here.
+                _redo = Goal(GoalType.UNIFY, u, v, None)
+                _redo.next = self.engine.goal_stack
+                _narrow = Goal(GoalType.UNIFY, u, alt_psi, None)
+                _narrow.next = _redo
+                self.engine.choice_stack = ChoicePoint(
+                    undo_point=self.trail.mark(),
+                    goal_stack=_narrow,
+                    next=self.engine.choice_stack,
+                )
 
         # 最初の GLB で進める
         glb = glbs[0]

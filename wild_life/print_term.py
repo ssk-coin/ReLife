@@ -1351,12 +1351,14 @@ def _pretty_attr(ps: PrintState, attr_list: dict, depth: int, wl,
 def _maybe_resid(ps: PrintState, t: 'PsiTerm') -> None:
     """Print residuation markers if any.
 
-    The tilde '~' is only printed for FREE variables (value=None, no attrs).
-    Bound variables (concrete values) never show '~' even if they have stale
-    resid entries — this matches C Wild Life 1.02 behaviour where e.g. A=23
-    after 'A=B/C? A=23?' shows 'A = 23' (no tilde), not 'A = 23~'.
+    The tilde '~' marks a term a suspended goal is waiting on.  A term that
+    has taken a concrete value never shows one even if it carries stale resid
+    entries — this matches C Wild Life 1.02, where `A=B/C? A=23?` answers
+    A = 23 and not A = 23~.  A compound does show one: a call waiting for two
+    arguments to become one term waits on the arguments themselves, which is
+    how disequality1 reports X = s(B)~.
     """
-    if t.resid and t.value is None and not t.attr_list:
+    if t.resid and t.value is None:
         for r in t.resid:
             # Pending via a Goal object (arithmetic/eval residuation)
             if getattr(r, 'goal', None) and getattr(r.goal, 'pending', False):
