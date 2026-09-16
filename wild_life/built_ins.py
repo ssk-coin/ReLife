@@ -5121,6 +5121,15 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         # Arithmetic expression that couldn't be fully evaluated (has variables).
         wl = eng.wl
         b_sym = b_d.type.keyword.symbol if b_d.type and b_d.type.keyword else ''
+        # `A = +(B)` is a plus waiting for its second operand.  It cannot be
+        # evaluated and so leaves no residuation, but the operand it does have
+        # still has to be a number, which is what makes B display as real.
+        if (b_sym == '+' and not _b_is_non_strict
+                and set(b_d.attr_list.keys()) == {'1'}):
+            _plus_arg = b_d.attr_list['1'].deref()
+            if _plus_arg.value is None and not _plus_arg.attr_list:
+                _mark_real_sort(_plus_arg, eng.wl, eng)
+
         if b_sym in _ARITH_OPS_SET and not _b_is_non_strict and _is_complete_arith_expr(b_d):
             # Mark all free variables in the arithmetic expression (and the LHS
             # if free) as constrained to sort real.  This ensures that even when
