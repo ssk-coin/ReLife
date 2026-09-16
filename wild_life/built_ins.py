@@ -5629,6 +5629,71 @@ def _term_is_unbound(t: Optional[PsiTerm], eng) -> bool:
             and (t.type is None or t.type is wl.top))
 
 
+def _sort_compare_args(goal, eng):
+    """The two sorts a sort-comparison predicate compares, or None."""
+    a, b = _get_two_args(goal)
+    if a is None or b is None:
+        return None
+    da, db = a.deref(), b.deref()
+    if da.type is None or db.type is None:
+        return None
+    return da.type, db.type
+
+
+def bi_sort_eq(goal: PsiTerm, eng) -> bool:
+    """X :== Y — X and Y have the same sort."""
+    sorts = _sort_compare_args(goal, eng)
+    return sorts is not None and sorts[0] is sorts[1]
+
+
+def bi_sort_ne(goal: PsiTerm, eng) -> bool:
+    """X :\\== Y — X and Y have different sorts."""
+    sorts = _sort_compare_args(goal, eng)
+    return sorts is not None and sorts[0] is not sorts[1]
+
+
+def bi_sort_le(goal: PsiTerm, eng) -> bool:
+    """X :=< Y — X's sort is Y's sort or lies under it."""
+    sorts = _sort_compare_args(goal, eng)
+    return sorts is not None and sorts[0].is_subtype_of(sorts[1])
+
+
+def bi_sort_lt(goal: PsiTerm, eng) -> bool:
+    """X :< Y — X's sort lies strictly under Y's."""
+    sorts = _sort_compare_args(goal, eng)
+    return (sorts is not None and sorts[0] is not sorts[1]
+            and sorts[0].is_subtype_of(sorts[1]))
+
+
+def bi_sort_ge(goal: PsiTerm, eng) -> bool:
+    """X :>= Y — X's sort is Y's sort or lies above it."""
+    sorts = _sort_compare_args(goal, eng)
+    return sorts is not None and sorts[1].is_subtype_of(sorts[0])
+
+
+def bi_sort_gt(goal: PsiTerm, eng) -> bool:
+    """X :> Y — X's sort lies strictly above Y's."""
+    sorts = _sort_compare_args(goal, eng)
+    return (sorts is not None and sorts[0] is not sorts[1]
+            and sorts[1].is_subtype_of(sorts[0]))
+
+
+def bi_sort_comparable(goal: PsiTerm, eng) -> bool:
+    """X :>< Y — the two sorts lie on one chain, either way round."""
+    sorts = _sort_compare_args(goal, eng)
+    return (sorts is not None
+            and (sorts[0].is_subtype_of(sorts[1])
+                 or sorts[1].is_subtype_of(sorts[0])))
+
+
+def bi_sort_incomparable(goal: PsiTerm, eng) -> bool:
+    """X :\\>< Y — neither sort lies under the other."""
+    sorts = _sort_compare_args(goal, eng)
+    return (sorts is not None
+            and not sorts[0].is_subtype_of(sorts[1])
+            and not sorts[1].is_subtype_of(sorts[0]))
+
+
 def bi_identical(goal: PsiTerm, eng) -> bool:
     """X == Y — structural identity.
 
@@ -8782,6 +8847,16 @@ def register_all(wl) -> None:
     _reg('between', bi_between)
     _reg('random', bi_rand)
     _reg('initrandom', bi_initrandom)
+
+    # Sort comparison — these compare the sorts of their two arguments.
+    _reg(':==', bi_sort_eq)
+    _reg(':\\==', bi_sort_ne)
+    _reg(':=<', bi_sort_le)
+    _reg(':<', bi_sort_lt)
+    _reg(':>=', bi_sort_ge)
+    _reg(':>', bi_sort_gt)
+    _reg(':><', bi_sort_comparable)
+    _reg(':\\><', bi_sort_incomparable)
 
     # System
     _reg('halt', bi_halt)
