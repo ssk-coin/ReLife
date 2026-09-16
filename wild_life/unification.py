@@ -117,6 +117,23 @@ def compute_lub(d1: Definition, d2: Definition) -> Optional[Definition]:
     return compute_glb(d1, d2)
 
 
+def defers_check(defn, _depth: int = 0) -> bool:
+    """Whether a term of this sort holds its prototype and delay rules back.
+
+    `delay_check(S)?` marks S, and the mark reaches everything under it: being
+    S — or anything below S — is not yet the final word on what a term is, so
+    the rules wait until the term is modified.
+    """
+    if defn is None or _depth > 32:
+        return False
+    if not getattr(defn, 'always_check', True):
+        return True
+    for parent in getattr(defn, 'parents', ()) or ():
+        if defers_check(parent, _depth + 1):
+            return True
+    return False
+
+
 def compute_glb(d1: Definition, d2: Definition) -> Optional[Definition]:
     """2つの型の最大下限 (GLB: Greatest Lower Bound) を計算する。
 
@@ -279,6 +296,10 @@ class Unifier:
         self._proving_sort: set = set()
         # ids of psi-terms whose :: Sort(attrs). prototype is being applied.
         self._applying_proto: set = set()
+        # Re-entrancy guard for the deferred delay_check pass (see
+        # _unify_impl_inner): a cyclic term would otherwise keep handing
+        # itself a fresh copy of the prototype for ever.
+        self._in_deferred_check: bool = False
 
     def bind(self, var: PsiTerm, val: PsiTerm):
         """変数 var を val に束縛する (バックトラック可能)
@@ -306,8 +327,23 @@ class Unifier:
         A bare one is just a sort being named — `Q:person` meeting `julius`
         leaves Q as julius, not as julius(last_name => caesar).
         """
-        proto = getattr(t.type, 'prototype_attrs', None) if t.type is not None else None
-        if not proto or not t.attr_list:
+        if t.type is None or not t.attr_list:
+            return True
+        # A prototype is inherited: `:: a(x=>c).` with `b <| a` gives every b
+        # an x as well, so the sorts above t's own are collected too.
+        protos = []
+        seen_sorts: set = set()
+        queue = [t.type]
+        while queue:
+            sort_def = queue.pop(0)
+            if sort_def is None or id(sort_def) in seen_sorts:
+                continue
+            seen_sorts.add(id(sort_def))
+            sort_proto = getattr(sort_def, 'prototype_attrs', None)
+            if sort_proto:
+                protos.append(sort_proto)
+            queue.extend(getattr(sort_def, 'parents', ()) or ())
+        if not protos:
             return True
         # A cyclic term would otherwise re-enter through the recursive unify
         # below; the guard is per-unification, so a later retry still applies.
@@ -315,19 +351,20 @@ class Unifier:
             return True
         self._applying_proto.add(id(t))
         try:
-            # One shared var_map so variables the prototype shares across
-            # features stay shared in the copies.
-            var_map: dict = {}
-            for key, proto_val in proto.items():
-                copy = copy_term(proto_val, var_map)
-                existing = t.attr_list.get(key)
-                if existing is not None and not self.unify(existing, copy):
-                    return False
-                # Point the feature at the prototype's own node, so features
-                # the prototype shares stay shared on the term: every feature
-                # of `:: square(side => S, length => S, width => S)` is one
-                # node even where the term already carried equal values.
-                self.set_attr(t, key, copy)
+            for proto in protos:
+                # One shared var_map per declaration, so variables the
+                # prototype shares across features stay shared in the copies.
+                var_map: dict = {}
+                for key, proto_val in proto.items():
+                    copy = copy_term(proto_val, var_map)
+                    existing = t.attr_list.get(key)
+                    if existing is not None and not self.unify(existing, copy):
+                        return False
+                    # Point the feature at the prototype's own node, so features
+                    # the prototype shares stay shared on the term: every feature
+                    # of `:: square(side => S, length => S, width => S)` is one
+                    # node even where the term already carried equal values.
+                    self.set_attr(t, key, copy)
             return True
         finally:
             self._applying_proto.discard(id(t))
@@ -626,7 +663,14 @@ class Unifier:
                 # Apply prototype attrs: if the bound term's sort has prototype_attrs
                 # (declared with :: Sort(attrs).), merge them into the term.
                 # e.g. module "a" has :: p(aha=>1). → A=p gives A = p(aha => 1).
-                if (_v_canon.type is not None and _v_canon.type is not WL.top
+                # A sort under delay_check(S) holds its prototype back while
+                # the term carries no features: `A = a` with `:: a(x=>c).` and
+                # `delay_check(a)?` answers a, not a(x => c).  The prototype
+                # goes on once the term is modified (see _apply_deferred_check).
+                _v_defers = (_v_canon.attr_list == {}
+                             and defers_check(_v_canon.type))
+                if (not _v_defers and _v_canon.type is not None
+                        and _v_canon.type is not WL.top
                         and getattr(_v_canon.type, 'prototype_attrs', None)):
                     _proto = _v_canon.type.prototype_attrs
                     # Create fresh copies of ALL prototype attrs using a single
@@ -646,7 +690,8 @@ class Unifier:
                             self.set_attr(_v_canon, _pk, _pc)
                 # Fire global delay rules for the sort of the term being bound to.
                 # e.g. :: C:cons | write(C.1), nl. fires when a plain var is bound to a cons.
-                if WL.delay_rules and self.engine is not None and _v_canon.type is not None and _v_canon.type is not WL.top:
+                if (WL.delay_rules and self.engine is not None and not _v_defers
+                        and _v_canon.type is not None and _v_canon.type is not WL.top):
                     # Fire sub-terms first (bottom-up / post-order, matching C Wild Life behaviour).
                     self._fire_delay_rules_for_subterms(_v_canon)
                     if not getattr(_v_canon, '_delay_fired', False):
@@ -887,6 +932,15 @@ class Unifier:
         if not self._unify_types(u, v):
             return False
 
+        # Narrowing a sort can apply a prototype, and that can merge one of
+        # these two psi-terms into another node.  Re-read both before going on,
+        # so the features below land on what the terms now are rather than on a
+        # node nothing points at any more.
+        u = u.deref()
+        v = v.deref()
+        if u is v:
+            return True
+
         # 値の単一化 (数値・文字列)
         if not self._unify_values(u, v):
             return False
@@ -928,6 +982,23 @@ class Unifier:
         u_canon = u.deref()
         if u_canon.type is not None and u_canon.attr_list and self.engine is not None:
             self._try_sort_narrowing(u_canon)
+
+        # A sort under delay_check(S) held its prototype and delay rules back
+        # while the term carried no features.  Modifying the term is what they
+        # were waiting for, so they run now: `B = c` stays c, and `B = d(@)`
+        # then answers d(@,w => 2,z => a).
+        if (u_canon.type is not None and u_canon.attr_list
+                and self.engine is not None and not self._in_deferred_check
+                and defers_check(u_canon.type)):
+            self._in_deferred_check = True
+            try:
+                if not self._apply_prototype_attrs(u_canon):
+                    return False
+                if WL.delay_rules and not getattr(u_canon, '_delay_fired', False):
+                    u_canon._delay_fired = True
+                    self._fire_delay_rules(u_canon, u_canon.type)
+            finally:
+                self._in_deferred_check = False
 
         return True
 

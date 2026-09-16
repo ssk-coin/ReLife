@@ -8756,16 +8756,23 @@ def register_all(wl) -> None:
     _reg('non_strict', _bi_non_strict)
 
     def _bi_delay_check(goal, eng):
-        """delay_check(S): hold S's delay rules until a term narrows past S.
+        """delay_check(S, …): hold S's prototype and delay rules until a term
+        of that sort is modified.
 
-        Without it a term reaching S fires them straight away.  Under it a
-        term that is merely S may still narrow further, so the rules wait for
-        a proper sub-sort: `A = person` stays person, while a term that turns
-        out to be cleopatra fires person's rule.
+        Without it a term reaching S takes S's prototype and fires its rules
+        straight away.  Under it merely being S is not yet the final word on
+        what the term is, so `A = person` stays person, and the rules run once
+        the term gains a feature.  Several sorts may be named in one call.
         """
-        arg = _get_one_arg(goal)
-        if arg is not None and arg.type is not None:
-            arg.type.always_check = False
+        i = 1
+        while True:
+            arg = goal.attr_list.get(str(i))
+            if arg is None:
+                break
+            arg_d = arg.deref()
+            if arg_d.type is not None:
+                arg_d.type.always_check = False
+            i += 1
         return True
     _reg('delay_check', _bi_delay_check)
 
