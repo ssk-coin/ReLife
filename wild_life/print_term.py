@@ -9,8 +9,10 @@ from typing import Optional, Dict, Set, List, Tuple, IO
 
 # Avoid circular imports at module level
 from wild_life.data_structures import (
-    PsiTerm, Definition, OperatorType, int_div as _int_div
+    PsiTerm, Definition, OperatorType, int_div as _int_div,
+    NON_STRICT_TERM as _NST_WALK
 )
+import wild_life.runtime as _wl_module
 
 PRINT_DEPTH = 200   # max nesting depth; list length is unlimited
 MAX_PRECEDENCE = 1200
@@ -19,6 +21,11 @@ MAX_COL = 79        # column limit for line wrapping
 DOTDOT = ": "
 
 import math as _math
+
+_ARITH_DISPLAY_SYMS = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+                                 'max', 'min', 'abs', 'sqrt', 'floor', 'ceiling',
+                                 '/\\', '\\/', 'xor', '>>', '<<'))
+
 
 def _eval_pure_arith(t: 'PsiTerm', wl, _depth: int = 0):
     """Evaluate a pure constant arithmetic expression.
@@ -367,6 +374,15 @@ class PrintState:
             # it as SHARED and adding a spurious "X: value" prefix when printed.
             _cur_sym = cur.type.keyword.symbol if (cur.type and cur.type.keyword) else ''
             if _cur_sym == 'copy_term':
+                continue
+            # A ground arithmetic expression is displayed as the number it
+            # comes to, so its operands are never written: the 3 inside
+            # m_cons(3,m_cons(3-1,…)) appears once, and wants no name.
+            if (_cur_sym in _ARITH_DISPLAY_SYMS and cur.value is None
+                    and cur.attr_list and not self.no_arith_eval
+                    and not self.frozen_arith
+                    and not (cur.flags & _NST_WALK)
+                    and _eval_pure_arith(cur, _wl_module.WL) is not None):
                 continue
             for val in cur.attr_list.values():
                 stack.append((val, True))
@@ -1020,9 +1036,7 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
     # are concrete (e.g. A+5 where A=5 becomes 10, bagof results, etc.).
     # Skip terms with NON_STRICT_TERM flag — those are sort-constraint expressions
     # (X:(1+2)) that must stay unevaluated.
-    _arith_syms_display = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
-                                      'max', 'min', 'abs', 'sqrt', 'floor', 'ceiling',
-                                      '/\\', '\\/', 'xor', '>>', '<<'))
+    _arith_syms_display = _ARITH_DISPLAY_SYMS
     if (_psym in _arith_syms_display and t.value is None and t.attr_list
             and not ps.no_arith_eval and not ps.frozen_arith):
         from wild_life.data_structures import NON_STRICT_TERM as _NST_DISP
