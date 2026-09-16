@@ -1698,14 +1698,15 @@ class Engine:
         _funct_keys_set = set(funct.attr_list.keys())
         _head_only_keys = set(_head_d_arity.attr_list.keys()) - _funct_keys_set
         if _head_only_keys:
-            # Funct has fewer args than this rule requires — partial application.
-            # In Wild Life, calling a function with fewer args than its head needs
-            # is always a partial application: return funct as a constructor term.
-            if len(active) == 1:
-                # Last rule: return funct as partial application (constructor semantics).
-                return self.unifier.unify(result, funct)
-            # More rules exist; skip this one (try next via choice point).
-            return False
+            # A rule asks for features the call does not carry, so the call is
+            # a partial application: it may yet gain them, and which rule
+            # applies is not settled.  It stands for itself rather than
+            # reducing through a later rule — `X = f(b => 0)` with
+            # `f(a => int) -> 1.` and `f(b => int) -> 2.` answers f(b => 0),
+            # and only `X(a => string)` picks a rule.
+            if _rule_cp is not None:
+                self.drop_choice_point(_rule_cp)
+            return self.unifier.unify(result, funct)
 
         # A rule head that names the same variable twice asks for the very same
         # psi-term in both places.  `f(X,X)` therefore does not apply to
