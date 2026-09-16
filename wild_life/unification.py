@@ -424,6 +424,12 @@ class Unifier:
                 if not self.unify(t, pat_copy):
                     self.trail.undo_to(mark)
                     return False
+                # A feature the pattern states as a meet holds the meet:
+                # soap_opera's `wife => W:alcoholic & long_lost_sister(H)`
+                # answers jane, not the conjunction that produced her.
+                if not self._reduce_conjunctions(t):
+                    self.trail.undo_to(mark)
+                    return False
                 cp_save, gs_save = eng.choice_stack, eng.goal_stack
                 eng.goal_stack = None
                 eng.push_goal(_GT_sc.PROVE, cond_copy.deref(), _DR_sc, None)
@@ -437,6 +443,43 @@ class Unifier:
             return True
         finally:
             self._proving_sort.clear()
+
+    def _reduce_conjunctions(self, t: PsiTerm) -> bool:
+        """Replace `A & B` features of t by the sort they meet at."""
+        if self.engine is None or WL.and_sym is None:
+            return True
+        from wild_life.built_ins import _eval_and_conjunction as _eac_rc
+        seen: set = set()
+        stack = [t]
+        while stack:
+            node = stack.pop()
+            node = node.deref()
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            for key, ref in list(node.attr_list.items()):
+                sub = ref.deref()
+                if (sub.type is WL.and_sym and '1' in sub.attr_list
+                        and '2' in sub.attr_list):
+                    met = _eac_rc(sub, self.engine)
+                    if met is None:
+                        return False
+                    met = met.deref()
+                    # `W:alcoholic & long_lost_sister(H)` is still W, now
+                    # narrowed, so the feature keeps pointing at W and stays
+                    # the same node as the W in the characters list.
+                    lhs = sub.attr_list['1'].deref()
+                    if not self.unify(lhs, met):
+                        return False
+                    lhs = lhs.deref()
+                    if lhs is not sub:
+                        if sub.coref is None:
+                            self.bind(sub, lhs)
+                        else:
+                            self.set_attr(node, key, lhs)
+                    sub = lhs
+                stack.append(sub)
+        return True
 
     def bind_value(self, t: PsiTerm, new_value: Any):
         """PsiTerm の値を変更する (バックトラック可能)"""
@@ -543,7 +586,13 @@ class Unifier:
                         and not (x.flags & (_QT_CJ | _NST_CJ))):
                     m = _eac(x, self.engine)
                     if m is not None:
-                        return m.deref()
+                        m = m.deref()
+                        # The conjunction is the meet, so what points at it
+                        # points at the meet: soap_opera's wife answers _B,
+                        # not `_B & long_lost_sister(_A)`.
+                        if m is not x and x.coref is None:
+                            self.bind(x, m)
+                        return m
                 return x
 
             u2, v2 = _meet_conj(u), _meet_conj(v)
