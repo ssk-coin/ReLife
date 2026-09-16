@@ -793,6 +793,15 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
                 return _make_string(eng, str(a1.value))
         return _make_atom(eng, defn.keyword.symbol)
 
+    elif sym in ('var', 'nonvar', 'is_function', 'is_predicate', 'is_sort'):
+        # These read as functions too: `A = var(_)` answers true, not var(@).
+        if eng is None or '1' not in t.attr_list or t.type is None:
+            return None
+        _pred = t.type._builtin_func
+        if _pred is None:
+            return None
+        return eng.wl.make_atom('true' if _pred(t, eng) else 'false')
+
     elif sym == 'has_feature':
         # has_feature(F, T) also reads as a function: `A = has_feature(@,S)`
         # answers false while S has no such feature and true once it does.
@@ -7756,6 +7765,24 @@ def _rule_to_string(h, b, wl):
     return head_str, goal_strs
 
 
+# What the C interpreter calls a built-in function rather than a built-in
+# predicate: it answers with a value where a predicate answers yes or no.
+_BUILTIN_FUNCTION_SYMS = frozenset((
+    'and', 'or', 'not', 'xor',
+    'var', 'nonvar', 'is_function', 'is_predicate', 'is_sort',
+    'is_number', 'is_value', 'has_feature',
+    'int2str', 'str2int', 'str2psi', 'psi2str', 'str2num', 'num2str',
+    'strcon', 'strlen', 'substr', 'chr', 'asc', 'upper', 'lower',
+    'root_sort', 'sort', 'features', 'parents', 'children',
+    'least_sorts', 'glb', 'lub', 'copy_term', 'eval',
+    '+', '-', '*', '/', '//', 'mod', '**', '^', 'min', 'max', 'abs',
+    'sqrt', 'exp', 'log', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
+    'floor', 'ceiling', 'round', 'truncate', 'sign',
+    '>', '<', '>=', '=<', '=:=', '=\\=',
+    ':=<', ':>=', ':<', ':>', ':==', ':\\==',
+))
+
+
 def _bi_listing_one(defn, wl, imported: bool = False) -> None:
     """Helper: list clauses for a single Definition.
 
@@ -7855,7 +7882,16 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
         a_deref = a.deref() if hasattr(a, 'deref') else a
         defn = a_deref.type if a_deref.type else None
 
-        if defn is not None and defn.type in (DefType.PREDICATE, DefType.FUNCTION):
+        if defn is not None and defn._builtin_func is not None:
+            # A built-in has no clauses to show, so listing says what it is.
+            flush_imported()
+            kind = ('function' if (defn.keyword is not None
+                                   and defn.keyword.symbol in _BUILTIN_FUNCTION_SYMS)
+                    else 'predicate')
+            name = defn.keyword.symbol if defn.keyword else '?'
+            print()
+            print(f"% '{name}' is a built-in {kind}.")
+        elif defn is not None and defn.type in (DefType.PREDICATE, DefType.FUNCTION):
             is_imported = (defn.keyword and defn.keyword.module is not None
                            and defn.keyword.module != wl.user_module)
             active_rules = [(h, b) for h, b in (defn.rule or []) if h is not None]
@@ -9583,7 +9619,12 @@ def register_all(wl) -> None:
             return False
         t = a1.deref()
         defn = t.type
-        return defn is not None and defn.type == _DT.FUNCTION
+        if defn is None:
+            return False
+        if defn._builtin_func is not None:
+            return (defn.keyword is not None
+                    and defn.keyword.symbol in _BUILTIN_FUNCTION_SYMS)
+        return defn.type == _DT.FUNCTION
     _reg('is_function', _bi_is_function)
 
     def _bi_is_predicate(goal, eng):
@@ -9594,7 +9635,12 @@ def register_all(wl) -> None:
             return False
         t = a1.deref()
         defn = t.type
-        return defn is not None and defn.type == _DT.PREDICATE
+        if defn is None:
+            return False
+        if defn._builtin_func is not None:
+            return (defn.keyword is not None
+                    and defn.keyword.symbol not in _BUILTIN_FUNCTION_SYMS)
+        return defn.type == _DT.PREDICATE
     _reg('is_predicate', _bi_is_predicate)
 
     def _bi_glb(goal, eng):
