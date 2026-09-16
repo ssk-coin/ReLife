@@ -1949,6 +1949,19 @@ class Engine:
                 return False
             return True
 
+        # Body is a call through a functor variable — twice's body F(F(X)).
+        # Put it through '=', which rebuilds the call once the functor is known
+        # and otherwise suspends on it, so that binding F later still reduces.
+        if (getattr(wl, 'apply', None) is not None and body_d2.type is wl.apply
+                and '1' in body_d2.attr_list):
+            _eq_defn_ap2 = (getattr(wl, 'eqsym', None)
+                            or wl.syntax_module.symbol_table.get('='))
+            if _eq_defn_ap2 is not None:
+                _eq_ap2 = PsiTerm(type_def=_eq_defn_ap2)
+                _eq_ap2.attr_list = {'1': result, '2': body_d2}
+                self.push_goal(GoalType.PROVE, _eq_ap2, None, None)
+                return True
+
         # Body is a compound with possible embedded user-function sub-terms
         # (e.g. [X|app2(L1,L2)] where app2 is a recursive function).
         # Push EVAL goals for each embedded user-function call onto the goal
