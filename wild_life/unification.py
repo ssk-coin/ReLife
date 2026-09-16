@@ -615,6 +615,7 @@ class Unifier:
 
         # Sort-constrained variables (X:sort — marked SORT_VAR by the parser, or
         # X:ran where ran is a FUNCTION sort) are treated as bindable variables.
+        from wild_life.data_structures import DefType as _DefType_fn
         if not u_is_var and not v_is_var:
             from wild_life.data_structures import DefType, QUOTED_TRUE, SORT_VAR
             # SORT_VAR flag: set by parser for any X:sort syntax
@@ -650,6 +651,15 @@ class Unifier:
                     if not self._unify_types(u, v):
                         return False
                 self.bind(v, u)   # v.coref = u; v.deref() = u (sort kept)
+                self._wakeup_resid(u, v)
+            elif (not v_is_var and u.value is None and not u.attr_list
+                    and u.type is not None and u.type is not WL.top
+                    and u.type.type == _DefType_fn.FUNCTION
+                    and u.type._builtin_func is None and u.type.rule):
+                # A call standing where its value belongs — `X:ran` meeting the
+                # number ran comes to.  A function symbol is not a sort, so
+                # there is nothing to check: the call becomes its value.
+                self.bind(u, v)
                 self._wakeup_resid(u, v)
             elif u_is_sort_var and u_is_fn_sort and not v_is_var:
                 # Sort-constrained variable (X:sort) vs ground/non-variable term.

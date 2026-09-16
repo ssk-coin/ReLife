@@ -2521,6 +2521,26 @@ def bi_is(goal: PsiTerm, eng) -> bool:
     return _unify(eng, arg1, result)
 
 
+def _find_embedded_user_func(t: PsiTerm, _seen: set = None, _depth: int = 0):
+    """The first user-defined function call inside t, below t itself."""
+    if t is None or _depth > 20:
+        return None
+    if _seen is None:
+        _seen = set()
+    t = t.deref()
+    if id(t) in _seen:
+        return None
+    _seen.add(id(t))
+    for ref in t.attr_list.values():
+        sub = ref.deref()
+        if _is_user_function(sub):
+            return sub
+        found = _find_embedded_user_func(sub, _seen, _depth + 1)
+        if found is not None:
+            return found
+    return None
+
+
 def _push_deferred_cmp(goal: PsiTerm, eng, a, b, oka, okb) -> bool:
     """If one arg is an unevaluated user function, defer via EVAL + PROVE.
 
@@ -2558,6 +2578,22 @@ def _push_deferred_cmp(goal: PsiTerm, eng, a, b, oka, okb) -> bool:
     if not okb and b is not None:
         if _defer(b, a, False):
             return True
+
+    # A call buried inside the expression holds the comparison up just as much:
+    # `A*A =:= B*B+C*C` over A:digit, B:digit, C:digit asks each digit for its
+    # value.  One is reduced and the comparison is put back, so the next one is
+    # found on the way round.
+    for _side in (a, b):
+        if _side is None:
+            continue
+        _sub = _find_embedded_user_func(_side)
+        if _sub is None:
+            continue
+        _R = wl.make_var()
+        eng.push_goal(GoalType.PROVE, goal, _DEFRULES, None)
+        eng.push_goal(GoalType.UNIFY, _sub, _R, None)
+        eng.push_goal(GoalType.EVAL, _sub, _R, _sub.type.rule)
+        return True
 
     # Neither side is a call waiting to be made, so what is missing is a value.
     # The comparison suspends on the variables that hold it up and is proven
