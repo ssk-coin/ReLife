@@ -31,6 +31,26 @@ _ARITH_OPS_NON_STRICT = frozenset((
     'round', 'truncate', 'exp', 'log', 'sin', 'cos', 'tan',
 ))
 
+# Built-in functions whose reduction a such-that rule may have to wait for:
+# the guard is what binds their arguments.
+_DEFERRABLE_BUILTIN_FUNCS = frozenset((
+    'psi2str', 'str2psi', 'strcon', 'makestr', 'strlen', 'substr',
+    'root_sort', 'children', 'length', 'append', 'features', 'chr', 'int2str',
+))
+
+
+def _leftmost_goal(t: 'PsiTerm', wl) -> 'PsiTerm':
+    """The first goal a conjunction runs, or t itself when it is not one."""
+    seen = 0
+    t = t.deref()
+    while seen < 64:
+        if t.type is not wl.commasym or '1' not in t.attr_list:
+            return t
+        t = t.attr_list['1'].deref()
+        seen += 1
+    return t
+
+
 def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
     """Freeze the arithmetic that a non-strict call's arguments stand for.
 
@@ -502,12 +522,19 @@ def _eval_cond_functional(cond_term: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
     else_g = args[2].deref() if len(args) >= 3 else None
 
     mark = eng.trail.mark()
+    eng._arith_error = False
     cond_ok = prove_cond(cond_g, eng)
 
     if cond_ok:
         return _eval_body_to_result(then_g, result, eng)
     else:
         eng.trail.undo_to(mark)
+        # A condition that could not be computed at all — `(N/M) =:= floor(N/M)`
+        # with M zero — is not a condition that came out false, so the
+        # alternative is not taken and the call has no value.
+        if getattr(eng, '_arith_error', False):
+            eng._arith_error = False
+            return False
         if else_g is None:
             return False
         return _eval_body_to_result(else_g, result, eng)
@@ -714,6 +741,14 @@ class Engine:
         wl = self.wl
         _mark_non_strict_args(body, self)
         head = head.deref()
+        # A head written through a functor variable — `X(Args)`, which parses as
+        # apply(Args, functor => X) — names the predicate X stands for, so the
+        # clause is filed under that rather than under apply.
+        if getattr(wl, 'apply', None) is not None and head.type is wl.apply:
+            from wild_life.built_ins import _apply_to_call
+            _head_call = _apply_to_call(head, self)
+            if _head_call is not None:
+                head = _head_call
         defn = head.type
         if defn is None:
             return False
@@ -1182,6 +1217,20 @@ class Engine:
                     self.goal_count += 1
                     return True
 
+        # A function standing where a goal is expected is evaluated, and the
+        # value it comes to is then proven in its place: `f(44)` with
+        # `f(X:int) -> write(boo,X)` writes once, and `call(p(X))` with
+        # `call(X) -> (S | (X,S=true ; S=false))` holds for the X that make
+        # p(X) hold and not for the others.
+        if defn is not None and defn.type == DefType.FUNCTION and rules:
+            _fn_res = PsiTerm(type_def=wl.top)
+            self.goal_stack = aim.next
+            self.goal_count += 1
+            # Pushed in LIFO order: evaluate, then prove what it came to.
+            self.push_goal(GoalType.PROVE, _fn_res, _DEFRULES, None)
+            self.push_goal(GoalType.EVAL, thegoal, _fn_res, rules)
+            return True
+
         # Filter out retracted clauses
         active = [(h, b) for (h, b) in (rules if rules else [])
                   if h is not None and b is not None]
@@ -1400,7 +1449,12 @@ class Engine:
         mark = self.trail.mark()
         # A call that cannot be reduced here stands as its own value, as it did
         # when the reduction was attempted before the guard.
-        evaled = _eval_user_func_sync(call, self) or call
+        from wild_life.built_ins import _try_eval_string_func as _tesf_stv
+        evaled = _eval_user_func_sync(call, self)
+        if evaled is None:
+            evaled = _tesf_stv(call, self)
+        if evaled is None:
+            evaled = call
         ok = (self.unifier.unify(val_part, evaled)
               and self.unifier.unify(val_part, result))
         if not ok:
@@ -1414,6 +1468,47 @@ class Engine:
         functions like largeterm(1000) don't blow the Python call stack.
         """
         return _push_embedded_func_goals(t, self, visited)
+
+    def _preeval_funct_args(self, funct: 'PsiTerm') -> None:
+        """Reduce the call's arguments before its head is matched.
+
+        This enables patterns like f(g(x)) where g(x) has to be evaluated
+        before pattern matching against f's head (e.g. rev(reverse(L),[])).
+
+        The reduced argument is written back through the trail.  A rule whose
+        head does not match undoes what the reduction bound on its way out, so
+        an untrailed write would leave the next rule looking at the reduced
+        term with its bindings gone — `split(2,[],ll(C,[1|l(C)]))` would see a
+        couple whose left feature had become @ again.
+        """
+        from wild_life.built_ins import (
+            _eval_user_func_sync, _is_user_function,
+            _try_eval_string_func, _try_eval_arith_to_term,
+            _eval_embedded_user_funcs,
+        )
+        for _key in list(funct.attr_list.keys()):
+            _attr = funct.attr_list[_key].deref()
+            if _is_user_function(_attr):
+                _evaled = _eval_user_func_sync(_attr, self)
+                if _evaled is not None and _evaled is not _attr:
+                    self.unifier.set_attr(funct, _key, _evaled)
+            else:
+                # Try built-in function evaluation (features, root_sort, etc.)
+                _evaled = _try_eval_string_func(_attr, self)
+                if _evaled is not None:
+                    self.unifier.set_attr(funct, _key, _evaled)
+                else:
+                    _evaled = _try_eval_arith_to_term(_attr, self)
+                    if _evaled is not None:
+                        self.unifier.set_attr(funct, _key, _evaled)
+                    elif _attr.attr_list:
+                        # Compound arg: synchronously evaluate any embedded
+                        # user-function calls so that e.g.
+                        #   where((B,Table) & copy_body(...))
+                        # gets copy_body evaluated BEFORE where's body (@)
+                        # discards the argument.  Without this, bodify_list(B)
+                        # would run on the goal stack with B still unbound.
+                        _eval_embedded_user_funcs(_attr, self, 0, set())
 
     def eval_aim(self) -> bool:
         """Handle an 'eval' goal (function evaluation)."""
@@ -1526,6 +1621,11 @@ class Engine:
                             if val_part is None or cond_part is None:
                                 return False
                             head_d = head.deref()
+                    # Reduce the call's arguments before matching, the same as
+                    # an unguarded rule does further down: `q_sort(l(LM))` has
+                    # to become q_sort([1]) before the head `q_sort([H|T])`
+                    # can be matched against it.
+                    self._preeval_funct_args(funct)
                     mark = self.trail.mark()
                     ok = self.unifier.unify(funct, head)
                     if not ok:
@@ -1551,14 +1651,29 @@ class Engine:
                 # _eval_embedded_user_funcs already resolves `Y.A` in place.
                 _st_call = None
                 _vp_d = val_part.deref()
-                if _is_user_function(_vp_d):
+                # A built-in call standing as the value waits too: the guard is
+                # what binds its arguments, so `q_sort([H|T]) -> append(L1,
+                # [H|L2]) | …, L1 = q_sort(…), L2 = q_sort(…)` can only reduce
+                # the append once the guard has run.
+                _vp_sym = (_vp_d.type.keyword.symbol
+                           if (_vp_d.type and _vp_d.type.keyword) else '')
+                _vp_is_bi_call = (bool(_vp_d.attr_list)
+                                  and _vp_sym in _DEFERRABLE_BUILTIN_FUNCS)
+                if _is_user_function(_vp_d) or _vp_is_bi_call:
                     _st_call = PsiTerm(type_def=_vp_d.type)
                     _st_call.attr_list = dict(_vp_d.attr_list)
                     _st_call.flags = _vp_d.flags
                     self.trail.trail_psi(_vp_d, 'coref')
                     _vp_d.coref = PsiTerm(type_def=wl.top)
                 _cond_d = cond_part.deref()
-                _eval_embedded_user_funcs(_cond_d, self, 0, set())
+                # Reduce calls embedded in the guard — `genChildren(children(X),
+                # A)` needs its children(X) argument reduced before the
+                # predicate runs.  A conjunction is proven left to right, so
+                # only its leftmost goal is ready: a later one is still waiting
+                # on what the goals before it will bind, and reducing
+                # `L1 = q_sort(l(LM))` before LM exists is how qsort2 lost its
+                # first solution.
+                _eval_embedded_user_funcs(_leftmost_goal(_cond_d, wl), self, 0, set())
                 if _st_call is None:
                     # Any other value is reduced up front: its sub-terms are
                     # rewritten in place, which a later backtrack into the
@@ -1602,30 +1717,7 @@ class Engine:
             _eval_user_func_sync, _is_user_function,
             _try_eval_string_func, _try_eval_arith_to_term,
         )
-        for _key in list(funct.attr_list.keys()):
-            _attr = funct.attr_list[_key].deref()
-            if _is_user_function(_attr):
-                _evaled = _eval_user_func_sync(_attr, self)
-                if _evaled is not None and _evaled is not _attr:
-                    funct.attr_list[_key] = _evaled
-            else:
-                # Try built-in function evaluation (features, root_sort, etc.)
-                _evaled = _try_eval_string_func(_attr, self)
-                if _evaled is not None:
-                    funct.attr_list[_key] = _evaled
-                else:
-                    _evaled = _try_eval_arith_to_term(_attr, self)
-                    if _evaled is not None:
-                        funct.attr_list[_key] = _evaled
-                    elif _attr.attr_list:
-                        # Compound arg: synchronously evaluate any embedded
-                        # user-function calls so that e.g.
-                        #   where((B,Table) & copy_body(...))
-                        # gets copy_body evaluated BEFORE where's body (@)
-                        # discards the argument.  Without this, bodify_list(B)
-                        # would run on the goal stack with B still unbound.
-                        from wild_life.built_ins import _eval_embedded_user_funcs
-                        _eval_embedded_user_funcs(_attr, self, 0, set())
+        self._preeval_funct_args(funct)
 
         # Arity check: if head has feature keys not present in funct, this rule
         # requires arguments that the call doesn't provide.  Skip the rule —
@@ -1635,14 +1727,15 @@ class Engine:
         _funct_keys_set = set(funct.attr_list.keys())
         _head_only_keys = set(_head_d_arity.attr_list.keys()) - _funct_keys_set
         if _head_only_keys:
-            # Funct has fewer args than this rule requires — partial application.
-            # In Wild Life, calling a function with fewer args than its head needs
-            # is always a partial application: return funct as a constructor term.
-            if len(active) == 1:
-                # Last rule: return funct as partial application (constructor semantics).
-                return self.unifier.unify(result, funct)
-            # More rules exist; skip this one (try next via choice point).
-            return False
+            # A rule asks for features the call does not carry, so the call is
+            # a partial application: it may yet gain them, and which rule
+            # applies is not settled.  It stands for itself rather than
+            # reducing through a later rule — `X = f(b => 0)` with
+            # `f(a => int) -> 1.` and `f(b => int) -> 2.` answers f(b => 0),
+            # and only `X(a => string)` picks a rule.
+            if _rule_cp is not None:
+                self.drop_choice_point(_rule_cp)
+            return self.unifier.unify(result, funct)
 
         # A rule head that names the same variable twice asks for the very same
         # psi-term in both places.  `f(X,X)` therefore does not apply to
@@ -1855,6 +1948,19 @@ class Engine:
                 self.trail.undo_to(mark)
                 return False
             return True
+
+        # Body is a call through a functor variable — twice's body F(F(X)).
+        # Put it through '=', which rebuilds the call once the functor is known
+        # and otherwise suspends on it, so that binding F later still reduces.
+        if (getattr(wl, 'apply', None) is not None and body_d2.type is wl.apply
+                and '1' in body_d2.attr_list):
+            _eq_defn_ap2 = (getattr(wl, 'eqsym', None)
+                            or wl.syntax_module.symbol_table.get('='))
+            if _eq_defn_ap2 is not None:
+                _eq_ap2 = PsiTerm(type_def=_eq_defn_ap2)
+                _eq_ap2.attr_list = {'1': result, '2': body_d2}
+                self.push_goal(GoalType.PROVE, _eq_ap2, None, None)
+                return True
 
         # Body is a compound with possible embedded user-function sub-terms
         # (e.g. [X|app2(L1,L2)] where app2 is a recursive function).

@@ -621,6 +621,20 @@ def _term_to_display_string(t: PsiTerm, eng) -> str:
     return buf.getvalue()
 
 
+def _is_list_term(t: PsiTerm, eng) -> bool:
+    """Whether t is a list — a cons cell or the empty list.
+
+    `nil` and `cons` are separate sorts under `list`, so a check against cons
+    alone leaves out [], and `append([],L)` or `length([])` would not reduce.
+    """
+    if t is None or t.type is None:
+        return False
+    wl = eng.wl
+    if wl.nil is not None and t.type.is_subtype_of(wl.nil):
+        return True
+    return wl.alist is not None and t.type.is_subtype_of(wl.alist)
+
+
 def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     """Try to evaluate string built-in functions (psi2str, str2psi, strcon).
 
@@ -830,7 +844,7 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None:
             return None
         lst = a1.deref()
-        if lst.type is None or not lst.type.is_subtype_of(eng.wl.alist):
+        if not _is_list_term(lst, eng):
             return None
         return eng.wl.make_integer(len(_list_to_python(lst, eng)))
 
@@ -843,7 +857,7 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None or a2 is None:
             return None
         head = a1.deref()
-        if head.type is None or not head.type.is_subtype_of(eng.wl.alist):
+        if not _is_list_term(head, eng):
             return None
         result = a2.deref()
         for item in reversed(_list_to_python(head, eng)):
@@ -2260,6 +2274,7 @@ def _report_division_problem(t: 'PsiTerm', eng, _depth: int = 0) -> bool:
             if _msg_rp is not None:
                 _sys_rp.stderr.write(
                     f"*** Error: {_msg_rp} in {_term_to_str(t, eng)}.\n")
+                eng._arith_error = True
                 return True
     if _sym_rp in ('//', '/'):
         import sys as _sys_div
@@ -2272,10 +2287,12 @@ def _report_division_problem(t: 'PsiTerm', eng, _depth: int = 0) -> bool:
                     _sys_div.stderr.write(
                         f"*** Warning: argument '{_term_to_str(arg.deref(), eng)}' "
                         f"of integer division is not an integer.\n")
+                    eng._arith_error = True
                     return True
         if ok2 and v2 == 0:
             _sys_div.stderr.write(
                 f"*** Error: division by zero in {_term_to_str(t, eng)}.\n")
+            eng._arith_error = True
             return True
     for sub in t.attr_list.values():
         if _report_division_problem(sub, eng, _depth + 1):
@@ -2541,6 +2558,28 @@ def _push_deferred_cmp(goal: PsiTerm, eng, a, b, oka, okb) -> bool:
     if not okb and b is not None:
         if _defer(b, a, False):
             return True
+
+    # Neither side is a call waiting to be made, so what is missing is a value.
+    # The comparison suspends on the variables that hold it up and is proven
+    # again when one of them is bound, which is how `pyth(A,B,C)` can state
+    # `A*A =:= B*B+C*C` before A, B and C are known.
+    _cmp_vars: list = []
+    _cmp_seen: set = set()
+    for _side in (a, b):
+        if _side is not None:
+            _collect_arith_vars(_side, wl, _cmp_vars, _cmp_seen)
+    if _cmp_vars:
+        from wild_life.data_structures import Goal as _CmpPredGoal
+        _pend = _CmpPredGoal(GoalType.PROVE, goal, _DEFRULES, None, pending=True)
+        for _cv in _cmp_vars:
+            _attach_arith_resid(_cv, wl, _pend, eng)
+        return True
+    # Nothing is missing, so the operands are simply not computable — a
+    # division by zero among them is reported here rather than passed off as a
+    # comparison that merely did not hold.
+    for _side in (a, b):
+        if _side is not None and _report_division_problem(_side, eng):
+            break
     return False
 
 
@@ -4870,6 +4909,76 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     # (and(X,Y), or(X,Y), not(X), xor(X,Y)) from psi-terms that happen to use
     # 'and'/'or' as a constructor name with the wrong arity (e.g. and(B) with
     # only 1 argument, which should be treated as a regular psi-term).
+    # A such-that term standing as a value — `A = (X | call(p(X)))` — proves
+    # its guard and takes the value part, the same as a such-that rule body.
+    _st_side = None
+    for _cand in (b_d, a_d):
+        if (_cand.type is not None and _cand.type is eng.wl.such_that
+                and '1' in _cand.attr_list and '2' in _cand.attr_list):
+            _st_side = _cand
+            break
+    if _st_side is not None:
+        _st_other = a_d if _st_side is b_d else b_d
+        _st_val = _st_side.attr_list['1']
+        _st_cond = _st_side.attr_list['2'].deref()
+        # Pushed in LIFO order: the guard runs first, then the value is taken.
+        eng.push_goal(GoalType.UNIFY, _st_other, _st_val, None)
+        eng.push_goal(GoalType.PROVE, _st_cond, _DEFRULES_SENTINEL, None)
+        return True
+
+    # An arithmetic comparison in functional position has a boolean value:
+    # `X = (1 =< 7)` answers true, and part.lf writes the test as
+    # `(1 =< X) = true`.  While an operand is still unknown the comparison
+    # suspends on it, so `leq(7,N)` can constrain N before N is known.
+    _CMP_FUNC_SYMS = frozenset(('>', '<', '>=', '=<', '=:=', '=\\='))
+
+    def _is_cmp_expr(t):
+        from wild_life.data_structures import NON_STRICT_TERM as _NST_CMP
+        return (_get_sym(t) in _CMP_FUNC_SYMS and '1' in t.attr_list
+                and '2' in t.attr_list and not (t.flags & _NST_CMP))
+
+    _b_is_cmp = _is_cmp_expr(b_d)
+    _a_is_cmp = (not _b_is_cmp) and _is_cmp_expr(a_d)
+    if _b_is_cmp or _a_is_cmp:
+        _cmp_expr, _cmp_other = (b_d, a_d) if _b_is_cmp else (a_d, b_d)
+        _ok1_cmp, _v1_cmp = _eval_arith(_cmp_expr.attr_list['1'], eng)
+        _ok2_cmp, _v2_cmp = _eval_arith(_cmp_expr.attr_list['2'], eng)
+        if _ok1_cmp and _ok2_cmp:
+            _sym_cmp = _get_sym(_cmp_expr)
+            _truth_cmp = {
+                '>': _v1_cmp > _v2_cmp, '<': _v1_cmp < _v2_cmp,
+                '>=': _v1_cmp >= _v2_cmp, '=<': _v1_cmp <= _v2_cmp,
+                '=:=': _v1_cmp == _v2_cmp, '=\\=': _v1_cmp != _v2_cmp,
+            }[_sym_cmp]
+            return _unify(eng, _cmp_other,
+                          _make_atom(eng, 'true' if _truth_cmp else 'false'))
+        # The comparison itself is not an arithmetic operator, so its two
+        # operands are walked rather than the term as a whole.
+        _cmp_vars: list = []
+        _cmp_seen: set = set()
+        for _ck in ('1', '2'):
+            _collect_arith_vars(_cmp_expr.attr_list[_ck], eng.wl,
+                                _cmp_vars, _cmp_seen)
+        if _cmp_vars:
+            from wild_life.data_structures import Goal as _CmpGoal, SORT_VAR as _SV_CMP
+            _eq_defn_cmp = (getattr(eng.wl, 'eqsym', None) or
+                            eng.wl.syntax_module.symbol_table.get('='))
+            _eq_cmp = PsiTerm(type_def=_eq_defn_cmp)
+            _eq_cmp.attr_list['1'] = _cmp_other
+            _eq_cmp.attr_list['2'] = _cmp_expr
+            _eq_cmp._resid_marker = True
+            _pend_cmp = _CmpGoal(GoalType.PROVE, _eq_cmp, None, None, pending=True)
+            for _cv in _cmp_vars:
+                _attach_arith_resid(_cv, eng.wl, _pend_cmp, eng)
+            _other_cur_cmp = _cmp_other.deref()
+            if (_other_cur_cmp.value is None and not _other_cur_cmp.attr_list
+                    and (_other_cur_cmp.type is eng.wl.top
+                         or _other_cur_cmp.type is None
+                         or bool(_other_cur_cmp.flags & _SV_CMP))):
+                _attach_bool_resid(_other_cur_cmp, eng.wl, _pend_cmp, eng)
+            return True
+        return False
+
     _b_bool_unevaluated = (b_evaled is None) and _is_proper_bool_expr(b_d)
     # Also handle: bool expr on the LHS (e.g. and(B,C) = true)
     # We check a_d only if b_d is not already a bool expr (to avoid double-handling).
@@ -5121,6 +5230,15 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         # Arithmetic expression that couldn't be fully evaluated (has variables).
         wl = eng.wl
         b_sym = b_d.type.keyword.symbol if b_d.type and b_d.type.keyword else ''
+        # `A = +(B)` is a plus waiting for its second operand.  It cannot be
+        # evaluated and so leaves no residuation, but the operand it does have
+        # still has to be a number, which is what makes B display as real.
+        if (b_sym == '+' and not _b_is_non_strict
+                and set(b_d.attr_list.keys()) == {'1'}):
+            _plus_arg = b_d.attr_list['1'].deref()
+            if _plus_arg.value is None and not _plus_arg.attr_list:
+                _mark_real_sort(_plus_arg, eng.wl, eng)
+
         if b_sym in _ARITH_OPS_SET and not _b_is_non_strict and _is_complete_arith_expr(b_d):
             # Mark all free variables in the arithmetic expression (and the LHS
             # if free) as constrained to sort real.  This ensures that even when
@@ -5503,6 +5621,7 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         a_str = _try_eval_string_func(a_d, eng)
         if a_str is not None:
             a_d = a_str
+
     return _unify(eng, a_d, b_d)
 
 
@@ -5525,6 +5644,103 @@ def _term_is_unbound(t: Optional[PsiTerm], eng) -> bool:
     wl = eng.wl
     return (t.value is None and not t.attr_list
             and (t.type is None or t.type is wl.top))
+
+
+def _sort_compare_args(goal, eng):
+    """The two sorts a sort-comparison predicate compares, or None.
+
+    An argument that is a call is reduced first: `features(X) :== []` asks
+    about the sort of the feature list, not of the call.
+    """
+    a, b = _get_two_args(goal)
+    if a is None or b is None:
+        return None
+    sorts = []
+    for _arg in (a, b):
+        _d = _arg.deref()
+        _ev = _try_eval_any_func(_d, eng)
+        if _ev is None:
+            _ev = _try_eval_string_func(_d, eng)
+        if _ev is not None:
+            _d = _ev.deref()
+        if _d.type is None:
+            return None
+        sorts.append(_d.type)
+    return sorts[0], sorts[1]
+
+
+def bi_sort_eq(goal: PsiTerm, eng) -> bool:
+    """X :== Y — X and Y have the same sort."""
+    sorts = _sort_compare_args(goal, eng)
+    return sorts is not None and sorts[0] is sorts[1]
+
+
+def bi_sort_ne(goal: PsiTerm, eng) -> bool:
+    """X :\\== Y — X and Y have different sorts."""
+    sorts = _sort_compare_args(goal, eng)
+    return sorts is not None and sorts[0] is not sorts[1]
+
+
+def bi_sort_le(goal: PsiTerm, eng) -> bool:
+    """X :=< Y — X's sort is Y's sort or lies under it."""
+    sorts = _sort_compare_args(goal, eng)
+    return sorts is not None and sorts[0].is_subtype_of(sorts[1])
+
+
+def bi_sort_lt(goal: PsiTerm, eng) -> bool:
+    """X :< Y — X's sort lies strictly under Y's."""
+    sorts = _sort_compare_args(goal, eng)
+    return (sorts is not None and sorts[0] is not sorts[1]
+            and sorts[0].is_subtype_of(sorts[1]))
+
+
+def bi_sort_ge(goal: PsiTerm, eng) -> bool:
+    """X :>= Y — X's sort is Y's sort or lies above it."""
+    sorts = _sort_compare_args(goal, eng)
+    return sorts is not None and sorts[1].is_subtype_of(sorts[0])
+
+
+def bi_sort_gt(goal: PsiTerm, eng) -> bool:
+    """X :> Y — X's sort lies strictly above Y's."""
+    sorts = _sort_compare_args(goal, eng)
+    return (sorts is not None and sorts[0] is not sorts[1]
+            and sorts[1].is_subtype_of(sorts[0]))
+
+
+def bi_sort_not_lt(goal: PsiTerm, eng) -> bool:
+    """X :\\< Y — X's sort does not lie strictly under Y's."""
+    return not bi_sort_lt(goal, eng)
+
+
+def bi_sort_not_le(goal: PsiTerm, eng) -> bool:
+    """X :\\=< Y — X's sort neither is Y's nor lies under it."""
+    return not bi_sort_le(goal, eng)
+
+
+def bi_sort_not_gt(goal: PsiTerm, eng) -> bool:
+    """X :\\> Y — X's sort does not lie strictly above Y's."""
+    return not bi_sort_gt(goal, eng)
+
+
+def bi_sort_not_ge(goal: PsiTerm, eng) -> bool:
+    """X :\\>= Y — X's sort neither is Y's nor lies above it."""
+    return not bi_sort_ge(goal, eng)
+
+
+def bi_sort_comparable(goal: PsiTerm, eng) -> bool:
+    """X :>< Y — the two sorts lie on one chain, either way round."""
+    sorts = _sort_compare_args(goal, eng)
+    return (sorts is not None
+            and (sorts[0].is_subtype_of(sorts[1])
+                 or sorts[1].is_subtype_of(sorts[0])))
+
+
+def bi_sort_incomparable(goal: PsiTerm, eng) -> bool:
+    """X :\\>< Y — neither sort lies under the other."""
+    sorts = _sort_compare_args(goal, eng)
+    return (sorts is not None
+            and not sorts[0].is_subtype_of(sorts[1])
+            and not sorts[1].is_subtype_of(sorts[0]))
 
 
 def bi_identical(goal: PsiTerm, eng) -> bool:
@@ -7505,7 +7721,13 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
                 # 自モジュール述語が来たらインポート分を先に出力
                 flush_imported()
                 func_name = defn.keyword.symbol if defn.keyword else '?'
-                if not active_rules:
+                if not active_rules and getattr(defn, 'is_persistent', False):
+                    # A global that has not been assigned yet holds a plain @.
+                    _note_global_used(eng, defn)
+                    print()
+                    print(f"% '{func_name}' is a user-defined global variable "
+                          f"worth @.")
+                elif not active_rules:
                     print(f"% '{func_name}' is a user-defined predicate with an empty definition.\n")
                 else:
                     _bi_listing_one(defn, wl, imported=False)
@@ -8681,6 +8903,18 @@ def register_all(wl) -> None:
     _reg('random', bi_rand)
     _reg('initrandom', bi_initrandom)
 
+    # Sort comparison — these compare the sorts of their two arguments.  They
+    # are declared as operators in the syntax module, so that is where their
+    # definitions belong.
+    for _sc_name, _sc_fn in (
+            (':==', bi_sort_eq), (':\\==', bi_sort_ne),
+            (':=<', bi_sort_le), (':<', bi_sort_lt),
+            (':>=', bi_sort_ge), (':>', bi_sort_gt),
+            (':\\=<', bi_sort_not_le), (':\\<', bi_sort_not_lt),
+            (':\\>=', bi_sort_not_ge), (':\\>', bi_sort_not_gt),
+            (':><', bi_sort_comparable), (':\\><', bi_sort_incomparable)):
+        _reg(_sc_name, _sc_fn, module=wl.syntax_module)
+
     # System
     _reg('halt', bi_halt)
     _reg('quit', bi_halt)   # alias for halt (not in original Wild Life)
@@ -8747,16 +8981,23 @@ def register_all(wl) -> None:
     _reg('non_strict', _bi_non_strict)
 
     def _bi_delay_check(goal, eng):
-        """delay_check(S): hold S's delay rules until a term narrows past S.
+        """delay_check(S, …): hold S's prototype and delay rules until a term
+        of that sort is modified.
 
-        Without it a term reaching S fires them straight away.  Under it a
-        term that is merely S may still narrow further, so the rules wait for
-        a proper sub-sort: `A = person` stays person, while a term that turns
-        out to be cleopatra fires person's rule.
+        Without it a term reaching S takes S's prototype and fires its rules
+        straight away.  Under it merely being S is not yet the final word on
+        what the term is, so `A = person` stays person, and the rules run once
+        the term gains a feature.  Several sorts may be named in one call.
         """
-        arg = _get_one_arg(goal)
-        if arg is not None and arg.type is not None:
-            arg.type.always_check = False
+        i = 1
+        while True:
+            arg = goal.attr_list.get(str(i))
+            if arg is None:
+                break
+            arg_d = arg.deref()
+            if arg_d.type is not None:
+                arg_d.type.always_check = False
+            i += 1
         return True
     _reg('delay_check', _bi_delay_check)
 
@@ -8777,24 +9018,33 @@ def register_all(wl) -> None:
     _reg('dynamic', _bi_dynamic)
 
     def _bi_persistent(goal, eng):
-        """persistent(P): declare P as a persistent (global) function variable.
+        """persistent(X1, X2, ...) — declare global variables that keep their
+        value across garbage collection.
 
-        This initializes P's definition as a FUNCTION with an empty rule list
-        so that subsequent `P <<- Value` calls use the global-variable (Mode 1)
-        assignment path in bi_store_arrow — updating the shared Definition's
-        rule list rather than destructively modifying a single PsiTerm instance.
+        Each name's definition is initialised as a FUNCTION with an empty rule
+        list, so that a later `X <<- Value` takes the global-variable path in
+        bi_store_arrow, and is recorded as a global so that a query reading one
+        is worth keeping.
         """
-        arg = goal.attr_list.get('1')
-        if arg is None:
-            return True
-        arg_d = arg.deref()
-        defn = arg_d.type
-        if defn is not None:
-            # Ensure the definition is typed as FUNCTION with an initialized rule list
+        if not goal.attr_list:
+            return False
+        i = 1
+        while True:
+            arg = goal.attr_list.get(str(i))
+            if arg is None:
+                break
+            i += 1
+            arg_d = arg.deref()
+            defn = arg_d.type
+            if defn is None:
+                continue
             if defn.rule is None:
                 defn.rule = []
             if defn.type not in (DefType.FUNCTION, DefType.PREDICATE):
                 defn.type = DefType.FUNCTION
+            defn.is_persistent = True
+            if defn not in wl.global_defs:
+                wl.global_defs.append(defn)
         return True
     _reg('persistent', _bi_persistent)
 
