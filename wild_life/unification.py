@@ -314,6 +314,8 @@ class Unifier:
         # If we encounter the same pair again (via circular attrs), we return True
         # immediately (the rational-tree assumption: cyclic terms can be unified).
         self._unifying_pairs: set = set()
+        # Set while asking whether a narrowing could exist at all.
+        self._skip_prototypes: bool = False
         # ids of psi-terms whose conditional sort is being checked.
         self._proving_sort: set = set()
         # ids of psi-terms whose :: Sort(attrs). prototype is being applied.
@@ -350,6 +352,12 @@ class Unifier:
         leaves Q as julius, not as julius(last_name => caesar).
         """
         if t.type is None or not t.attr_list:
+            return True
+        if self._skip_prototypes:
+            # Asked only whether some narrowing could make a rule fit, and a
+            # prototype is a consequence of narrowing, not a bar to it: a call
+            # of `i(X:t1(l => t3))` against `i(t2)` waits on X rather than
+            # ruling the rule out over `:: t2(l => t4)`.
             return True
         # A prototype is inherited: `:: a(x=>c).` with `b <| a` gives every b
         # an x as well, so the sorts above t's own are collected too.
@@ -740,7 +748,8 @@ class Unifier:
                 # goes on once the term is modified (see _apply_deferred_check).
                 _v_defers = (_v_canon.attr_list == {}
                              and defers_check(_v_canon.type))
-                if (not _v_defers and _v_canon.type is not None
+                if (not _v_defers and not self._skip_prototypes
+                        and _v_canon.type is not None
                         and _v_canon.type is not WL.top
                         and getattr(_v_canon.type, 'prototype_attrs', None)):
                     _proto = _v_canon.type.prototype_attrs
@@ -1470,7 +1479,7 @@ class Unifier:
         self.bind_type(u, child)
 
         # Merge prototype attrs into u (add missing attrs from prototype)
-        proto = child.prototype_attrs
+        proto = {} if self._skip_prototypes else child.prototype_attrs
         for key, proto_val in proto.items():
             if key not in u.attr_list:
                 self.set_attr(u, key, proto_val.deref())

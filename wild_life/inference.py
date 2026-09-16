@@ -362,6 +362,25 @@ def _is_open_head_var(h: 'PsiTerm', wl) -> bool:
             and (h.type is None or h.type is wl.top or bool(h.flags & _SV)))
 
 
+def _is_open_call_term(c: 'PsiTerm', wl) -> bool:
+    """Whether the call's own term can still become something narrower.
+
+    A variable can: `i(X:t1(l => t3))` waits for X and answers once it is an
+    a.  A term the call states outright cannot — `g(t2)` is a t2, so a rule
+    whose head asks for a t1 will never apply to it and simply fails.
+    """
+    from wild_life.data_structures import SORT_VAR as _SV_c
+    if c.type is None or c.type is wl.top:
+        return True
+    if c.flags & _SV_c:
+        return True
+    if c.value is not None:
+        # A number carries features like anything else: `X = 23` waiting on
+        # `h(23(1),…)` is answered by `X = @(1)`.
+        return True
+    return bool(c.resid)
+
+
 def _add_blocker(out: list, t: 'PsiTerm') -> None:
     if not any(b is t for b in out):
         out.append(t)
@@ -456,6 +475,8 @@ def _match_one(c: 'PsiTerm', h: 'PsiTerm', out: list, eng, seen: set,
     for k, hv in h.attr_list.items():
         cv = c.attr_list.get(k)
         if cv is None:
+            if not _is_open_call_term(c, wl):
+                return 'never'
             # The call can still gain the feature.
             _add_blocker(out, c)
             return True
@@ -538,6 +559,8 @@ def _rule_match_status(head: 'PsiTerm', call: 'PsiTerm', eng):
     # `:: I:int | write(I," ")` would report the 0 in `fact(0)`'s head before
     # the call had anything to do with it.
     eng._in_fire_delay = True
+    _was_skipping = eng.unifier._skip_prototypes
+    eng.unifier._skip_prototypes = True
     try:
         _hm: dict = {}
         _cm: dict = {}
@@ -555,6 +578,7 @@ def _rule_match_status(head: 'PsiTerm', call: 'PsiTerm', eng):
                     return 'never'
     finally:
         eng._in_fire_delay = _was_firing
+        eng.unifier._skip_prototypes = _was_skipping
         eng.trail.undo_to(_never_mark)
 
     blockers: list = []
