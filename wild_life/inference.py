@@ -1217,6 +1217,20 @@ class Engine:
                     self.goal_count += 1
                     return True
 
+        # A function standing where a goal is expected is evaluated, and the
+        # value it comes to is then proven in its place: `f(44)` with
+        # `f(X:int) -> write(boo,X)` writes once, and `call(p(X))` with
+        # `call(X) -> (S | (X,S=true ; S=false))` holds for the X that make
+        # p(X) hold and not for the others.
+        if defn is not None and defn.type == DefType.FUNCTION and rules:
+            _fn_res = PsiTerm(type_def=wl.top)
+            self.goal_stack = aim.next
+            self.goal_count += 1
+            # Pushed in LIFO order: evaluate, then prove what it came to.
+            self.push_goal(GoalType.PROVE, _fn_res, _DEFRULES, None)
+            self.push_goal(GoalType.EVAL, thegoal, _fn_res, rules)
+            return True
+
         # Filter out retracted clauses
         active = [(h, b) for (h, b) in (rules if rules else [])
                   if h is not None and b is not None]

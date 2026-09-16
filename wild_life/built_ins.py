@@ -4909,6 +4909,23 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     # (and(X,Y), or(X,Y), not(X), xor(X,Y)) from psi-terms that happen to use
     # 'and'/'or' as a constructor name with the wrong arity (e.g. and(B) with
     # only 1 argument, which should be treated as a regular psi-term).
+    # A such-that term standing as a value — `A = (X | call(p(X)))` — proves
+    # its guard and takes the value part, the same as a such-that rule body.
+    _st_side = None
+    for _cand in (b_d, a_d):
+        if (_cand.type is not None and _cand.type is eng.wl.such_that
+                and '1' in _cand.attr_list and '2' in _cand.attr_list):
+            _st_side = _cand
+            break
+    if _st_side is not None:
+        _st_other = a_d if _st_side is b_d else b_d
+        _st_val = _st_side.attr_list['1']
+        _st_cond = _st_side.attr_list['2'].deref()
+        # Pushed in LIFO order: the guard runs first, then the value is taken.
+        eng.push_goal(GoalType.UNIFY, _st_other, _st_val, None)
+        eng.push_goal(GoalType.PROVE, _st_cond, _DEFRULES_SENTINEL, None)
+        return True
+
     # An arithmetic comparison in functional position has a boolean value:
     # `X = (1 =< 7)` answers true, and part.lf writes the test as
     # `(1 =< X) = true`.  While an operand is still unknown the comparison
