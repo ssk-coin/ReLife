@@ -117,6 +117,28 @@ def compute_lub(d1: Definition, d2: Definition) -> Optional[Definition]:
     return compute_glb(d1, d2)
 
 
+def _fired_rules_of(t: PsiTerm) -> set:
+    """Delay rules this psi-term has already run, by rule identity.
+
+    A term keeps the set as it is narrowed, so `X = b1` running `:: b1 |` does
+    not run it a second time when X narrows to a1 — only `:: a1 |` is owed.
+    """
+    fs = getattr(t, '_delay_rules_fired', None)
+    if fs is None:
+        fs = set()
+        t._delay_rules_fired = fs
+    return fs
+
+
+def _share_fired_rules(u: PsiTerm, v: PsiTerm) -> set:
+    """Join two psi-terms' fired-rule histories into one shared set."""
+    fs = _fired_rules_of(u)
+    fs |= _fired_rules_of(v)
+    u._delay_rules_fired = fs
+    v._delay_rules_fired = fs
+    return fs
+
+
 def defers_check(defn, _depth: int = 0) -> bool:
     """Whether a term of this sort holds its prototype and delay rules back.
 
@@ -983,6 +1005,12 @@ class Unifier:
                             _aar_aa(_v_aa, WL, _pend_aa, self.engine)
                         return True
 
+        # A term that has never run a delay rule is one the reader has just
+        # built: `X = m(1)` on an X that is already an m owes another `mm`,
+        # because the m(1) is its own term and `:: m | write(mm)` has not run
+        # on it.  The two histories join, so nothing runs twice afterwards.
+        self._fire_fresh_sorts(u, v)
+
         # 型の単一化
         if not self._unify_types(u, v):
             return False
@@ -1062,6 +1090,41 @@ class Unifier:
 
         return True
 
+    def _fire_fresh_sorts(self, u: PsiTerm, v: PsiTerm) -> None:
+        """Run the delay rules of a newly built term meeting an existing one."""
+        if self.engine is None or not WL.delay_rules:
+            return
+        if getattr(self.engine, '_in_fire_delay', False):
+            return
+        for term, other in ((u, v), (v, u)):
+            if term.type is None or term.type is WL.top:
+                continue
+            if term.value is not None:
+                # A literal carries its own firing rules (see the deferred
+                # literal pass in _fire_delay_rules_inner); a head's `0` meeting
+                # a call's `4` must not announce itself before the match fails.
+                continue
+            if getattr(term, '_delay_rules_fired', None):
+                continue
+            if not getattr(other, '_delay_rules_fired', None):
+                continue
+            self._fire_delay_rules(term, term.type, use_fired_set=True)
+        _share_fired_rules(u, v)
+
+    def _fire_narrowed(self, term: PsiTerm, other: PsiTerm, new_sort) -> None:
+        """Run the delay rules a sort narrowing has just made applicable.
+
+        Unifying a b1 with a b2 makes the term an a1, and `:: a1 | write('A1')`
+        is what that owes — `:: b1 |` and `:: b2 |` already ran on the two terms
+        that went in, so the shared history of both sides is what we skip.
+        """
+        if self.engine is None or not WL.delay_rules:
+            return
+        if new_sort is None or new_sort is WL.top:
+            return
+        _share_fired_rules(term, other)
+        self._fire_delay_rules(term, new_sort, use_fired_set=True)
+
     def _unify_types(self, u: PsiTerm, v: PsiTerm) -> bool:
         """型を単一化する (GLB = infimum を採用)。
         C版の global_unify() の型処理部分に対応。
@@ -1095,6 +1158,7 @@ class Unifier:
                 import math as _math_ut
                 if not _math_ut.isfinite(v.value) or v.value != int(v.value):
                     return False
+            self._fire_narrowed(v, u, du)
             return self._apply_prototype_attrs(v) and self._prove_sort_condition(v)
         if dv.is_subtype_of(du):
             self.bind_type(u, dv)   # u の型を dv (より特殊) に引き上げ
@@ -1104,6 +1168,7 @@ class Unifier:
                 import math as _math_ut
                 if not _math_ut.isfinite(u.value) or u.value != int(u.value):
                     return False
+            self._fire_narrowed(u, v, dv)
             return self._apply_prototype_attrs(u) and self._prove_sort_condition(u)
 
         # 直交した型 (どちらもサブタイプでない) → 互換性チェック
@@ -1122,6 +1187,10 @@ class Unifier:
         if len(glbs) > 1 and self.engine is not None:
             for alt_glb in reversed(glbs[1:]):
                 alt_psi = PsiTerm(type_def=alt_glb)
+                # The alternative is a stand-in for u, not a term the reader
+                # built, so it inherits u's delay-rule history: coming back
+                # here owes `:: a2 |`, not `:: b1 |` and `:: b2 |` again.
+                alt_psi._delay_rules_fired = _fired_rules_of(u)
                 # The alternative narrows u to the other greatest lower bound
                 # and then redoes the whole unification, because everything
                 # this call goes on to do — merging u and v among it — is
@@ -1140,6 +1209,7 @@ class Unifier:
         glb = glbs[0]
         self.bind_type(u, glb)
         self.bind_type(v, glb)
+        self._fire_narrowed(u, v, glb)
         return (self._apply_prototype_attrs(u) and self._apply_prototype_attrs(v)
                 and self._prove_sort_condition(u) and self._prove_sort_condition(v))
 
@@ -1362,7 +1432,8 @@ class Unifier:
 
         return True
 
-    def _fire_delay_rules(self, u: PsiTerm, new_sort) -> None:  # noqa: E501
+    def _fire_delay_rules(self, u: PsiTerm, new_sort,
+                          use_fired_set: bool = False) -> None:  # noqa: E501
         """グローバル遅延ルール (:: Pattern | Goal) を起動する。
 
         u のソートが new_sort に絞り込まれたとき、パターンのソートが
@@ -1381,7 +1452,8 @@ class Unifier:
         # variables that get "bound" when the rule fires, triggering the int delay.)
         deferred_literal_fires: list = []
         try:
-            self._fire_delay_rules_inner(u, new_sort, deferred_literal_fires)
+            self._fire_delay_rules_inner(u, new_sort, deferred_literal_fires,
+                                         use_fired_set)
         finally:
             self.engine._in_fire_delay = False
         # Fire deferred delays for concrete integer/real literals found in goal copies.
@@ -1413,10 +1485,16 @@ class Unifier:
             self._collect_literal_integers(val_ref, result, visited)
 
     def _fire_delay_rules_inner(self, u: PsiTerm, new_sort,
-                                deferred_literal_fires: list = None) -> None:
+                                deferred_literal_fires: list = None,
+                                use_fired_set: bool = False) -> None:
         """_fire_delay_rules の実処理 (再入禁止ガード外側から呼ぶ)。"""
         wl = WL
+        fired_set = _fired_rules_of(u)
         for rule_inner in wl.delay_rules:
+            if use_fired_set and id(rule_inner) in fired_set:
+                # This term has already run this rule for an earlier, wider
+                # sort of its own: narrowing b1 to a1 owes A1, not B1 again.
+                continue
             # rule_inner is the | (Pattern | Goal) psiterm
             pattern_side = rule_inner.attr_list.get('1')
             goal_side = rule_inner.attr_list.get('2')
@@ -1435,6 +1513,7 @@ class Unifier:
                 # there is nothing more to check on the pattern's sort here.
             if not pat_sort_ok:
                 continue
+            fired_set.add(id(rule_inner))
 
             # Build a copy of pattern AND goal using the SAME shared_map
             # so that variables shared between pattern and goal stay shared.
