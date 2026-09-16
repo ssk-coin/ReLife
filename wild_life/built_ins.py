@@ -6183,6 +6183,27 @@ def bi_once(goal: PsiTerm, eng) -> bool:
     return result
 
 
+def _all_builtin_goals(t: 'PsiTerm', eng, _depth: int = 0) -> bool:
+    """Whether t is a goal made only of built-in predicates.
+
+    cond/2 calls no definition of the user's own, but `(write(X),nl)` is not
+    one — it is the printing cond/2 is there to do.
+    """
+    if t is None or _depth > 20:
+        return False
+    t = t.deref()
+    defn = t.type
+    if defn is None:
+        return False
+    if defn is eng.wl.commasym or defn is eng.wl.life_or:
+        a1 = t.attr_list.get('1')
+        a2 = t.attr_list.get('2')
+        return (a1 is not None and a2 is not None
+                and _all_builtin_goals(a1, eng, _depth + 1)
+                and _all_builtin_goals(a2, eng, _depth + 1))
+    return defn._builtin_func is not None
+
+
 def _eval_as_bool_func(t: 'PsiTerm', eng, _depth: int = 0) -> 'Optional[bool]':
     """Evaluate *t* as a boolean function expression.
 
@@ -6238,21 +6259,27 @@ def _eval_as_bool_func(t: 'PsiTerm', eng, _depth: int = 0) -> 'Optional[bool]':
             return False
         return None
 
-    # ── Built-in FUNCTION: arithmetic comparisons ──
+    # ── Arithmetic comparisons ──
+    # A comparison reads as a boolean wherever one is wanted, whether it is
+    # registered as a function or as a predicate: `X > 0.698 and X < 0.702`
+    # is the condition cond/2 is given.
+    if sym in ('>', '<', '>=', '=<', '=:=', '=\\='):
+        a1 = t.attr_list.get('1')
+        a2 = t.attr_list.get('2')
+        if a1 and a2:
+            ok1, v1 = _eval_arith(a1, eng)
+            ok2, v2 = _eval_arith(a2, eng)
+            if ok1 and ok2:
+                cmp_map: dict = {
+                    '>': v1 > v2, '<': v1 < v2,
+                    '>=': v1 >= v2, '=<': v1 <= v2,
+                    '=:=': v1 == v2, '=\\=': v1 != v2,
+                }
+                return cmp_map.get(sym)
+        return None
+
+    # ── Built-in FUNCTION ──
     if defn._builtin_func is not None and defn.type == DefType.FUNCTION:
-        if sym in ('>', '<', '>=', '=<', '=:=', '=\\='):
-            a1 = t.attr_list.get('1')
-            a2 = t.attr_list.get('2')
-            if a1 and a2:
-                ok1, v1 = _eval_arith(a1, eng)
-                ok2, v2 = _eval_arith(a2, eng)
-                if ok1 and ok2:
-                    cmp_map: dict = {
-                        '>': v1 > v2, '<': v1 < v2,
-                        '>=': v1 >= v2, '=<': v1 <= v2,
-                        '=:=': v1 == v2, '=\\=': v1 != v2,
-                    }
-                    return cmp_map.get(sym)
         # Other built-in functions cannot be evaluated without engine machinery
         return None
 
@@ -6321,8 +6348,12 @@ def bi_cond(goal: PsiTerm, eng) -> bool:
         # A plain predicate call has no boolean value to read; it is proved,
         # which is how `cond(true, foo(X))` binds X at all.  Anything else
         # unresolvable stays a failure, as a conjunction of goals would be.
-        if (then_g.type is not None and then_g.type.type == DefType.PREDICATE
-                and then_g.type._builtin_func is None):
+        _then_defn = then_g.type
+        _provable = (
+            _then_defn is not None
+            and (_then_defn.type == DefType.PREDICATE
+                 or _all_builtin_goals(then_g, eng)))
+        if _provable:
             eng.push_goal(GoalType.PROVE, then_g, _DEFRULES_SENTINEL, None)
             return True
         return False
@@ -6651,6 +6682,9 @@ def bi_setq(goal: PsiTerm, eng) -> bool:
     if defn.rule is None or callable(defn.rule):
         defn.rule = []
     defn.type = DefType.FUNCTION  # ensure it's recognised as a function
+    # A global the program writes to is dynamic whether or not it was declared
+    # so: what it stands for is whatever the last setq put there.
+    defn.is_dynamic = True
 
     # Remove ALL existing -> rules for X (retract all functional clauses)
     defn.rule = []  # wipe all rules

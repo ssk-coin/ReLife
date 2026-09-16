@@ -1425,6 +1425,37 @@ class Engine:
             self.goal_count += 1
             return False
 
+        # A strict predicate is given values, not calls: `pick_op(X:ran)` asks
+        # ran for its number once and every clause of pick_op then reads that
+        # one number, where reducing the call per clause would draw a fresh one
+        # each time round.  One call is reduced and the goal put back, so the
+        # next is found on the way round.
+        if (defn is not None and defn.type == DefType.PREDICATE
+                and defn._builtin_func is None and thegoal.attr_list
+                and not (hasattr(self, 'non_strict_set')
+                         and defn in self.non_strict_set)):
+            from wild_life.built_ins import _is_user_function as _iuf_pa
+            _call_arg = None
+            for _av_pa in thegoal.attr_list.values():
+                _ad_pa = _av_pa.deref()
+                if (_iuf_pa(_ad_pa) and not _ad_pa.attr_list
+                        and not getattr(_ad_pa.type, 'is_dynamic', False)):
+                    _call_arg = _ad_pa
+                    break
+            if _call_arg is not None:
+                self.goal_stack = aim.next
+                self.goal_count += 1
+                # Asked once: a call the evaluation leaves standing must not
+                # send the goal round again for the same argument.
+                from wild_life.data_structures import REDUCED as _RED_pa
+                self.trail.trail_psi(_call_arg, 'flags')
+                _call_arg.flags |= _RED_pa
+                _R_pa = wl.make_var()
+                self.push_goal(GoalType.PROVE, thegoal, aim.b, aim.c)
+                self.push_goal(GoalType.UNIFY, _call_arg, _R_pa, None)
+                self.push_goal(GoalType.EVAL, _call_arg, _R_pa, _call_arg.type.rule)
+                return True
+
         self.goal_stack = aim.next
         self.goal_count += 1
 
