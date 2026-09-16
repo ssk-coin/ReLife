@@ -424,21 +424,21 @@ def _match_one(c: 'PsiTerm', h: 'PsiTerm', out: list, eng, seen: set,
         # What the two terms wait on is noted between themselves; the term
         # that holds them does not wait with them.
         return False
+    noted = False
     if h.type is not None and h.type is not wl.top:
         if c.type is None or not c.type.is_subtype_of(h.type):
             if not types_compatible(c.type, h.type):
                 return 'never'
-            # c can still be narrowed under h's sort; nothing below it is
-            # settled until it is.
+            # c can still be narrowed under h's sort, and what it already
+            # carries is waiting on the head's demands just the same.
             _add_blocker(out, c)
-            return True
+            noted = True
     if h.value is not None:
         if c.value is None:
             _add_blocker(out, c)
-            return True
-        if c.value != h.value:
+            noted = True
+        elif c.value != h.value:
             return 'never'
-    noted = False
     for k, hv in h.attr_list.items():
         cv = c.attr_list.get(k)
         if cv is None:

@@ -1164,9 +1164,10 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
         return
 
     args_written = False
+    value_written = False
     if t.value is not None:
         _print_value(ps, t, wl)
-        args_written = True
+        value_written = True
     else:
         if ps.print_depth == 0 or depth + 1 < ps.print_depth:
             args_written = _pretty_psi_with_ops(ps, t, sprec, depth + 1)
@@ -1182,6 +1183,8 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
                 _print_symbol_q(ps, _kw)
 
     if not args_written and t.attr_list:
+        # A term can carry features as well as a value — `23(1)` is the
+        # integer 23 with a first feature — so the features follow the value.
         if ps.print_depth > 0 and depth + 1 >= ps.print_depth:
             ps.write("(...)")
         else:
@@ -1358,10 +1361,17 @@ def _maybe_resid(ps: PrintState, t: 'PsiTerm') -> None:
     arguments to become one term waits on the arguments themselves, which is
     how disequality1 reports X = s(B)~.
     """
-    if t.resid and t.value is None:
+    from wild_life.data_structures import GoalType as _GT_resid
+    if t.resid:
         for r in t.resid:
             # Pending via a Goal object (arithmetic/eval residuation)
             if getattr(r, 'goal', None) and getattr(r.goal, 'pending', False):
+                if (t.value is not None
+                        and getattr(r.goal, 'type', None) is not _GT_resid.EVAL):
+                    # An arithmetic constraint on a term that has taken a value
+                    # is settled, whatever is left of it on the term.  A call
+                    # still waiting for that term to gain a feature is not.
+                    continue
                 ps.write("~")
             # Pending via the Residuation's own flag (bi_residuate built-in)
             elif getattr(r, 'pending', False) and r.goal is None:

@@ -1029,6 +1029,11 @@ class Unifier:
             # When a psi-term u has daemon resids (from such_that), and u is
             # merged into v (compound-compound), wake them now so the daemon fires.
             self._wakeup_resid(u, v)
+        elif (u.resid or v.resid) and self.engine is not None:
+            # No merge — one of them holds a value, so it stays the term it is.
+            # A goal waiting on it was waiting for the features it has just
+            # gained: `X = 23` waiting to become 23(1) is woken by `X = @(1)`.
+            self._wakeup_resid(u, v)
 
         # Sort narrowing from a :: Sort(attrs) prototype, e.g. a term that has
         # become person(nose => pretty) narrows to cleopatra.  This runs after
