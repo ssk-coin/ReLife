@@ -39,6 +39,18 @@ _DEFERRABLE_BUILTIN_FUNCS = frozenset((
 ))
 
 
+def _leftmost_goal(t: 'PsiTerm', wl) -> 'PsiTerm':
+    """The first goal a conjunction runs, or t itself when it is not one."""
+    seen = 0
+    t = t.deref()
+    while seen < 64:
+        if t.type is not wl.commasym or '1' not in t.attr_list:
+            return t
+        t = t.attr_list['1'].deref()
+        seen += 1
+    return t
+
+
 def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
     """Freeze the arithmetic that a non-strict call's arguments stand for.
 
@@ -1625,7 +1637,14 @@ class Engine:
                     self.trail.trail_psi(_vp_d, 'coref')
                     _vp_d.coref = PsiTerm(type_def=wl.top)
                 _cond_d = cond_part.deref()
-                _eval_embedded_user_funcs(_cond_d, self, 0, set())
+                # Reduce calls embedded in the guard — `genChildren(children(X),
+                # A)` needs its children(X) argument reduced before the
+                # predicate runs.  A conjunction is proven left to right, so
+                # only its leftmost goal is ready: a later one is still waiting
+                # on what the goals before it will bind, and reducing
+                # `L1 = q_sort(l(LM))` before LM exists is how qsort2 lost its
+                # first solution.
+                _eval_embedded_user_funcs(_leftmost_goal(_cond_d, wl), self, 0, set())
                 if _st_call is None:
                     # Any other value is reduced up front: its sub-terms are
                     # rewritten in place, which a later backtrack into the
