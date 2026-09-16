@@ -5630,14 +5630,26 @@ def _term_is_unbound(t: Optional[PsiTerm], eng) -> bool:
 
 
 def _sort_compare_args(goal, eng):
-    """The two sorts a sort-comparison predicate compares, or None."""
+    """The two sorts a sort-comparison predicate compares, or None.
+
+    An argument that is a call is reduced first: `features(X) :== []` asks
+    about the sort of the feature list, not of the call.
+    """
     a, b = _get_two_args(goal)
     if a is None or b is None:
         return None
-    da, db = a.deref(), b.deref()
-    if da.type is None or db.type is None:
-        return None
-    return da.type, db.type
+    sorts = []
+    for _arg in (a, b):
+        _d = _arg.deref()
+        _ev = _try_eval_any_func(_d, eng)
+        if _ev is None:
+            _ev = _try_eval_string_func(_d, eng)
+        if _ev is not None:
+            _d = _ev.deref()
+        if _d.type is None:
+            return None
+        sorts.append(_d.type)
+    return sorts[0], sorts[1]
 
 
 def bi_sort_eq(goal: PsiTerm, eng) -> bool:
@@ -5676,6 +5688,26 @@ def bi_sort_gt(goal: PsiTerm, eng) -> bool:
     sorts = _sort_compare_args(goal, eng)
     return (sorts is not None and sorts[0] is not sorts[1]
             and sorts[1].is_subtype_of(sorts[0]))
+
+
+def bi_sort_not_lt(goal: PsiTerm, eng) -> bool:
+    """X :\\< Y — X's sort does not lie strictly under Y's."""
+    return not bi_sort_lt(goal, eng)
+
+
+def bi_sort_not_le(goal: PsiTerm, eng) -> bool:
+    """X :\\=< Y — X's sort neither is Y's nor lies under it."""
+    return not bi_sort_le(goal, eng)
+
+
+def bi_sort_not_gt(goal: PsiTerm, eng) -> bool:
+    """X :\\> Y — X's sort does not lie strictly above Y's."""
+    return not bi_sort_gt(goal, eng)
+
+
+def bi_sort_not_ge(goal: PsiTerm, eng) -> bool:
+    """X :\\>= Y — X's sort neither is Y's nor lies above it."""
+    return not bi_sort_ge(goal, eng)
 
 
 def bi_sort_comparable(goal: PsiTerm, eng) -> bool:
@@ -8848,15 +8880,17 @@ def register_all(wl) -> None:
     _reg('random', bi_rand)
     _reg('initrandom', bi_initrandom)
 
-    # Sort comparison — these compare the sorts of their two arguments.
-    _reg(':==', bi_sort_eq)
-    _reg(':\\==', bi_sort_ne)
-    _reg(':=<', bi_sort_le)
-    _reg(':<', bi_sort_lt)
-    _reg(':>=', bi_sort_ge)
-    _reg(':>', bi_sort_gt)
-    _reg(':><', bi_sort_comparable)
-    _reg(':\\><', bi_sort_incomparable)
+    # Sort comparison — these compare the sorts of their two arguments.  They
+    # are declared as operators in the syntax module, so that is where their
+    # definitions belong.
+    for _sc_name, _sc_fn in (
+            (':==', bi_sort_eq), (':\\==', bi_sort_ne),
+            (':=<', bi_sort_le), (':<', bi_sort_lt),
+            (':>=', bi_sort_ge), (':>', bi_sort_gt),
+            (':\\=<', bi_sort_not_le), (':\\<', bi_sort_not_lt),
+            (':\\>=', bi_sort_not_ge), (':\\>', bi_sort_not_gt),
+            (':><', bi_sort_comparable), (':\\><', bi_sort_incomparable)):
+        _reg(_sc_name, _sc_fn, module=wl.syntax_module)
 
     # System
     _reg('halt', bi_halt)
