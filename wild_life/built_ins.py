@@ -2274,6 +2274,7 @@ def _report_division_problem(t: 'PsiTerm', eng, _depth: int = 0) -> bool:
             if _msg_rp is not None:
                 _sys_rp.stderr.write(
                     f"*** Error: {_msg_rp} in {_term_to_str(t, eng)}.\n")
+                eng._arith_error = True
                 return True
     if _sym_rp in ('//', '/'):
         import sys as _sys_div
@@ -2286,10 +2287,12 @@ def _report_division_problem(t: 'PsiTerm', eng, _depth: int = 0) -> bool:
                     _sys_div.stderr.write(
                         f"*** Warning: argument '{_term_to_str(arg.deref(), eng)}' "
                         f"of integer division is not an integer.\n")
+                    eng._arith_error = True
                     return True
         if ok2 and v2 == 0:
             _sys_div.stderr.write(
                 f"*** Error: division by zero in {_term_to_str(t, eng)}.\n")
+            eng._arith_error = True
             return True
     for sub in t.attr_list.values():
         if _report_division_problem(sub, eng, _depth + 1):
@@ -2571,6 +2574,12 @@ def _push_deferred_cmp(goal: PsiTerm, eng, a, b, oka, okb) -> bool:
         for _cv in _cmp_vars:
             _attach_arith_resid(_cv, wl, _pend, eng)
         return True
+    # Nothing is missing, so the operands are simply not computable — a
+    # division by zero among them is reported here rather than passed off as a
+    # comparison that merely did not hold.
+    for _side in (a, b):
+        if _side is not None and _report_division_problem(_side, eng):
+            break
     return False
 
 

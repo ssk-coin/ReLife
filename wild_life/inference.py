@@ -522,12 +522,19 @@ def _eval_cond_functional(cond_term: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
     else_g = args[2].deref() if len(args) >= 3 else None
 
     mark = eng.trail.mark()
+    eng._arith_error = False
     cond_ok = prove_cond(cond_g, eng)
 
     if cond_ok:
         return _eval_body_to_result(then_g, result, eng)
     else:
         eng.trail.undo_to(mark)
+        # A condition that could not be computed at all — `(N/M) =:= floor(N/M)`
+        # with M zero — is not a condition that came out false, so the
+        # alternative is not taken and the call has no value.
+        if getattr(eng, '_arith_error', False):
+            eng._arith_error = False
+            return False
         if else_g is None:
             return False
         return _eval_body_to_result(else_g, result, eng)
