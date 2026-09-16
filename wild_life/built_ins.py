@@ -4455,6 +4455,15 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     # which only the EVAL goal sets up.
     if _is_user_function(b_d) and (b_d.attr_list or _has_disjunctive_body(b_d, eng.wl)):
         result = PsiTerm(type_def=eng.wl.top)
+        if _is_user_function(a_d) and (a_d.attr_list
+                                       or _has_disjunctive_body(a_d, eng.wl)):
+            # Two calls meeting each other: `tata(10) = tata(10)` asks tata
+            # twice, and what the two answer is what is compared.
+            result_a = PsiTerm(type_def=eng.wl.top)
+            eng.push_goal(GoalType.UNIFY, result_a, result, None)
+            eng.push_goal(GoalType.EVAL, a_d, result_a, a_d.type.rule)
+            eng.push_goal(GoalType.EVAL, b_d, result, b_d.type.rule)
+            return True
         # LIFO: push UNIFY first, then EVAL on top (EVAL executes first)
         eng.push_goal(GoalType.UNIFY, a_d, result, None)
         eng.push_goal(GoalType.EVAL, b_d, result, b_d.type.rule)
