@@ -793,6 +793,39 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
                 return _make_string(eng, str(a1.value))
         return _make_atom(eng, defn.keyword.symbol)
 
+    elif sym == 'has_feature':
+        # has_feature(F, T) also reads as a function: `A = has_feature(@,S)`
+        # answers false while S has no such feature and true once it does.
+        a1 = t.attr_list.get('1')
+        a2 = t.attr_list.get('2')
+        if a1 is None or a2 is None or eng is None:
+            return None
+        fname = _feature_name_of(a1.deref(), eng.wl)
+        term = a2.deref()
+        holds = fname is not None and fname in term.attr_list
+        return eng.wl.make_atom('true' if holds else 'false')
+
+    elif sym == 'parents':
+        # parents(Sort) -> list of immediate parent sorts.  A concrete value
+        # answers with the sort it is: `parents(23)` is [int].
+        a1 = t.attr_list.get('1')
+        if a1 is None or eng is None:
+            return None
+        a1 = a1.deref()
+        defn = a1.type
+        if defn is None or defn.keyword is None:
+            return None
+        wl = eng.wl
+        if a1.value is not None:
+            return wl.make_list([wl.make_atom(defn.keyword.symbol, wl.bi_module)])
+        parent_atoms = []
+        for parent_defn in getattr(defn, 'parents', []):
+            if parent_defn is None or parent_defn.keyword is None:
+                continue
+            parent_atoms.append(wl.make_atom(parent_defn.keyword.symbol,
+                                             wl.bi_module))
+        return wl.make_list(parent_atoms)
+
     elif sym == 'children':
         # children(Sort) -> list of immediate child sorts.
         # For concrete numeric/string values (atoms with a .value), return [].
@@ -2519,6 +2552,24 @@ def bi_is(goal: PsiTerm, eng) -> bool:
         return False
     result = _make_number(eng, val)
     return _unify(eng, arg1, result)
+
+
+def _feature_name_of(feat: PsiTerm, wl):
+    """The feature key a term names, or None if it names none.
+
+    `1` names the first positional feature, and so do the string "1" and the
+    atom `'1'` that str2psi("1") builds.
+    """
+    if feat is None:
+        return None
+    if feat.value is not None:
+        v = feat.value
+        if isinstance(v, float) and v == int(v):
+            return str(int(v))
+        return str(v)
+    if feat.type is not None and feat.type.keyword is not None:
+        return feat.type.keyword.symbol
+    return None
 
 
 def _find_embedded_user_func(t: PsiTerm, _seen: set = None, _depth: int = 0):
@@ -9649,16 +9700,10 @@ def register_all(wl) -> None:
         a2 = goal.attr_list.get('2')  # term
         if a1 is None or a2 is None:
             return False
-        feat = a1.deref()
-        term = a2.deref()
-        # Determine feature name
-        if feat.type is not None and feat.type.keyword is not None:
-            fname = feat.type.keyword.symbol
-        elif feat.value is not None:
-            fname = str(feat.value)
-        else:
+        fname = _feature_name_of(a1.deref(), wl)
+        if fname is None:
             return False
-        return fname in term.attr_list
+        return fname in a2.deref().attr_list
     _reg('has_feature', _bi_has_feature)
 
     # ── parents(X, L) — L is list of direct parent sorts of X ─────────────

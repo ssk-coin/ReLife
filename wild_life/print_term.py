@@ -865,6 +865,7 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
     flat_ps.write_resids = ps.write_resids
     flat_ps.no_arith_eval = ps.no_arith_eval  # propagate frozen context
     flat_ps.frozen_arith = ps.frozen_arith
+    flat_ps.write_canon = ps.write_canon
     flat_ps.pointer_names = ps.pointer_names
     flat_ps.printed_pointers = dict(ps.printed_pointers)
     flat_ps.col = ps.col + len(prefix_str)  # column just before '['
@@ -1328,6 +1329,7 @@ def _pretty_attr(ps: PrintState, attr_list: dict, depth: int, wl,
     flat_ps.write_resids = ps.write_resids
     flat_ps.no_arith_eval = ps.no_arith_eval  # propagate frozen context
     flat_ps.frozen_arith = ps.frozen_arith
+    flat_ps.write_canon = ps.write_canon
     flat_ps.pointer_names = ps.pointer_names
     flat_ps.printed_pointers = dict(ps.printed_pointers)
     flat_ps.col = ps.col            # column before '('
