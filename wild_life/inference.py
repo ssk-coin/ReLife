@@ -424,6 +424,20 @@ def _match_one(c: 'PsiTerm', h: 'PsiTerm', out: list, eng, seen: set,
         # What the two terms wait on is noted between themselves; the term
         # that holds them does not wait with them.
         return False
+    taken = bindings.get(id(h))
+    if taken is not None:
+        if taken is c:
+            return False
+        # The head asks for this very term again — `f(X:s(X))` asks the call's
+        # term to be its own first feature.
+        _paired = _pair_blockers(taken, c, out, set(), eng)
+        if _paired == 'never':
+            return 'never'
+        if not _paired:
+            stuck[0] = True
+        return False
+    bindings[id(h)] = c
+
     noted = False
     if h.type is not None and h.type is not wl.top:
         if c.type is None or not c.type.is_subtype_of(h.type):
@@ -573,6 +587,20 @@ def _rule_match_status(head: 'PsiTerm', call: 'PsiTerm', eng):
     return 'stuck' if stuck[0] else 'ready'
 
 
+def _is_cyclic(t: 'PsiTerm', _seen: frozenset = frozenset(),
+               depth: int = 0) -> bool:
+    """Whether the term comes round to itself, and so stands for an infinite one."""
+    if depth > 30:
+        return True
+    t = t.deref()
+    if id(t) in _seen:
+        return True
+    if not t.attr_list:
+        return False
+    below = _seen | {id(t)}
+    return any(_is_cyclic(v, below, depth + 1) for v in t.attr_list.values())
+
+
 def _pair_blockers(a: 'PsiTerm', b: 'PsiTerm', out: list, seen: set, eng,
                    depth: int = 0) -> bool:
     """Note the terms whose narrowing could still make a and b one term.
@@ -596,6 +624,16 @@ def _pair_blockers(a: 'PsiTerm', b: 'PsiTerm', out: list, seen: set, eng,
     if key in seen:
         return False
     seen.add(key)
+    if _is_cyclic(a) or _is_cyclic(b):
+        # An infinite term: walking it can never confirm that the two are
+        # alike, so the comparison settles nothing and both keep waiting.
+        _add_blocker(out, a)
+        _add_blocker(out, b)
+        for sub_key, sub in a.attr_list.items():
+            other = b.attr_list.get(sub_key)
+            if other is not None:
+                _pair_blockers(sub, other, out, seen, eng, depth + 1)
+        return True
     if not types_compatible(a.type, b.type):
         return 'never'
     if a.value is not None and b.value is not None and a.value != b.value:
