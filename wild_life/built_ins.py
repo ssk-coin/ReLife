@@ -6533,50 +6533,61 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         rhs_term.value = val
     else:
         rhs_term = a2.deref()
+        if not _backtrackable:
+            # `X <<- s([1+6],X)` reads X before it writes it, so the X inside
+            # the new term is the 3 that was there — `s([7],3)`, not a term
+            # that points back at itself the way `X <- s(1+4,X)` does.
+            rhs_term = _substitute_old_self(rhs_term, lhs, eng)
 
-    if _backtrackable:
-        # '<-': backtrackable in-place update of the dereferenced endpoint.
-        # We must mutate `lhs` (the end of the deref chain) so that ALL
-        # variables pointing into this chain see the new value, while trailing
-        # each changed field so backtracking restores the original state.
-        eng.trail.trail_psi(lhs, 'value')
-        eng.trail.trail_psi(lhs, 'coref')
-        eng.trail.trail_psi(lhs, 'type')
-        eng.trail.trail_psi(lhs, 'attr_list')
-        eng.trail.trail_psi(lhs, 'flags')
-        if ok_arith:
-            lhs.value = val
-            lhs.coref = None
-            lhs.attr_list = {}
-            if lhs.type is None or lhs.type is eng.wl.top:
-                lhs.type = eng.wl.real
-        else:
-            rhs = rhs_term
-            lhs.value = rhs.value
-            lhs.type = rhs.type
-            lhs.attr_list = dict(rhs.attr_list)
-            lhs.coref = rhs.coref
-            lhs.flags = rhs.flags
-        return True
-
-    # '<<-': non-backtrackable (destructive in-place update)
+    # Both forms update the dereferenced endpoint in place, so that every
+    # variable pointing into this chain sees the new value; each changed field
+    # is trailed, so a failed query leaves X the 3 it was.
+    eng.trail.trail_psi(lhs, 'value')
+    eng.trail.trail_psi(lhs, 'coref')
+    eng.trail.trail_psi(lhs, 'type')
+    eng.trail.trail_psi(lhs, 'attr_list')
+    eng.trail.trail_psi(lhs, 'flags')
     if ok_arith:
         lhs.value = val
         lhs.coref = None
         lhs.attr_list = {}
         if lhs.type is None or lhs.type is eng.wl.top:
             lhs.type = eng.wl.real
-        return True
-
-    # Non-arithmetic RHS: destructively copy rhs structure into lhs
-    rhs = rhs_term
-    lhs.value = rhs.value
-    lhs.type = rhs.type
-    lhs.attr_list = dict(rhs.attr_list)
-    lhs.coref = None   # clear any forwarding pointer
-    lhs.flags = rhs.flags
-    lhs.resid = rhs.resid
+    else:
+        rhs = rhs_term
+        lhs.value = rhs.value
+        lhs.type = rhs.type
+        lhs.attr_list = dict(rhs.attr_list)
+        lhs.coref = rhs.coref if _backtrackable else None
+        lhs.flags = rhs.flags
+    # An equation suspended on this variable was waiting for exactly this:
+    # `A = B+5` answers A = 11 once `B <- 6` says what B is.
+    eng.unifier._wakeup_resid(lhs, lhs)
     return True
+
+
+def _substitute_old_self(rhs: PsiTerm, lhs: PsiTerm, eng) -> PsiTerm:
+    """Replace references to `lhs` inside `rhs` with lhs's current value."""
+    snapshot = PsiTerm()
+    snapshot.type = lhs.type
+    snapshot.value = lhs.value
+    snapshot.attr_list = dict(lhs.attr_list)
+    snapshot.coref = lhs.coref
+    snapshot.flags = lhs.flags
+    seen: set = set()
+    stack = [rhs]
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        for key, ref in list(node.attr_list.items()):
+            sub = ref.deref()
+            if sub is lhs:
+                eng.unifier.set_attr(node, key, snapshot)
+            else:
+                stack.append(sub)
+    return rhs
 
 
 def bi_setq(goal: PsiTerm, eng) -> bool:
@@ -7299,6 +7310,12 @@ def bi_op(goal: PsiTerm, eng) -> bool:
     from wild_life.data_structures import OperatorType, GoalType, Goal, ChoicePoint
 
     wl = eng.wl
+    # An argument the caller left out is a free variable, not a missing one:
+    # `op(X,3 => (+))` asks for the precedence and kind of `+` without naming
+    # the kind, so it enumerates over the second position.
+    for _k in ('1', '2', '3'):
+        if goal.attr_list.get(_k) is None:
+            eng.unifier.set_attr(goal, _k, PsiTerm(type_def=wl.top))
     a1 = goal.attr_list.get('1')
     a2 = goal.attr_list.get('2')
     a3 = goal.attr_list.get('3')
@@ -8251,10 +8268,14 @@ def bi_open_in(goal: PsiTerm, eng) -> bool:
         filename = a1d.type.keyword.symbol
     else:
         return False
-    try:
-        f = open(filename, 'r')
-    except OSError:
-        return False
+    if filename == 'stdin':
+        # `open_in(stdin, S)` names the standard input rather than a file.
+        f = sys.__stdin__
+    else:
+        try:
+            f = open(filename, 'r')
+        except OSError:
+            return False
     if a2 is not None:
         # 2-arg form: bind stream token to a2
         stream_term = PsiTerm()
@@ -8291,10 +8312,16 @@ def bi_open_out(goal: PsiTerm, eng) -> bool:
         filename = a1d.type.keyword.symbol
     else:
         return False
-    try:
-        f = open(filename, 'w')
-    except OSError:
-        return False
+    if filename in ('stdout', 'stderr'):
+        # `open_out(stdout, S3)` names the standard stream, which is what
+        # copy_file holds on to so that closing the target file puts the
+        # "done." back on the terminal.
+        f = sys.__stdout__ if filename == 'stdout' else sys.__stderr__
+    else:
+        try:
+            f = open(filename, 'w')
+        except OSError:
+            return False
     if a2 is not None:
         stream_term = PsiTerm()
         stream_term.value = f
@@ -8313,6 +8340,60 @@ def bi_open_out(goal: PsiTerm, eng) -> bool:
         eng._stdout_stack.append(sys.stdout)
         sys.stdout = f
         return True
+
+
+def _stream_file(t: PsiTerm, eng):
+    """The Python file object a stream psi-term stands for, or None."""
+    t = t.deref()
+    if t.value is not None and hasattr(t.value, 'write') or (
+            t.value is not None and hasattr(t.value, 'read')):
+        return t.value
+    streams = getattr(eng, '_open_streams', None)
+    if streams is not None and id(t) in streams:
+        return streams[id(t)]
+    if t.type is not None and t.type.keyword is not None:
+        sym = t.type.keyword.symbol
+        if sym == 'stdout':
+            return sys.__stdout__
+        if sym == 'stderr':
+            return sys.__stderr__
+        if sym == 'stdin':
+            return sys.__stdin__
+    return None
+
+
+def bi_set_output(goal: PsiTerm, eng) -> bool:
+    """set_output(Stream) — send what follows to Stream.
+
+    The stream that was current is stacked, so closing Stream puts the output
+    back where it was, which is how copy_file's "done." reaches the terminal.
+    """
+    a1 = goal.attr_list.get('1')
+    if a1 is None:
+        return False
+    f = _stream_file(a1, eng)
+    if f is None:
+        return False
+    if not hasattr(eng, '_stdout_stack'):
+        eng._stdout_stack = []
+    eng._stdout_stack.append(sys.stdout)
+    sys.stdout = f
+    return True
+
+
+def bi_set_input(goal: PsiTerm, eng) -> bool:
+    """set_input(Stream) — read what follows from Stream."""
+    a1 = goal.attr_list.get('1')
+    if a1 is None:
+        return False
+    f = _stream_file(a1, eng)
+    if f is None:
+        return False
+    if not hasattr(eng, '_stdin_stack'):
+        eng._stdin_stack = []
+    eng._stdin_stack.append(sys.stdin)
+    sys.stdin = f
+    return True
 
 
 def bi_close(goal: PsiTerm, eng) -> bool:
@@ -8777,6 +8858,8 @@ def register_all(wl) -> None:
     _reg('open_in', bi_open_in)
     _reg('open_out', bi_open_out)
     _reg('close', bi_close)
+    _reg('set_output', bi_set_output)
+    _reg('set_input', bi_set_input)
     _reg('read_token', bi_read_token)
     _reg('system', bi_system)
 
