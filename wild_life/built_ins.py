@@ -3358,9 +3358,11 @@ def _eval_parse_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
     if eng is not None and new_vt:
         lv = getattr(eng, '_last_var_tree', None)
         if lv is not None:
-            for k, v in new_vt.items():
-                if k not in lv:
-                    lv[k] = v
+            _added = [k for k in new_vt if k not in lv]
+            if _added:
+                eng.trail.trail_dict(lv)
+                for k in _added:
+                    lv[k] = new_vt[k]
 
     # Determine status atom
     if not has_terminator:
@@ -9362,6 +9364,25 @@ def register_all(wl) -> None:
                 wl.global_defs.append(defn)
         return True
     _reg('persistent', _bi_persistent)
+
+    def _bi_print_variables(goal, eng):
+        """print_variables — write out the variables the session holds."""
+        from wild_life.print_term import print_variables as _pv_bi, \
+            PRINT_DEPTH as _PD_bi
+        merged: dict = {}
+        for vt in (getattr(eng, '_frame_var_trees', None) or []):
+            if vt:
+                merged.update(vt)
+        own = getattr(eng, '_last_var_tree', None)
+        if own:
+            merged.update(own)
+        if not merged:
+            return True
+        _pv_bi(merged, outfile=sys.stdout, wl=wl,
+               print_depth=getattr(wl, 'print_depth', _PD_bi))
+        sys.stdout.write("\n")
+        return True
+    _reg('print_variables', _bi_print_variables)
 
     def _bi_delay_until(goal, eng):
         """delay_until(Cond,Goal): simplified — just try to prove Goal immediately."""

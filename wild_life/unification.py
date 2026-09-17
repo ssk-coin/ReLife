@@ -73,6 +73,24 @@ class SortCycleException(Exception):
 
 # ==================== トレイル (アンドゥスタック) ====================
 
+class _DictSnapshot:
+    """Puts a dict's contents back when the trail rewinds past it."""
+
+    __slots__ = ('target',)
+
+    def __init__(self, target: dict):
+        self.target = target
+
+    @property
+    def restore(self):
+        return dict(self.target)
+
+    @restore.setter
+    def restore(self, saved: dict):
+        self.target.clear()
+        self.target.update(saved)
+
+
 class Trail:
     """バックトラック用トレイル
     C版の undo_stack に対応
@@ -99,6 +117,15 @@ class Trail:
         old_val = getattr(obj, field)
         saved = copy.copy(old_val)
         self._trail.append((obj, field, saved))
+
+    def trail_dict(self, d: dict):
+        """Record a dict's contents so backtracking restores them.
+
+        The variables `parse` adds to the query's table belong to the solution
+        that made them: retrying `(p(5,"B") ; p(5,"C"))` reports C's variables
+        in place of B's, not both.
+        """
+        self._trail.append((_DictSnapshot(d), 'restore', dict(d)))
 
     def undo_to(self, mark: int):
         """mark 位置までトレイルを巻き戻す"""

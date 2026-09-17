@@ -426,6 +426,10 @@ def run_repl(
                 # assigns one has to open a level to keep it.
                 engine.pre_query_globals = {
                     id(d) for d in getattr(engine.wl, 'global_defs', ())}
+                # print_variables/0 reports the levels already open as well as
+                # this query's own variables.
+                engine._frame_var_trees = [f.var_tree for f in frame_stack
+                                           if f.var_tree]
                 engine.used_existing_global = False
 
                 saved_noisy = engine.noisy
