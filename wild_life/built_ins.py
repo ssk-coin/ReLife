@@ -1290,6 +1290,8 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
     from wild_life.print_term import write_term
     var_tree = getattr(eng, '_last_var_tree', None)
     wl = eng.wl if eng else None
+    # Writing out a global reads a cell the query does not own.
+    note_persistent_use(t.type, eng)
 
     # ── backtick-quoted term: strip ONE outer backtick ──────────────────────
     # write(`expr) prints the inner expr without the backtick.
@@ -1498,6 +1500,18 @@ def _note_global_used(eng, defn) -> None:
     pre = getattr(eng, 'pre_query_globals', None)
     if pre is not None and id(defn) in pre:
         eng.used_existing_global = True
+
+
+def note_persistent_use(defn, eng) -> None:
+    """Record that a `persistent` global was written, or read out at top level.
+
+    Its cell is not the query's to undo, so such a query opens a level and
+    keeps what it did — which is why `write(a)` answers at `--1>`.  A global
+    a predicate reads on its way to an answer is not that: power_4 reads
+    `result` throughout and still answers at the top level.
+    """
+    if defn is not None and getattr(defn, 'is_persistent', False):
+        _note_global_used(eng, defn)
 
 
 def _global_cell(t: PsiTerm, eng) -> Optional[PsiTerm]:
@@ -1912,6 +1926,7 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
 
     # User-defined function: try to evaluate it inline (no condition case)
     if t.type is not None and t.type.type == DefType.FUNCTION and t.type.rule:
+        note_persistent_use(t.type, eng)
         active = [(h, b) for (h, b) in t.type.rule if h is not None and b is not None]
         from wild_life.unification import copy_term
         # Pre-evaluate built-in function calls in args (e.g. features(X)) so
@@ -2042,6 +2057,15 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
                 return False, 0.0
             try:
                 return True, float(ops1[sym](_un_v))
+            except OverflowError:
+                # Past what a double holds: `exp(1e300)` is Infinity, the way
+                # the C library answers it.
+                return True, (math.inf if _un_v >= 0 else -math.inf)
+            except ValueError:
+                # Undefined there: `cos(Infinity)` is NaN.
+                if not math.isfinite(_un_v):
+                    return True, math.nan
+                return False, 0.0
             except Exception:
                 return False, 0.0
 
@@ -3334,9 +3358,11 @@ def _eval_parse_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
     if eng is not None and new_vt:
         lv = getattr(eng, '_last_var_tree', None)
         if lv is not None:
-            for k, v in new_vt.items():
-                if k not in lv:
-                    lv[k] = v
+            _added = [k for k in new_vt if k not in lv]
+            if _added:
+                eng.trail.trail_dict(lv)
+                for k in _added:
+                    lv[k] = new_vt[k]
 
     # Determine status atom
     if not has_terminator:
@@ -7404,7 +7430,11 @@ def bi_load(goal: PsiTerm, eng) -> bool:
         return False
     filename = str(arg.value) if arg.value else (
         arg.type.keyword.symbol if arg.type and arg.type.keyword else '')
-    if not filename.endswith('.lf'):
+    # The name is taken as written when a file of that name is there —
+    # `load("FILES/t3203.1")` names the file itself — and `.lf` is only added
+    # when it is not.
+    import os as _os_ld
+    if not filename.endswith('.lf') and not _os_ld.path.exists(filename):
         filename += '.lf'
 
     wl = eng.wl
@@ -7752,7 +7782,18 @@ def _rule_to_string(h, b, wl):
     ps.insert_variables({}, False)
 
     # head を出力
-    _pretty_tag_or_psi_term(ps, h, MAX_PRECEDENCE + 1, 0, wl)
+    # A head whose functor binds no tighter than `:-` itself cannot be written
+    # in operator form there, so it is written as a call: `pred(a) :- succeed`,
+    # not `pred a :- succeed`, which would read back as something else.
+    from wild_life.print_term import _opcheck as _opchk_h, NOTOP as _NOTOP_h
+    _h_kind, _h_prec, _h_type = _opchk_h(h.deref())
+    _was_canon = ps.write_canon
+    if _h_kind != _NOTOP_h and _h_prec >= 1200:
+        ps.write_canon = True
+    try:
+        _pretty_tag_or_psi_term(ps, h, MAX_PRECEDENCE + 1, 0, wl)
+    finally:
+        ps.write_canon = _was_canon
     head_str = ps.outfile.getvalue()
 
     # body ゴールを個別に出力 (outfile を切り替えて再利用)
@@ -9289,6 +9330,10 @@ def register_all(wl) -> None:
         """
         if not goal.attr_list:
             return False
+        # A name that already has a definition of its own cannot become a
+        # global, and one bad name refuses the whole declaration: after
+        # `d -> 4`, `persistent(a,…,d,…,j)` declares none of them.
+        names: list = []
         i = 1
         while True:
             arg = goal.attr_list.get(str(i))
@@ -9299,6 +9344,17 @@ def register_all(wl) -> None:
             defn = arg_d.type
             if defn is None:
                 continue
+            if (defn.rule and defn.type in (DefType.FUNCTION, DefType.PREDICATE)
+                    and not getattr(defn, 'is_persistent', False)):
+                kind = ('function' if defn.type == DefType.FUNCTION
+                        else 'predicate')
+                name = defn.keyword.symbol if defn.keyword else '?'
+                sys.stderr.write(
+                    f"*** Error: {kind} {name} cannot be redeclared persistent"
+                    f" (near line {getattr(wl, 'line_count', 0)}).\n")
+                return False
+            names.append(defn)
+        for defn in names:
             if defn.rule is None:
                 defn.rule = []
             if defn.type not in (DefType.FUNCTION, DefType.PREDICATE):
@@ -9308,6 +9364,25 @@ def register_all(wl) -> None:
                 wl.global_defs.append(defn)
         return True
     _reg('persistent', _bi_persistent)
+
+    def _bi_print_variables(goal, eng):
+        """print_variables — write out the variables the session holds."""
+        from wild_life.print_term import print_variables as _pv_bi, \
+            PRINT_DEPTH as _PD_bi
+        merged: dict = {}
+        for vt in (getattr(eng, '_frame_var_trees', None) or []):
+            if vt:
+                merged.update(vt)
+        own = getattr(eng, '_last_var_tree', None)
+        if own:
+            merged.update(own)
+        if not merged:
+            return True
+        _pv_bi(merged, outfile=sys.stdout, wl=wl,
+               print_depth=getattr(wl, 'print_depth', _PD_bi))
+        sys.stdout.write("\n")
+        return True
+    _reg('print_variables', _bi_print_variables)
 
     def _bi_delay_until(goal, eng):
         """delay_until(Cond,Goal): simplified — just try to prove Goal immediately."""

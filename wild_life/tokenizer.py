@@ -319,8 +319,16 @@ class TokenizerState:
                     pwr = pwr * 10 + (ord(c2) - ord('0'))
                     c2 = self.read_char()
                 self.put_back_char(c2)
-                p = 10.0 ** pwr if pos_flag else 10.0 ** (-pwr)
-                f *= p
+                # An exponent past what a double holds reads as infinity,
+                # the way C's strtod answers it, rather than failing the read.
+                try:
+                    p = 10.0 ** pwr if pos_flag else 10.0 ** (-pwr)
+                except OverflowError:
+                    p = math.inf
+                try:
+                    f *= p
+                except OverflowError:
+                    f = math.inf if f >= 0 else -math.inf
                 c = self.read_char()
             else:
                 self.put_back_char(c2)
@@ -331,7 +339,7 @@ class TokenizerState:
 
         tok.value = f
         # 整数かどうかを判定 (C版: if(f==floor(f)) tok->type=integer)
-        if f == math.floor(f) and not is_real:
+        if math.isfinite(f) and f == math.floor(f) and not is_real:
             tok.type = WL.integer
         else:
             tok.type = WL.real
