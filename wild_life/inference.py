@@ -2005,6 +2005,15 @@ class Engine:
             return True
         _free_args_for_resid = _match if isinstance(_match, list) else None
         if _free_args_for_resid:
+            # The call as a whole is waiting, not this one rule: the pending
+            # goal carries the entire rule list and starts again from the
+            # first rule once the variable is bound.  Leaving the alternatives
+            # for the later rules standing would let backtracking suspend the
+            # same call once per rule, so `A = f(B)` with three rules for `f`
+            # would answer three times over.
+            if _rule_cp is not None:
+                self.drop_choice_point(_rule_cp)
+                _rule_cp = None
             # Set up residuation: attach a pending EVAL goal to each free variable.
             # When the variable gets bound, _wakeup_resid will push the EVAL goal
             # back onto the goal stack and f(bound_val) will be re-evaluated.
