@@ -75,12 +75,22 @@ def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
         _mark_non_strict_args(sub, eng, visited)
 
 
-def _mark_arith_non_strict(t: PsiTerm, visited: set = None) -> None:
+_STRICT_ARITH_SYMS = frozenset((
+    '+', '-', '*', '/', '//', 'mod', '**', '^', 'max', 'min',
+    '/\\', '\\/', 'xor', '>>', '<<'))
+
+
+def _mark_arith_non_strict(t: PsiTerm, visited: set = None, eng=None) -> None:
     """Recursively mark arithmetic operator psiterms with NON_STRICT_TERM.
 
     Called after head unification for a non-strict predicate so that
     arithmetic sub-expressions in the bound result are not eagerly
     evaluated during printing.
+
+    Pass *eng* when the marking belongs to one solution rather than to the
+    program text: the flag is then trailed, so backtracking hands the term
+    back unfrozen.  `assert(jolly(3+X) :- …)` freezes the sum it stores for
+    that X, and the next X finds `3+X` ready to be worked out again.
     """
     from wild_life.data_structures import NON_STRICT_TERM
     if visited is None:
@@ -97,9 +107,11 @@ def _mark_arith_non_strict(t: PsiTerm, visited: set = None) -> None:
     visited.add(tdid)
     sym = td.type.keyword.symbol if (td.type and td.type.keyword) else ''
     if sym in _ARITH_OPS_NON_STRICT and td.value is None:
+        if eng is not None and not (td.flags & NON_STRICT_TERM):
+            eng.trail.trail_psi(td, 'flags')
         td.flags |= NON_STRICT_TERM
     for v in td.attr_list.values():
-        _mark_arith_non_strict(v, visited)
+        _mark_arith_non_strict(v, visited, eng)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1618,12 +1630,25 @@ class Engine:
             # A strict predicate is given values, not calls: reduce a built-in
             # function in an argument before matching, so that a clause body
             # asserting its argument asserts `a1` and not `str2psi("a1")`.
-            from wild_life.built_ins import _try_eval_string_func as _tesf_pa
+            from wild_life.built_ins import (_try_eval_string_func as _tesf_pa,
+                                              _try_eval_arith_to_term as _teat_pa)
             for _k_pa, _a_pa in list(thegoal.attr_list.items()):
                 _a_pa_d = _a_pa.deref()
                 _ev_pa = _tesf_pa(_a_pa_d, self)
                 if _ev_pa is not None and _ev_pa is not _a_pa_d:
                     thegoal.attr_list[_k_pa] = _ev_pa
+                    continue
+                # An expression handed to a strict call is asked for its
+                # value, whatever it was written as: `p(X:(1+2))` leaves X
+                # worth 3, and everything reading X from then on reads 3.
+                from wild_life.data_structures import (
+                    NON_STRICT_TERM as _NST_pa)
+                if (_a_pa_d.attr_list and _a_pa_d.value is None
+                        and not (_a_pa_d.flags & _NST_pa)
+                        and _a_pa_d.type is not None
+                        and _a_pa_d.type.keyword is not None
+                        and _a_pa_d.type.keyword.symbol in _STRICT_ARITH_SYMS):
+                    _teat_pa(_a_pa_d, self)
         mark = self.trail.mark()
         ok = self.unifier.unify(thegoal, head)
         if _non_strict:

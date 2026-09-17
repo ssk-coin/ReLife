@@ -667,10 +667,15 @@ def _normalize_arith_in_term(t: PsiTerm, eng, _seen=None) -> PsiTerm:
         return t
     _seen.add(tid)
 
-    # If the whole term is an arithmetic expression, evaluate it
-    arith = _try_eval_arith_to_term(t, eng)
-    if arith is not None:
-        return arith
+    # If the whole term is an arithmetic expression, evaluate it.  An
+    # expression a tag names — the `1+2` of `X:(1+2)` — is not one to work
+    # out: assert stores what was written, and only a strict call asks the
+    # expression for its value.
+    from wild_life.data_structures import NON_STRICT_TERM as _NST_NORM
+    if not (t.flags & _NST_NORM):
+        arith = _try_eval_arith_to_term(t, eng)
+        if arith is not None:
+            return arith
 
     # Otherwise, walk attrs and normalize each child
     if not t.attr_list:
@@ -6857,14 +6862,33 @@ def bi_findall(goal: PsiTerm, eng) -> bool:
     return False
 
 
+def _normalize_clause_for_assert(arg: PsiTerm, eng) -> PsiTerm:
+    """Evaluate the arithmetic a clause carries, leaving its head alone.
+
+    assert(mynum(N+1)) with N=31 stores mynum(32) rather than the expression
+    tree.  The head of a rule is a pattern, though, not something to work out:
+    reducing `f1 -> 14` head-first would ask f1 for its current value and file
+    the clause under that number instead of under f1, losing the clause.
+    """
+    arg = arg.deref()
+    sym = arg.type.keyword.symbol if (arg.type and arg.type.keyword) else ''
+    if sym in (':-', '->') and '1' in arg.attr_list and '2' in arg.attr_list:
+        # A rule is filed as written.  The expression in its body is part of
+        # the clause rather than a sum to work out, and freezing it keeps a
+        # later strict call from working it out on the clause's behalf: after
+        # `assert(f2 -> X)` the X of `X:(1+2)` reads as 1 + 2 everywhere.
+        from wild_life.inference import _mark_arith_non_strict as _mans_asrt
+        _mans_asrt(arg, None, eng)
+        return arg
+    return _normalize_arith_in_term(arg, eng)
+
+
 def bi_assert(goal: PsiTerm, eng) -> bool:
     """assert(Clause) / assertz(Clause)."""
     arg = _get_one_arg(goal)
     if arg is None:
         return False
-    # Evaluate arithmetic sub-expressions before storing so that
-    # assert(mynum(N+1)) with N=31 stores mynum(32) not mynum(31+1).
-    arg = _normalize_arith_in_term(arg, eng)
+    arg = _normalize_clause_for_assert(arg, eng)
     eng.assert_first = False
     eng.assert_clause(arg)
     return True
@@ -6875,8 +6899,7 @@ def bi_asserta(goal: PsiTerm, eng) -> bool:
     arg = _get_one_arg(goal)
     if arg is None:
         return False
-    # Evaluate arithmetic sub-expressions before storing.
-    arg = _normalize_arith_in_term(arg, eng)
+    arg = _normalize_clause_for_assert(arg, eng)
     eng.assert_first = True
     eng.assert_clause(arg)
     eng.assert_first = False
@@ -8296,7 +8319,14 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
                     print(f"% '{func_name}' is a user-defined global variable "
                           f"worth @.")
                 elif not active_rules:
-                    print(f"% '{func_name}' is a user-defined predicate with an empty definition.\n")
+                    # What it was defined as is what listing calls it: a
+                    # function whose every clause has been retracted is still
+                    # a function.
+                    _kind_empty = ('function' if defn.type == DefType.FUNCTION
+                                   else 'predicate')
+                    print()
+                    print(f"% '{func_name}' is a user-defined {_kind_empty} "
+                          f"with an empty definition.")
                 else:
                     _bi_listing_one(defn, wl, imported=False)
         elif defn is not None and defn.type == DefType.TYPE:
