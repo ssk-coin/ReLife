@@ -7428,7 +7428,11 @@ def bi_load(goal: PsiTerm, eng) -> bool:
         return False
     filename = str(arg.value) if arg.value else (
         arg.type.keyword.symbol if arg.type and arg.type.keyword else '')
-    if not filename.endswith('.lf'):
+    # The name is taken as written when a file of that name is there —
+    # `load("FILES/t3203.1")` names the file itself — and `.lf` is only added
+    # when it is not.
+    import os as _os_ld
+    if not filename.endswith('.lf') and not _os_ld.path.exists(filename):
         filename += '.lf'
 
     wl = eng.wl
@@ -7776,7 +7780,18 @@ def _rule_to_string(h, b, wl):
     ps.insert_variables({}, False)
 
     # head を出力
-    _pretty_tag_or_psi_term(ps, h, MAX_PRECEDENCE + 1, 0, wl)
+    # A head whose functor binds no tighter than `:-` itself cannot be written
+    # in operator form there, so it is written as a call: `pred(a) :- succeed`,
+    # not `pred a :- succeed`, which would read back as something else.
+    from wild_life.print_term import _opcheck as _opchk_h, NOTOP as _NOTOP_h
+    _h_kind, _h_prec, _h_type = _opchk_h(h.deref())
+    _was_canon = ps.write_canon
+    if _h_kind != _NOTOP_h and _h_prec >= 1200:
+        ps.write_canon = True
+    try:
+        _pretty_tag_or_psi_term(ps, h, MAX_PRECEDENCE + 1, 0, wl)
+    finally:
+        ps.write_canon = _was_canon
     head_str = ps.outfile.getvalue()
 
     # body ゴールを個別に出力 (outfile を切り替えて再利用)
