@@ -21,7 +21,7 @@ from typing import Optional, Tuple
 
 from wild_life.data_structures import (
     PsiTerm, Definition, GoalType, DefType, FACT, QUERY, ERROR,
-    int_div as _int_div
+    int_div as _int_div, NON_STRICT_TERM as _NST_SWAP
 )
 from wild_life.unification import (
     UnificationFailure, CutException, HaltException, AbortException,
@@ -564,10 +564,16 @@ def _try_eval_arith_to_term(t: PsiTerm, eng) -> Optional[PsiTerm]:
                                                                'exp','log','floor','ceiling')):
         return None  # already a number, no evaluation needed
     result = _make_number(eng, v)
-    # _eval_arith may have already fired delay rules for this value (e.g.
-    # via the binary * path or literal evaluation). Mark _delay_fired=True so
-    # that subsequent unification with a free variable does not re-fire.
+    # The number an expression comes to is a number the program has just been
+    # handed, so the sort's delay rules run on it once, here: `A = 2+2` owes
+    # `:: I:int | …` its 4.  The mark keeps a later unification from running
+    # them a second time.
     result._delay_fired = True
+    _fire_here = (eng is not None and getattr(eng, 'unifier', None) is not None
+                  and eng.wl is not None and eng.wl.delay_rules
+                  and result.type is not None
+                  and _get_sym(t) != '*'
+                  and not getattr(eng, '_in_fire_delay', False))
     # Memoize the result back into the compound arithmetic term (t) via coref.
     # This propagates the evaluated value through the variable chain:
     # after evaluation, any variable that pointed to this expression will deref to
@@ -575,6 +581,8 @@ def _try_eval_arith_to_term(t: PsiTerm, eng) -> Optional[PsiTerm]:
     if eng is not None and t.coref is None and t.value is None and t.attr_list:
         eng.trail.trail_psi(t, 'coref')
         t.coref = result
+    if _fire_here:
+        eng.unifier._fire_delay_rules(result, result.type)
     return result
 
 
@@ -2116,11 +2124,9 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     if sym in ops2 and ok1 and ok2:
         try:
             _result_val = float(ops2[sym](v1, v2))
-            # Fire int/real delay for multiplication results.
-            # In C Wild Life, each intermediate product of N*fact(N-1) triggers
-            # the :: I:int global delay rule as the partial result is narrowed.
-            # Only fire for '*' to avoid double-firing subtraction results that
-            # are already handled by the pre-eval computed-term firing above.
+            # A product is a number the program has been handed: `N*fact(N-1)`
+            # owes the int rule each partial result.  _try_eval_arith_to_term
+            # leaves products alone for the same reason.
             if sym == '*':
                 from wild_life.runtime import WL as _WL_mul
                 if (_WL_mul.delay_rules and eng is not None
@@ -4459,10 +4465,17 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     from wild_life.data_structures import NON_STRICT_TERM as _BI_UNI_NST
     _wl_uni = eng.wl
     def _is_bare_arith_op(td):
+        """A two-argument operator that has not been given both arguments.
+
+        `and(B)` is a function waiting for its second argument, not a term
+        with room for one, so `A = and(B), A = @(2 => C)` is refused.
+        """
         sym = td.type.keyword.symbol if (td.type and td.type.keyword) else ''
-        return (sym in _ARITH_OPS_SET
-                and not td.attr_list        # no existing args
-                and not (td.flags & _BI_UNI_NST))  # not frozen
+        if sym not in _CURRIABLE_BINARY_OPS:
+            return False
+        if td.flags & _BI_UNI_NST:   # frozen by a backtick: a term, not a call
+            return False
+        return not ('1' in td.attr_list and '2' in td.attr_list)
     # Use symbol-based check for apply type — the parsed @(1,2) may use the '@' symbol
     # definition rather than wl.apply which is set up later during boot.
     _b_sym_apply = b_d.type.keyword.symbol if (b_d.type and b_d.type.keyword) else ''
@@ -4473,12 +4486,12 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                         (_a_sym_apply == '@' or a_d.type is _wl_uni.apply))
     if _is_bare_arith_op(a_d) and _b_is_apply_type and b_d.attr_list:
         import sys as _sys_uni
-        _sym_uni = a_d.type.keyword.symbol if (a_d.type and a_d.type.keyword) else '?'
+        _sym_uni = _term_to_str(a_d, eng)
         _sys_uni.stderr.write(f'*** Error: attempt to unify with curried function {_sym_uni}\n')
         return False
     if _is_bare_arith_op(b_d) and _a_is_apply_type and a_d.attr_list:
         import sys as _sys_uni2
-        _sym_uni2 = b_d.type.keyword.symbol if (b_d.type and b_d.type.keyword) else '?'
+        _sym_uni2 = _term_to_str(b_d, eng)
         _sys_uni2.stderr.write(f'*** Error: attempt to unify with curried function {_sym_uni2}\n')
         return False
 
@@ -5293,6 +5306,17 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     # re-fires here without any extra bookkeeping.
     is_resid_refiring: bool = getattr(goal, '_resid_marker', False)
 
+    # An equation is read the same either way round: `A*B = 20` states what
+    # the product is, just as `20 = A*B` does, and suspends on A and B rather
+    # than failing for having the expression on the left.
+    if (_get_sym(a_d) in _ARITH_OPS_SET and a_d.attr_list
+            and _get_sym(b_d) not in _ARITH_OPS_SET
+            and not (a_d.flags & _NST_SWAP) and not (b_d.flags & _NST_SWAP)
+            and _try_eval_arith_to_term(a_d, eng) is None):
+        _swapped = PsiTerm(type_def=goal.type)
+        _swapped.attr_list = {'1': b_d, '2': a_d}
+        return bi_unify(_swapped, eng)
+
     # Try arithmetic evaluation on the RHS (for A = 1+2 style).
     # Skip user-defined function calls here — they are handled by eval_aim,
     # and evaluating them twice creates separate Python objects that each fire
@@ -5658,6 +5682,13 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                                              else (False, 0.0))
                             if _zd_ok and _zd_v == 0:
                                 return _unify(eng, a_d_final, _make_number(eng, 0.0))
+                        # `0.5 = sin(B)` says what B is: a function with one
+                        # free argument and a known result is read backwards.
+                        _inv = _invert_unary_call(a_d, b_d, eng)
+                        if _inv is not None:
+                            _inv_arg, _inv_val = _inv
+                            return _unify(eng, _inv_arg,
+                                          _make_number(eng, _inv_val))
                         from wild_life.data_structures import Goal, Residuation
                         eq_defn = getattr(wl, 'eqsym', None) or wl.syntax_module.symbol_table.get('=')
                         eq_term = PsiTerm(type_def=eq_defn)
@@ -5788,54 +5819,72 @@ def _sort_compare_args(goal, eng):
         return None
     sorts = []
     for _arg in (a, b):
-        _d = _arg.deref()
+        _d = _strip_backtick(_arg.deref())
         _ev = _try_eval_any_func(_d, eng)
         if _ev is None:
             _ev = _try_eval_string_func(_d, eng)
         if _ev is not None:
-            _d = _ev.deref()
+            _d = _strip_backtick(_ev.deref())
         if _d.type is None:
             return None
-        sorts.append(_d.type)
+        # A number or string is a sort of its own, so 3 and 4 are no more the
+        # same sort than a and b are, though both are integers.
+        sorts.append((_d.type, _d.value))
     return sorts[0], sorts[1]
+
+
+def _strip_backtick(t: PsiTerm) -> PsiTerm:
+    """What a backtick holds, or the term itself."""
+    while (t is not None and t.type is not None and t.type.keyword is not None
+           and t.type.keyword.symbol == '`' and '1' in t.attr_list):
+        t = t.attr_list['1'].deref()
+    return t
+
+
+def _sort_key_under(lower, upper) -> bool:
+    """Whether the first sort key is the second or lies under it."""
+    (ld, lv), (ud, uv) = lower, upper
+    if uv is not None:
+        return ld is ud and lv == uv
+    return ld.is_subtype_of(ud)
 
 
 def bi_sort_eq(goal: PsiTerm, eng) -> bool:
     """X :== Y — X and Y have the same sort."""
     sorts = _sort_compare_args(goal, eng)
-    return sorts is not None and sorts[0] is sorts[1]
+    return sorts is not None and sorts[0] == sorts[1]
 
 
 def bi_sort_ne(goal: PsiTerm, eng) -> bool:
     """X :\\== Y — X and Y have different sorts."""
     sorts = _sort_compare_args(goal, eng)
-    return sorts is not None and sorts[0] is not sorts[1]
+    return sorts is not None and sorts[0] != sorts[1]
 
 
 def bi_sort_le(goal: PsiTerm, eng) -> bool:
     """X :=< Y — X's sort is Y's sort or lies under it."""
     sorts = _sort_compare_args(goal, eng)
-    return sorts is not None and sorts[0].is_subtype_of(sorts[1])
+    return sorts is not None and _sort_key_under(sorts[0], sorts[1])
 
 
 def bi_sort_lt(goal: PsiTerm, eng) -> bool:
     """X :< Y — X's sort lies strictly under Y's."""
     sorts = _sort_compare_args(goal, eng)
-    return (sorts is not None and sorts[0] is not sorts[1]
-            and sorts[0].is_subtype_of(sorts[1]))
+    return (sorts is not None and sorts[0] != sorts[1]
+            and _sort_key_under(sorts[0], sorts[1]))
 
 
 def bi_sort_ge(goal: PsiTerm, eng) -> bool:
     """X :>= Y — X's sort is Y's sort or lies above it."""
     sorts = _sort_compare_args(goal, eng)
-    return sorts is not None and sorts[1].is_subtype_of(sorts[0])
+    return sorts is not None and _sort_key_under(sorts[1], sorts[0])
 
 
 def bi_sort_gt(goal: PsiTerm, eng) -> bool:
     """X :> Y — X's sort lies strictly above Y's."""
     sorts = _sort_compare_args(goal, eng)
-    return (sorts is not None and sorts[0] is not sorts[1]
-            and sorts[1].is_subtype_of(sorts[0]))
+    return (sorts is not None and sorts[0] != sorts[1]
+            and _sort_key_under(sorts[1], sorts[0]))
 
 
 def bi_sort_not_lt(goal: PsiTerm, eng) -> bool:
@@ -6278,6 +6327,29 @@ def bi_once(goal: PsiTerm, eng) -> bool:
     return result
 
 
+def bi_call_once(goal: PsiTerm, eng) -> bool:
+    """call_once(P) — prove P once, waiting while P is still unknown.
+
+    `call_once(X)` with X free has nothing to prove yet, so it suspends on X
+    and runs once X says what it is.
+    """
+    arg = _get_one_arg(goal)
+    if arg is None:
+        return False
+    if _is_var(arg, eng):
+        from wild_life.data_structures import (Goal as _G_co, Residuation as _R_co,
+                                               SORT_VAR as _SV_co)
+        _pending = _G_co(GoalType.PROVE, goal, _DEFRULES_SENTINEL, None,
+                         next=None, pending=True)
+        eng.trail.trail_psi(arg, 'resid')
+        arg.resid = list(arg.resid or []) + [_R_co(goal=_pending)]
+        if not (arg.flags & _SV_co):
+            eng.trail.trail_psi(arg, 'flags')
+            arg.flags |= _SV_co
+        return True
+    return bi_once(goal, eng)
+
+
 def _all_builtin_goals(t: 'PsiTerm', eng, _depth: int = 0) -> bool:
     """Whether t is a goal made only of built-in predicates.
 
@@ -6595,6 +6667,58 @@ def bi_asserta(goal: PsiTerm, eng) -> bool:
     return True
 
 
+# What each one-argument function undoes, where undoing it says one thing.
+_UNARY_INVERSES = {
+    'sin': math.asin, 'cos': math.acos, 'tan': math.atan,
+    'asin': math.sin, 'acos': math.cos, 'atan': math.tan,
+    'exp': math.log, 'log': math.exp,
+    'sqrt': lambda v: v * v,
+}
+
+
+def _invert_unary_call(known: PsiTerm, call: PsiTerm, eng):
+    """Read `Value = f(X)` backwards, as (X, the value X must have).
+
+    Returns None where the call is not one function of one free argument, or
+    where undoing it would say nothing definite.
+    """
+    sym = _get_sym(call)
+    inverse = _UNARY_INVERSES.get(sym)
+    if inverse is None:
+        return None
+    if len(call.attr_list) != 1:
+        return None
+    arg = call.attr_list.get('1')
+    if arg is None:
+        return None
+    arg = arg.deref()
+    if arg.value is not None or arg.attr_list:
+        return None
+    ok, value = _eval_arith(known, eng)
+    if not ok:
+        return None
+    try:
+        return arg, float(inverse(value))
+    except (ValueError, OverflowError):
+        return None
+
+
+# Two-argument operators that stand for a function until both arguments are
+# there: `and(B)` is waiting for its second, not a term with room for one.
+_CURRIABLE_BINARY_OPS = frozenset(('and', 'or', 'xor')) | _ARITH_OPS_SET
+
+
+def report_static_definition(defn) -> None:
+    """Say that a closed definition was asked to change."""
+    kw = getattr(defn, 'keyword', None)
+    if kw is None:
+        return
+    module = getattr(kw, 'module', None)
+    name = (f"{module.module_name}#{kw.symbol}"
+            if module is not None and module.module_name else kw.symbol)
+    sys.stderr.write(f"*** Error: the predicate '{name}' may not be changed.\n")
+
+
 def bi_retract(goal: PsiTerm, eng) -> bool:
     """retract(Clause) — remove first matching clause (non-deterministic).
 
@@ -6622,6 +6746,10 @@ def bi_retract(goal: PsiTerm, eng) -> bool:
     head = head.deref()
     defn = head.type
     if defn is None or defn.rule is None or callable(defn.rule):
+        return False
+    if getattr(defn, 'is_static', False):
+        # A closed definition gives nothing up.
+        report_static_definition(defn)
         return False
     # Build a body term if none given (unifies with 'true' / any body)
     if body is None:
@@ -9134,6 +9262,7 @@ def register_all(wl) -> None:
     _reg('call', bi_call)
     _reg('implies', bi_implies)
     _reg('once', bi_once)
+    _reg('call_once', bi_call_once)
     _reg('cond', bi_cond)
     _reg('findall', bi_findall)
     _reg('bagof', bi_findall)   # simplified
@@ -9316,8 +9445,28 @@ def register_all(wl) -> None:
             # listing prints a `dynamic(P)?` header for a predicate declared
             # this way, so that its listing can be read back in.
             arg.type.is_dynamic = True
+            arg.type.is_static = False
         return True
     _reg('dynamic', _bi_dynamic)
+
+    def _bi_static(goal, eng):
+        """static(P, …): close P's definition.
+
+        A static predicate takes no more clauses and gives none up: asserting
+        one is quietly accepted and changes nothing, and retracting fails.
+        """
+        i = 1
+        while True:
+            arg = goal.attr_list.get(str(i))
+            if arg is None:
+                break
+            i += 1
+            arg_d = arg.deref()
+            if arg_d.type is not None:
+                arg_d.type.is_static = True
+                arg_d.type.is_dynamic = False
+        return True
+    _reg('static', _bi_static)
 
     def _bi_persistent(goal, eng):
         """persistent(X1, X2, ...) — declare global variables that keep their

@@ -166,6 +166,12 @@ def _share_fired_rules(u: PsiTerm, v: PsiTerm) -> set:
     return fs
 
 
+# How far a rule body's literals may go on announcing literals of their own.
+# `:: I:int | I <- 3` hands each firing a fresh 3 to announce, which would
+# never end; two levels is what manual8's `write(C.1)` needs.
+_LITERAL_FIRE_LIMIT = 2
+
+
 def defers_check(defn, _depth: int = 0) -> bool:
     """Whether a term of this sort holds its prototype and delay rules back.
 
@@ -341,6 +347,8 @@ class Unifier:
         # If we encounter the same pair again (via circular attrs), we return True
         # immediately (the rational-tree assumption: cyclic terms can be unified).
         self._unifying_pairs: set = set()
+        # How deep the announcing of a rule body's own literals has gone.
+        self._literal_fire_depth: int = 0
         # Set while asking whether a narrowing could exist at all.
         self._skip_prototypes: bool = False
         # ids of psi-terms whose conditional sort is being checked.
@@ -1119,6 +1127,13 @@ class Unifier:
         if u is v:
             return True
 
+        # Whether each side already stood for a value before the other's was
+        # copied across: two different numbers stay two terms, but a variable
+        # meeting a number becomes that number's own term, so `A = C` leaves
+        # C reading as A.
+        _u_had_value = u.value is not None
+        _v_had_value = v.value is not None
+
         # 値の単一化 (数値・文字列)
         if not self._unify_values(u, v):
             return False
@@ -1134,8 +1149,10 @@ class Unifier:
         # Only do this for non-numeric atoms (numbers are primitive values that
         # should remain separate; ChoicePoint values in '!' terms are OK to merge).
         from wild_life.data_structures import ChoicePoint as _CP_merge, NON_STRICT_TERM as _NST_merge
-        _u_prim = isinstance(u.value, (int, float, str)) if u.value is not None else False
-        _v_prim = isinstance(v.value, (int, float, str)) if v.value is not None else False
+        _u_prim = (_u_had_value
+                   and isinstance(u.value, (int, float, str)))
+        _v_prim = (_v_had_value
+                   and isinstance(v.value, (int, float, str)))
         # Bind u → v so deref(u) returns v (the canonical psi-term).
         # This matches C Wild Life's convention: the second argument (v) is preferred
         # as the canonical representative. For example, when unifying A.c (T_c) with A,
@@ -1552,8 +1569,12 @@ class Unifier:
         finally:
             self.engine._in_fire_delay = False
         # Fire deferred delays for concrete integer/real literals found in goal copies.
-        for _lit_term in deferred_literal_fires:
-            self._fire_delay_rules(_lit_term, _lit_term.type)
+        self._literal_fire_depth += 1
+        try:
+            for _lit_term in deferred_literal_fires:
+                self._fire_delay_rules(_lit_term, _lit_term.type)
+        finally:
+            self._literal_fire_depth -= 1
 
     def _collect_literal_integers(self, t: PsiTerm, result: list, visited: set) -> None:
         """Walk t recursively and collect concrete integer/real PsiTerms.
@@ -1568,6 +1589,11 @@ class Unifier:
             return
         visited.add(tid)
         wl = WL
+        # A backtick holds its term as it is written; the 4 in `` `4 `` is a
+        # shape to compare against, not a number the rule has just been given.
+        if t.type is not None and t.type.keyword is not None \
+                and t.type.keyword.symbol == '`':
+            return
         if (t.value is not None and t.type is not None
                 and t.type is not wl.top
                 and t.type.keyword is not None
@@ -1627,9 +1653,11 @@ class Unifier:
             # variables that get "narrowed" to their value during rule instantiation,
             # triggering the int/real delay rule.  We collect them here (before unify
             # changes any bindings) to avoid collecting already-bound sort-vars.
-            if deferred_literal_fires is not None:
-                pre_unify_literals: list = []
-                self._collect_literal_integers(goal_copy, pre_unify_literals, set())
+            pre_unify_literals: list = []
+            if deferred_literal_fires is not None and \
+                    self._literal_fire_depth < _LITERAL_FIRE_LIMIT:
+                self._collect_literal_integers(goal_copy, pre_unify_literals,
+                                               set())
 
             # TENTATIVE UNIFICATION: take a trail mark before pattern unification.
             # If the goal fails, we undo back here and the added attrs are removed.
@@ -1659,6 +1687,7 @@ class Unifier:
             # We temporarily release _in_fire_delay to allow _fire_delay_rules to run.
             if deferred_literal_fires is not None and pre_unify_literals:
                 self.engine._in_fire_delay = False
+                self._literal_fire_depth += 1
                 try:
                     for _lit in pre_unify_literals:
                         _lit_d = _lit.deref()
@@ -1666,6 +1695,7 @@ class Unifier:
                             _lit_d._delay_fired = True
                             self._fire_delay_rules(_lit_d, _lit_d.type)
                 finally:
+                    self._literal_fire_depth -= 1
                     self.engine._in_fire_delay = True
 
             # Prove the goal synchronously via a nested inner run.
