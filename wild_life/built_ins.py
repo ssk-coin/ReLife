@@ -305,6 +305,49 @@ def _is_proper_bool_expr(t: 'PsiTerm') -> bool:
     return False
 
 
+def _term_reaches_itself(t: 'PsiTerm', _seen: frozenset = frozenset(),
+                        _depth: int = 0) -> bool:
+    """Whether following t's features leads back to t."""
+    if t is None or _depth > 60:
+        return False
+    t = t.deref()
+    if id(t) in _seen:
+        return True
+    _seen = _seen | {id(t)}
+    for ref in t.attr_list.values():
+        if _term_reaches_itself(ref, _seen, _depth + 1):
+            return True
+    return False
+
+
+def _bool_operand_ok(t: 'PsiTerm', wl, _depth: int = 0) -> bool:
+    """Whether a term can stand where a boolean is wanted.
+
+    `not(B)` is a boolean whatever B turns out to be, but only if B can be one:
+    `a = not(B)` and `A = not(b)` are both refused, because neither a nor b is
+    a boolean and no narrowing makes them one.
+    """
+    from wild_life.data_structures import SORT_VAR as _SV_bo
+    if t is None or _depth > 20:
+        return False
+    t = t.deref()
+    if _is_proper_bool_expr(t):
+        return all(_bool_operand_ok(_v, wl, _depth + 1)
+                   for _v in t.attr_list.values())
+    if t.value is not None:
+        return False        # a number or a string is not a boolean
+    if t.type is None or t.type is wl.top:
+        return True         # a variable can still become one
+    if wl.boolean is None:
+        return True
+    if t.attr_list:
+        return False
+    from wild_life.unification import types_compatible as _tc_bo
+    if t.flags & _SV_bo:
+        return _tc_bo(t.type, wl.boolean)
+    return t.type.is_subtype_of(wl.boolean)
+
+
 def _collect_bool_free_vars(t: 'PsiTerm', wl, result: list, seen: set) -> None:
     """Collect unbound variables in a boolean expression (and, or, not, xor).
 
@@ -800,6 +843,34 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             if defn.is_subtype_of(wl.quoted_string):
                 return _make_string(eng, str(a1.value))
         return _make_atom(eng, defn.keyword.symbol)
+
+    elif sym == 'eval':
+        # eval(T) is T's value, and a term with no value of its own is that
+        # value: `A = eval(X:a(X))` answers the very term X stands for.
+        a1 = t.attr_list.get('1')
+        if a1 is None or eng is None:
+            return None
+        arg = _strip_backtick(a1.deref())
+        _ok_ev, _v_ev = _eval_arith(arg, eng)
+        if _ok_ev:
+            return _make_number(eng, _v_ev)
+        if _is_user_function(arg):
+            # Asked for the value, not for the term to become it: eval reduces
+            # a copy, so `A = eval(X:f(X))` answers 1 and leaves X the call.
+            _mark_ev = eng.trail.mark()
+            try:
+                _red_ev = _eval_user_func_sync(copy_term(arg, {}), eng, 0)
+                if _red_ev is None:
+                    return None
+                return copy_term(_red_ev.deref(), {})
+            finally:
+                eng.trail.undo_to(_mark_ev)
+        _inner_ev = _try_eval_string_func(arg, eng)
+        if _inner_ev is not None:
+            return _inner_ev
+        # eval hands back a value, not the term it read: `A = eval(X:a(X))`
+        # gives A a cyclic term of its own rather than making A and X one.
+        return copy_term(arg, {})
 
     elif sym in ('var', 'nonvar', 'is_function', 'is_predicate', 'is_sort'):
         # These read as functions too: `A = var(_)` answers true, not var(@).
@@ -1398,8 +1469,13 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
                                   'truncate'))
     from wild_life.data_structures import NON_STRICT_TERM as _WT_NST
     _is_nst = bool(t.flags & _WT_NST)
+    # A call that reaches itself is written as the call it is: `X : f(X)` has
+    # no value to show that is not itself.  What asks for its value — `=`, or
+    # an argument position — still reduces it.
+    _self_call = _is_user_function(t) and _term_reaches_itself(t)
     try:
-        t_eval = _try_eval_arith_to_term(t, eng) if not _is_nst else None
+        t_eval = (_try_eval_arith_to_term(t, eng)
+                  if not _is_nst and not _self_call else None)
         if t_eval is not None:
             t = t_eval
         else:
@@ -1431,7 +1507,10 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
                         if wl:
                             _fresh_var.type = wl.top
                         t = _fresh_var
-            elif _is_user_function(t) and eng is not None:
+            elif (_is_user_function(t) and eng is not None
+                    and not _term_reaches_itself(t)):
+                # A call that reaches itself is written as the call it is:
+                # `X : f(X)` has no value to show that is not itself.
                 # User-defined function call: evaluate synchronously for display.
                 # Use a trail mark so pattern-matching bindings don't leak.
                 # NOTE: 0-arity user functions (global variables declared with
@@ -1932,8 +2011,11 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
             eng.unifier._fire_delay_rules(t, t.type)
         return True, float(t.value)
 
-    # User-defined function: try to evaluate it inline (no condition case)
-    if t.type is not None and t.type.type == DefType.FUNCTION and t.type.rule:
+    # User-defined function: try to evaluate it inline (no condition case).
+    # A call under a backtick is the call, not what it answers, so it is left
+    # alone here the same way `_is_user_function` leaves it alone elsewhere;
+    # so is a call that reaches itself, which has no value but itself.
+    if _is_user_function(t):
         note_persistent_use(t.type, eng)
         active = [(h, b) for (h, b) in t.type.rule if h is not None and b is not None]
         from wild_life.unification import copy_term
@@ -2025,7 +2107,11 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         if a1_sym == '`':
             inner = a1d.attr_list.get('1')
             if inner is not None:
-                return _eval_arith(inner.deref(), eng, _depth + 1)
+                a1d = inner.deref()
+        # A call is reduced for its value, not into its value: that is left to
+        # the eval branch of _try_eval_string_func, which reduces a copy, so
+        # `A = eval(X:f(X))` answers 1 and leaves X the call it was.
+        if _is_user_function(a1d):
             return False, 0.0
         return _eval_arith(a1d, eng, _depth + 1)
 
@@ -3007,7 +3093,7 @@ def _is_user_function(t: PsiTerm) -> bool:
 
 
 def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
-    """Synchronously evaluate a user-defined function call.
+    """Synchronously evaluate a user-defined function call, cycles included.
 
     This is used to eagerly evaluate function-call arguments before pattern
     matching (e.g., reverse([1,2,3,4]) in rev(reverse([1,2,3,4]),[])).
@@ -3024,6 +3110,26 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
     if not _is_user_function(t):
         return None
 
+    from wild_life.unification import copy_term
+    from wild_life.data_structures import QUOTED_TRUE
+
+    # A call that reaches itself is not reduced through its own argument:
+    # `X : f(X)` is the very call being evaluated, so it stands as it is while
+    # the rule is matched against it.
+    _active_sync = getattr(eng, '_sync_eval_active', None)
+    if _active_sync is None:
+        _active_sync = eng._sync_eval_active = set()
+    if id(t) in _active_sync:
+        return None
+    _active_sync.add(id(t))
+    try:
+        return _eval_user_func_sync_inner(t, eng, _depth)
+    finally:
+        _active_sync.discard(id(t))
+
+
+def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm]:
+    """The body of _eval_user_func_sync, once the call is known to be new."""
     from wild_life.unification import copy_term
     from wild_life.data_structures import QUOTED_TRUE
 
@@ -4442,12 +4548,24 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     from wild_life.inference import _mark_arith_non_strict as _BI_MANS  # noqa: F811
     _bq_sym_check = (lambda td: td.type is not None and td.type.keyword is not None
                      and td.type.keyword.symbol == '`')
+    def _freeze_call(td):
+        """Keep a backticked call as the call it is, not the value it has.
+
+        `` `(X:f(X)) `` is the term f(X), so it is not reduced to what f
+        answers, the way the arithmetic under a backtick is not reduced.
+        """
+        from wild_life.data_structures import QUOTED_TRUE as _QT_bq
+        if _is_user_function(td):
+            eng.trail.trail_psi(td, 'flags')
+            td.flags |= _QT_bq
+
     _b_was_backtick = False
     if _bq_sym_check(b_d):
         _bq_inner = b_d.attr_list.get('1')
         if _bq_inner is not None:
             _bq_inner_d = _bq_inner.deref()
             _BI_MANS(_bq_inner_d)  # recursively mark arithmetic sub-terms as NON_STRICT
+            _freeze_call(_bq_inner_d)
             b_d = _bq_inner_d
             _b_was_backtick = True
     _a_was_backtick = False
@@ -4456,6 +4574,7 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         if _bq_inner is not None:
             _bq_inner_d = _bq_inner.deref()
             _BI_MANS(_bq_inner_d)
+            _freeze_call(_bq_inner_d)
             a_d = _bq_inner_d
             _a_was_backtick = True
 
@@ -4955,13 +5074,26 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     # This check must run BEFORE _try_eval_bool so that 'true and c' shows
     # 'true and c' in the error message (not just 'c' after simplification).
     def _check_nonbool_bool_arg(expr_t):
-        """Return True and print error if expr_t is and/or with a concrete non-boolean arg."""
+        """Report a concrete non-boolean argument of a boolean operator."""
         _sym_nb = _get_sym(expr_t)
-        if _sym_nb not in ('and', 'or'):
+        if _sym_nb not in ('and', 'or', 'not', 'xor'):
             return False
         _a1_nb = expr_t.attr_list.get('1')
         _a2_nb = expr_t.attr_list.get('2')
-        if _a1_nb is None or _a2_nb is None:
+        if _a1_nb is None:
+            return False
+        if _sym_nb == 'not':
+            # `not` takes one argument, and reads as `not b` when it is wrong.
+            if _a2_nb is not None:
+                return False
+            _a1_nb = _a1_nb.deref()
+            if _bool_operand_ok(_a1_nb, eng.wl):
+                return False
+            import sys as _sys_n1
+            print(f"*** Error: Non-boolean argument or result in "
+                  f"'not {_get_sym(_a1_nb) or '@'}'.", file=_sys_n1.stderr)
+            return True
+        if _a2_nb is None:
             return False
         _a1_nb = _a1_nb.deref()
         _a2_nb = _a2_nb.deref()
@@ -5135,6 +5267,20 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         else:
             _bool_expr_br, _other_br = a_d, b_d
         _bool_sym_br = _get_sym(_bool_expr_br)
+
+        # Both what the expression is made of and what it is being equated
+        # with have to be able to be booleans at all.
+        if not (_bool_operand_ok(_bool_expr_br, eng.wl)
+                and _bool_operand_ok(_other_br, eng.wl)):
+            return False
+
+        # Nothing is its own negation, so `A = not(A)` fails — and so does
+        # `A = B` once `A = not(B)` is waiting on them, which is the same
+        # equation with A and B made one.
+        if _bool_sym_br == 'not':
+            _not_arg_br = _bool_expr_br.attr_list.get('1')
+            if _not_arg_br is not None and _not_arg_br.deref() is _other_br:
+                return False
 
         # Collect free variables inside the boolean expression.
         _bool_vars_br: list = []
@@ -10181,6 +10327,44 @@ def register_all(wl) -> None:
             i += 1
         return True
     _reg('public', _bi_public)
+
+    def _bi_private(goal, eng):
+        """private(P, …) — give the current module its own P.
+
+        Without it a definition of `+` would add clauses to the syntax
+        module's `+`; with it the module gets a `+` of its own, and the one it
+        hides is still reachable as `'syntax#+'`.
+        """
+        from wild_life.data_structures import Keyword as _KW_pv, \
+            Definition as _Def_pv
+        mod = wl.current_module
+        if mod is None:
+            return True
+        i = 1
+        while True:
+            a = goal.attr_list.get(str(i))
+            if a is None:
+                break
+            i += 1
+            ad = a.deref()
+            name = _get_string_or_atom(ad, eng)
+            if name is None and ad.type and ad.type.keyword:
+                name = ad.type.keyword.symbol
+            if not name or name in mod.symbol_table:
+                continue
+            hidden = wl.update_symbol(mod, name)
+            kw = _KW_pv(name, mod)
+            defn = _Def_pv(kw)
+            kw.definition = defn
+            mod.symbol_table[name] = defn
+            _hidden_kw = getattr(hidden, 'keyword', None)
+            _hidden_mod = getattr(_hidden_kw, 'module', None) if _hidden_kw else None
+            if _hidden_mod is not None and _hidden_mod is not mod:
+                sys.stderr.write(
+                    f"*** Warning: local definition of '{name}' overrides "
+                    f"'{_hidden_mod.module_name}#{name}'\n")
+        return True
+    _reg('private', _bi_private)
 
     def _bi_private_feature(goal, eng):
         """private_feature(F, ...) — mark features as private to current module.

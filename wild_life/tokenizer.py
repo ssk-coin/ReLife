@@ -269,7 +269,16 @@ class TokenizerState:
             tok.value = result
         else:
             # 'atom' 形式 - アトムとして扱う
-            tok.type = WL.update_symbol(None, result)
+            # A quoted atom names its module the same way an unquoted one does:
+            # `'syntax#+'` is the syntax module's `+`, which is how a local
+            # definition of `+` still reaches the one it overrides.
+            _mod = None
+            _name = result
+            _hash = result.find('#')
+            if 0 < _hash < len(result) - 1:
+                _mod = WL.create_module(result[:_hash])
+                _name = result[_hash + 1:]
+            tok.type = WL.update_symbol(_mod, _name)
             tok.value = None
 
     def read_number(self, tok: PsiTerm, first_char: str):
