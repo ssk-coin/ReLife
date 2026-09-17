@@ -305,6 +305,34 @@ def _is_proper_bool_expr(t: 'PsiTerm') -> bool:
     return False
 
 
+def _bool_operand_ok(t: 'PsiTerm', wl, _depth: int = 0) -> bool:
+    """Whether a term can stand where a boolean is wanted.
+
+    `not(B)` is a boolean whatever B turns out to be, but only if B can be one:
+    `a = not(B)` and `A = not(b)` are both refused, because neither a nor b is
+    a boolean and no narrowing makes them one.
+    """
+    from wild_life.data_structures import SORT_VAR as _SV_bo
+    if t is None or _depth > 20:
+        return False
+    t = t.deref()
+    if _is_proper_bool_expr(t):
+        return all(_bool_operand_ok(_v, wl, _depth + 1)
+                   for _v in t.attr_list.values())
+    if t.value is not None:
+        return False        # a number or a string is not a boolean
+    if t.type is None or t.type is wl.top:
+        return True         # a variable can still become one
+    if wl.boolean is None:
+        return True
+    if t.attr_list:
+        return False
+    from wild_life.unification import types_compatible as _tc_bo
+    if t.flags & _SV_bo:
+        return _tc_bo(t.type, wl.boolean)
+    return t.type.is_subtype_of(wl.boolean)
+
+
 def _collect_bool_free_vars(t: 'PsiTerm', wl, result: list, seen: set) -> None:
     """Collect unbound variables in a boolean expression (and, or, not, xor).
 
@@ -4955,13 +4983,26 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     # This check must run BEFORE _try_eval_bool so that 'true and c' shows
     # 'true and c' in the error message (not just 'c' after simplification).
     def _check_nonbool_bool_arg(expr_t):
-        """Return True and print error if expr_t is and/or with a concrete non-boolean arg."""
+        """Report a concrete non-boolean argument of a boolean operator."""
         _sym_nb = _get_sym(expr_t)
-        if _sym_nb not in ('and', 'or'):
+        if _sym_nb not in ('and', 'or', 'not', 'xor'):
             return False
         _a1_nb = expr_t.attr_list.get('1')
         _a2_nb = expr_t.attr_list.get('2')
-        if _a1_nb is None or _a2_nb is None:
+        if _a1_nb is None:
+            return False
+        if _sym_nb == 'not':
+            # `not` takes one argument, and reads as `not b` when it is wrong.
+            if _a2_nb is not None:
+                return False
+            _a1_nb = _a1_nb.deref()
+            if _bool_operand_ok(_a1_nb, eng.wl):
+                return False
+            import sys as _sys_n1
+            print(f"*** Error: Non-boolean argument or result in "
+                  f"'not {_get_sym(_a1_nb) or '@'}'.", file=_sys_n1.stderr)
+            return True
+        if _a2_nb is None:
             return False
         _a1_nb = _a1_nb.deref()
         _a2_nb = _a2_nb.deref()
@@ -5135,6 +5176,20 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         else:
             _bool_expr_br, _other_br = a_d, b_d
         _bool_sym_br = _get_sym(_bool_expr_br)
+
+        # Both what the expression is made of and what it is being equated
+        # with have to be able to be booleans at all.
+        if not (_bool_operand_ok(_bool_expr_br, eng.wl)
+                and _bool_operand_ok(_other_br, eng.wl)):
+            return False
+
+        # Nothing is its own negation, so `A = not(A)` fails — and so does
+        # `A = B` once `A = not(B)` is waiting on them, which is the same
+        # equation with A and B made one.
+        if _bool_sym_br == 'not':
+            _not_arg_br = _bool_expr_br.attr_list.get('1')
+            if _not_arg_br is not None and _not_arg_br.deref() is _other_br:
+                return False
 
         # Collect free variables inside the boolean expression.
         _bool_vars_br: list = []
