@@ -746,6 +746,11 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None:
             return None
         a1 = a1.deref()
+        # What is written is the term's value, not the call that stands for
+        # it: `psi2str(chr(116))` reads "t", not "chr(116)".
+        _a1_ev = _try_eval_any_func(a1, eng)
+        if _a1_ev is not None:
+            a1 = _a1_ev.deref()
         s = _term_to_display_string(a1, eng)
         return _make_string(eng, s)
 
@@ -775,14 +780,15 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None or a2 is None:
             return None
         a1, a2 = a1.deref(), a2.deref()
-        # Recursively evaluate nested string funcs FIRST (before checking is_string),
-        # so that strcon("as", strcon(F, F)) can be fully evaluated when F is bound.
-        a1e = _try_eval_string_func(a1, eng)
+        # Reduce what the arguments stand for FIRST (before checking
+        # is_string), so that `strcon("as", strcon(F,F))` is worked out once F
+        # is bound, and `strcon(charac(116), Z)` reads what charac answers.
+        a1e = _try_eval_any_func(a1, eng)
         if a1e is not None:
-            a1 = a1e
-        a2e = _try_eval_string_func(a2, eng)
+            a1 = a1e.deref()
+        a2e = _try_eval_any_func(a2, eng)
         if a2e is not None:
-            a2 = a2e
+            a2 = a2e.deref()
         # Only evaluate when BOTH arguments are now concrete strings
         if eng is not None:
             wl = eng.wl
@@ -883,6 +889,21 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             if defn.is_subtype_of(wl.quoted_string):
                 return _make_string(eng, str(a1.value))
         return _make_atom(eng, defn.keyword.symbol)
+
+    elif sym == 'call_once':
+        # `call_once(G)` is a boolean function: it proves G once and answers
+        # whether it held, keeping what the proof bound.  built_ins.lf spells
+        # out the same thing for the interpreters that lack it as a built-in:
+        # `call_once(G) -> T | (evalin(G), T = true ; T = false), !.`
+        a1 = t.attr_list.get('1')
+        if a1 is None or eng is None:
+            return None
+        from wild_life.inference import prove_cond as _pc_co
+        _mark_co = eng.trail.mark()
+        if _pc_co(a1.deref(), eng):
+            return _make_atom(eng, 'true')
+        eng.trail.undo_to(_mark_co)
+        return _make_atom(eng, 'false')
 
     elif sym == 'eval':
         # eval(T) is T's value, and a term with no value of its own is that
@@ -4114,6 +4135,8 @@ def _try_eval_any_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
 _NON_STRICT_ARG1_BUILTINS: frozenset = frozenset({
     'setq', 'dynamic', 'static', 'assert', 'asserta', 'retract',
     'clause', 'abolish', 'listing',
+    # `call_once(G)` is handed a goal to prove, not a value to work out.
+    'call_once',
     # Dot feature-access `T.F`: arg '1' is the HOST subject of feature access
     # or creation, NOT a function-value to reduce in isolation.  Pre-evaluating
     # it (e.g. bodify_list(T) → @) replaces the shared reference and causes
@@ -5227,6 +5250,10 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
             if s_ok in ('true', 'false'):
                 return True
             if _is_proper_bool_expr(t_ok):
+                return True
+            # A comparison answers a boolean, so it stands where one is
+            # wanted: `A =< 57 or A >= 97` asks two questions about A.
+            if s_ok in _BOOL_VALUED_COMPARISONS and len(t_ok.attr_list) == 2:
                 return True
             # Free variable: no attrs, no value, and top/None/bool/sort-var type
             _fr = not t_ok.attr_list and t_ok.value is None and t_ok.coref is None
@@ -6571,9 +6598,20 @@ def bi_or(goal: PsiTerm, eng) -> bool:
     mark = eng.trail.mark()
     cp_save = eng.choice_stack
     gs_save = eng.goal_stack
+    # The inner run is this one's own loop re-entered, and it leaves
+    # main_loop_ok saying whether *it* ran out of goals.  Handing that back to
+    # the loop that called us would end it there and drop everything after the
+    # `or`: `(A =< 57 or A =:= 111), D = A` would answer yes without ever
+    # proving `D = A`.
+    ok_save = eng.main_loop_ok
+    count_save = eng.goal_count
     eng.push_goal(GoalType.PROVE, arg1d, _DEFRULES_SENTINEL, None)
     _barrier = cp_save if cp_save is not None else _INNER_RUN_BARRIER
-    result1 = eng.run(cs_barrier=_barrier)
+    try:
+        result1 = eng.run(cs_barrier=_barrier)
+    finally:
+        eng.main_loop_ok = ok_save
+        eng.goal_count = count_save
     if result1:
         eng.choice_stack = cp_save
         return True

@@ -926,7 +926,9 @@ class Unifier:
                 _sym2 = u.type.keyword.symbol
                 _arith_ops2 = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
                                          'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
-                if _sym2 in _arith_ops2:
+                from wild_life.inference import (
+                    _arith_is_settled as _ais_nst)
+                if _sym2 in _arith_ops2 and _ais_nst(u):
                     from wild_life.data_structures import NON_STRICT_TERM as _NST
                     self.trail.trail_psi(u, 'flags')
                     u.flags |= _NST

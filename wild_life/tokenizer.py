@@ -245,13 +245,11 @@ class TokenizerState:
                 # EOF - エラー
                 self.parse_ok = False
                 break
-            elif end_char == '"' and c == '\\':
-                # エスケープシーケンス
-                ec = self._read_string_escape()
-                if ec is not None:
-                    chars.append(ec)
             elif c == end_char:
-                # 終端文字が2つ並んだ場合はエスケープ
+                # A quote is closed by a quote, and nothing else stands in the
+                # way: `strcon("\\",Z)` passes the one backslash it looks
+                # like, because `\\` is an ordinary character here.  Doubling
+                # the quote is how a quote itself is written.
                 c2 = self.read_char()
                 if c2 == end_char:
                     chars.append(end_char)

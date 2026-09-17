@@ -102,6 +102,33 @@ _STRICT_ARITH_SYMS = frozenset((
     '/\\', '\\/', 'xor', '>>', '<<'))
 
 
+def _arith_is_settled(t: PsiTerm, _seen: set = None) -> bool:
+    """Whether an arithmetic term could be worked out as it stands.
+
+    Freezing is about not working out something that could be: `N:(2*4)` is
+    left as `2 * 4` because a non-strict call asked for it.  An expression
+    still waiting on its variables — the `V1 + V2 * 10^(-L2)` a grammar rule
+    carries — could not be worked out anyway, and freezing it would keep it
+    from ever being worked out once the variables are known.
+    """
+    if _seen is None:
+        _seen = set()
+    t = t.deref()
+    if id(t) in _seen:
+        return False
+    _seen.add(id(t))
+    if t.value is not None:
+        return True
+    sym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+    if sym not in _ARITH_OPS_NON_STRICT:
+        return False
+    if not t.attr_list:
+        # The bare operator stands for itself — `A = (+)` — and that is as
+        # settled as it gets.
+        return True
+    return all(_arith_is_settled(_v, _seen) for _v in t.attr_list.values())
+
+
 def _mark_arith_non_strict(t: PsiTerm, visited: set = None, eng=None) -> None:
     """Recursively mark arithmetic operator psiterms with NON_STRICT_TERM.
 
@@ -128,7 +155,8 @@ def _mark_arith_non_strict(t: PsiTerm, visited: set = None, eng=None) -> None:
         return
     visited.add(tdid)
     sym = td.type.keyword.symbol if (td.type and td.type.keyword) else ''
-    if sym in _ARITH_OPS_NON_STRICT and td.value is None:
+    if (sym in _ARITH_OPS_NON_STRICT and td.value is None
+            and _arith_is_settled(td)):
         if eng is not None and not (td.flags & NON_STRICT_TERM):
             eng.trail.trail_psi(td, 'flags')
         td.flags |= NON_STRICT_TERM
@@ -2214,6 +2242,14 @@ class Engine:
             if _is_resid_refire and len(active) == 1:
                 return self.unifier.unify(result, funct)
             return False
+        # A function is called by matching, and matching settles which rule
+        # applies: the first head that fits is the rule, and a later failure
+        # is not a reason to try the next one.  Leaving the alternatives
+        # standing let `R = compileRule(L,R2), assert(R), fail` come back for
+        # a second, half-compiled R and file it as a clause of its own.
+        if _rule_cp is not None:
+            self.drop_choice_point(_rule_cp)
+            _rule_cp = None
 
         # Sort-constrained computation rule fix:
         # Rule form: X:sort -> body_expr(X, ...)
