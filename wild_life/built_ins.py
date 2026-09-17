@@ -118,9 +118,12 @@ def _is_complete_arith_expr(t: 'PsiTerm') -> bool:
     if sym in ('cpu_time', 'real_time', 'genint'):
         return True
     # Unary-only operators: need exactly '1' arg
+    # `sign` is not among them: Wild Life leaves the name to the program, and
+    # preparser.lf's grammar defines `sign(-1) --> [45], !` — a head that a
+    # built-in would work out to -1 before the clause was ever filed.
     _unary_only = frozenset(('abs', 'sqrt', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
                               'exp', 'log', 'floor', 'ceiling', 'round', 'truncate',
-                              'float', 'integer', 'sign', 'msb', 'random', '\\'))
+                              'float', 'integer', 'msb', 'random', '\\'))
     if sym in _unary_only:
         return '1' in t.attr_list
     # '-' is both unary and binary: valid with 1 arg (unary) or 2 args (binary)
@@ -305,27 +308,37 @@ def _is_proper_bool_expr(t: 'PsiTerm') -> bool:
     return False
 
 
-def _is_settled_value(t: 'PsiTerm', origin, _seen: frozenset = frozenset(),
-                     _depth: int = 0) -> bool:
+def _is_settled_value(t: 'PsiTerm', origin) -> bool:
     """Whether t is an answer in itself, rather than something still waiting.
 
     A composition of named functions is: nothing in it is unknown, and none of
     it is the very call that produced it.  A global's stored `@ + 1` is not.
+
+    The whole term is walked, however deep it runs: a list of the seven
+    hundred characters of a file is as settled as a list of one, and a depth
+    limit here would call the long one unsettled and leave the global that
+    holds it standing for its own name.
     """
-    if t is None or _depth > 40:
+    if t is None:
         return False
-    t = t.deref()
-    if id(t) in _seen:
-        return True
-    if t.type is origin:
-        return False        # it stands for itself, so it says nothing
     from wild_life.runtime import WL as _WL_sv
-    if t.value is None and not t.attr_list and (
-            t.type is None or t.type is _WL_sv.top):
-        return False        # a variable: still waiting to be something
-    _seen = _seen | {id(t)}
-    return all(_is_settled_value(_v, origin, _seen, _depth + 1)
-               for _v in t.attr_list.values())
+    seen: set = set()
+    stack = [t]
+    while stack:
+        n = stack.pop()
+        if n is None:
+            return False
+        n = n.deref()
+        if id(n) in seen:
+            continue        # a cycle is as settled as it will get
+        if n.type is origin:
+            return False    # it stands for itself, so it says nothing
+        if n.value is None and not n.attr_list and (
+                n.type is None or n.type is _WL_sv.top):
+            return False    # a variable: still waiting to be something
+        seen.add(id(n))
+        stack.extend(n.attr_list.values())
+    return True
 
 
 def _term_reaches_itself(t: 'PsiTerm', _seen: frozenset = frozenset(),
@@ -889,6 +902,23 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             if defn.is_subtype_of(wl.quoted_string):
                 return _make_string(eng, str(a1.value))
         return _make_atom(eng, defn.keyword.symbol)
+
+    elif sym == 'ops' and not t.attr_list:
+        # `ops` is the operator table as a list of op(Precedence, Type, Name),
+        # which is how preparser.lf's expression grammar asks what the current
+        # operators are.
+        if eng is None:
+            return None
+        wl_ops = eng.wl
+        _op_defn = wl_ops.update_symbol(wl_ops.syntax_module, 'op')
+        _elems = []
+        for _p, _ty, _nm in getattr(wl_ops, '_enumerable_ops', []):
+            _e = PsiTerm(type_def=_op_defn)
+            _e.attr_list = {'1': wl_ops.make_integer(_p),
+                            '2': wl_ops.make_atom(_ty),
+                            '3': wl_ops.make_atom(_nm)}
+            _elems.append(_e)
+        return wl_ops.make_list(_elems)
 
     elif sym == 'call_once':
         # `call_once(G)` is a boolean function: it proves G once and answers
@@ -1962,19 +1992,34 @@ def bi_put_char(goal: PsiTerm, eng) -> bool:
     return True
 
 
-def bi_get_char(goal: PsiTerm, eng) -> bool:
-    """get_char(C) — read a character."""
-    arg = _get_one_arg(goal)
+def _read_one_char(eng, as_code: bool) -> PsiTerm:
+    """Read one character from the current input, as a code or as a string."""
     wl = eng.wl
     try:
         c = sys.stdin.read(1)
     except EOFError:
         c = ''
     if c == '':
-        result = wl.make_atom('end_of_file', wl.user_module)
-    else:
-        result = wl.make_string(c)
-    return _unify(eng, arg, result) if arg else False
+        return wl.make_atom('end_of_file', wl.user_module)
+    return wl.make_number(float(ord(c))) if as_code else wl.make_string(c)
+
+
+def bi_get_char(goal: PsiTerm, eng) -> bool:
+    """get_char(C) — read a character, as a one-character string."""
+    arg = _get_one_arg(goal)
+    return _unify(eng, arg, _read_one_char(eng, False)) if arg else False
+
+
+def bi_get_code(goal: PsiTerm, eng) -> bool:
+    """get(C) — read a character, as its code.
+
+    A program that reads a file reads numbers: the tokenizer in preparser.lf
+    asks whether a character is `>= 48 and =< 57`, and `charac(Z) ->
+    psi2str(chr(Z))` turns one back into text.  End of input still answers
+    `end_of_file`, which is what `X = end_of_file` in copyfile.lf looks for.
+    """
+    arg = _get_one_arg(goal)
+    return _unify(eng, arg, _read_one_char(eng, True)) if arg else False
 
 
 def bi_read(goal: PsiTerm, eng) -> bool:
@@ -2229,7 +2274,6 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         'integer': lambda a: float(int(a)),
         'float_integer_part': lambda a: float(math.trunc(a)),
         'float_fractional_part': lambda a: a - math.trunc(a),
-        'sign': lambda a: (1.0 if a > 0 else (-1.0 if a < 0 else 0.0)),
         'msb': lambda a: int(math.log2(max(1, int(a)))),
         # Bitwise NOT
         '\\': lambda a: float(~int(a)),
@@ -3383,6 +3427,79 @@ def _has_applicable_rule(t: 'PsiTerm') -> bool:
     return False
 
 
+# The comparisons that read numbers, and so cannot be settled while one of
+# their sides is still a variable.
+_ARITH_COMPARISONS = frozenset(('>', '<', '>=', '=<', '=:=', '=\\='))
+
+# The comparisons that read sorts, and so cannot be settled while one of
+# their sides is still a variable.
+_SORT_COMPARISONS = frozenset((
+    ':==', ':\\==', ':<', ':>', ':=<', ':>=',
+    ':\\<', ':\\>', ':\\=<', ':\\>=', ':\\><',
+))
+
+
+def _cond_is_undecided(c: 'PsiTerm', eng, _depth: int = 0) -> bool:
+    """Whether a condition made of number comparisons cannot be decided yet.
+
+    `cond(Y >= 33, …)` with Y still a variable has no answer, so the term is
+    worth itself: that is how a grammar's `#( cond(Y >= 33, …), … )` is filed
+    as the clause's code instead of being worked out at compile time against a
+    Y that nothing has bound.
+    """
+    if c is None or _depth > 20:
+        return False
+    c = c.deref()
+    sym = _get_sym(c)
+    if sym in ('and', 'or', 'not', 'xor'):
+        return any(_cond_is_undecided(_v, eng, _depth + 1)
+                   for _v in c.attr_list.values())
+    if sym in _ARITH_COMPARISONS and len(c.attr_list) == 2:
+        for _v in c.attr_list.values():
+            _ok, _ = _eval_arith(_v, eng)
+            # A side that will not come out because nothing has bound its
+            # variables is an open question.  One that will not come out
+            # although everything in it is known — `3 / 0` — is a wrong
+            # question, and the caller reports it rather than waiting.
+            if not _ok and not _is_ground_term(_v):
+                return True
+        return False
+    if sym in _SORT_COMPARISONS and len(c.attr_list) == 2:
+        from wild_life.runtime import WL as _WL_cu
+
+        def _unsaid(x):
+            x = x.deref()
+            return (x.value is None and not x.attr_list
+                    and (x.type is None or x.type is _WL_cu.top))
+
+        _l = c.attr_list.get('1')
+        _r = c.attr_list.get('2')
+        if _l is not None and _r is not None:
+            # `T :== xfx` asks a question nothing has answered yet.  `X :== @`
+            # is a different question — whether X is still a variable — and it
+            # has an answer whatever X turns out to be.
+            if _unsaid(_l) != _unsaid(_r):
+                return _unsaid(_l)
+    return False
+
+
+def _cond_args(t: 'PsiTerm'):
+    """cond's three arguments, read by name rather than by position.
+
+    `cond(Y >= 58, 3 => cond(…))` names its else branch and leaves the then
+    branch out, which is not the two-argument form: what is missing is a goal
+    nothing constrains, and a goal nothing constrains holds.  Reading the
+    arguments in the order they happen to be stored would take the else
+    branch for the then branch and read the whole test backwards.
+    """
+    a1 = t.attr_list.get('1')
+    a2 = t.attr_list.get('2')
+    a3 = t.attr_list.get('3')
+    return (a1.deref() if a1 is not None else None,
+            a2.deref() if a2 is not None else None,
+            a3.deref() if a3 is not None else None)
+
+
 def _is_cond_builtin_local(t: 'PsiTerm') -> bool:
     """Return True if t is the built-in cond(…) call."""
     if t is None or t.type is None or t.type.keyword is None:
@@ -3974,12 +4091,12 @@ def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
 
     # Built-in cond(C, T, E) — evaluate functionally
     if _is_cond_builtin_local(body_d):
-        args = list(body_d.attr_list.values()) if body_d.attr_list else []
-        if len(args) < 2:
+        cond_g, then_g, else_g = _cond_args(body_d)
+        if cond_g is None or (then_g is None and else_g is None):
             return None
-        cond_g = args[0].deref()
-        then_g = args[1].deref()
-        else_g = args[2].deref() if len(args) >= 3 else None
+
+        if _cond_is_undecided(cond_g, eng):
+            return None
 
         from wild_life.inference import prove_cond as _prove_cond
         mark_c = eng.trail.mark()
@@ -4841,18 +4958,20 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
 
     # Handle cond(C, T, E) in functional position:
     #   X = cond(3 < 2, {}, f(N))  →  evaluate cond, unify result with X
-    if _is_cond_builtin_local(b_d):
-        evaled = _eval_body_sync(b_d, eng, 0)
+    for _cond_side, _other_side in ((b_d, a_d), (a_d, b_d)):
+        if not _is_cond_builtin_local(_cond_side):
+            continue
+        _cond_arg = (list(_cond_side.attr_list.values()) or [None])[0]
+        if _cond_arg is not None and _cond_is_undecided(_cond_arg.deref(), eng):
+            # Nothing has said which way it goes, so it is worth itself: the
+            # `cond(Y >= 33, …)` a grammar rule carries as its code is stored
+            # as written rather than settled against an unbound Y.
+            return _unify(eng, _other_side, _cond_side)
+        evaled = _eval_body_sync(_cond_side, eng, 0)
         if evaled is None:
             return False
         evaled = _evaluate_result_for_display(evaled.deref(), eng, 1)
-        return _unify(eng, a_d, evaled)
-    if _is_cond_builtin_local(a_d):
-        evaled = _eval_body_sync(a_d, eng, 0)
-        if evaled is None:
-            return False
-        evaled = _evaluate_result_for_display(evaled.deref(), eng, 1)
-        return _unify(eng, b_d, evaled)
+        return _unify(eng, _other_side, evaled)
 
     # Handle copy_term(X) functional use: Y = copy_term(X) → Y = fresh copy of X
     if _is_copy_term_func(b_d):
@@ -6807,12 +6926,9 @@ def bi_cond(goal: PsiTerm, eng) -> bool:
         - If Cond succeeds → push Then as predicate goal.
         - If Cond fails    → undo Cond's bindings and push Else as predicate goal.
     """
-    args = list(goal.attr_list.values()) if goal.attr_list else []
-    if len(args) < 2:
+    cond_g, then_g, else_g = _cond_args(goal)
+    if cond_g is None or (then_g is None and else_g is None):
         return True   # degenerate: succeed
-    cond_g = args[0].deref()
-    then_g = args[1].deref()
-    else_g = args[2].deref() if len(args) >= 3 else None
 
     if else_g is None:
         # ── 2-arg form: fully functional evaluation ──
@@ -6843,8 +6959,10 @@ def bi_cond(goal: PsiTerm, eng) -> bool:
     cond_ok = _prove_cond(cond_g, eng)
 
     if cond_ok:
-        # Cond succeeded → push Then
-        eng.push_goal(GoalType.PROVE, then_g, _DEFRULES_SENTINEL, None)
+        # Cond succeeded → push Then.  A branch the call leaves out is a goal
+        # nothing constrains, and holds.
+        if then_g is not None:
+            eng.push_goal(GoalType.PROVE, then_g, _DEFRULES_SENTINEL, None)
         return True
     else:
         # Cond failed → undo its bindings, push Else
@@ -7257,6 +7375,11 @@ def bi_setq(goal: PsiTerm, eng) -> bool:
     from wild_life.unification import copy_term
     _vm: dict = {}
     head_copy = copy_term(x_term, _vm)
+    # What is filed is a copy, as `assert((X -> Value))` would file: a global
+    # outlives the proof that set it.  Storing the live term let backtracking
+    # take the value away again, which is exactly what
+    # `read_all(L), setq(list_of_words, L), fail` relies on not happening.
+    v_stored = copy_term(v_stored.deref(), {})
     # The rule body for -> is the return value
     defn.rule.append((head_copy, v_stored))
     return True
@@ -8276,7 +8399,7 @@ _BUILTIN_FUNCTION_SYMS = frozenset((
     'least_sorts', 'glb', 'lub', 'copy_term', 'eval',
     '+', '-', '*', '/', '//', 'mod', '**', '^', 'min', 'max', 'abs',
     'sqrt', 'exp', 'log', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
-    'floor', 'ceiling', 'round', 'truncate', 'sign',
+    'floor', 'ceiling', 'round', 'truncate',
     '>', '<', '>=', '=<', '=:=', '=\\=',
     ':=<', ':>=', ':<', ':>', ':==', ':\\==',
 ))
@@ -9529,7 +9652,7 @@ def register_all(wl) -> None:
     _reg('put', bi_put_char)
     _reg('put_char', bi_put_char)
     _reg('get_char', bi_get_char)
-    _reg('get', bi_get_char)
+    _reg('get', bi_get_code)
     _reg('read', bi_read)
     _reg('read_term', bi_read_term)
     _reg('parse', bi_parse)

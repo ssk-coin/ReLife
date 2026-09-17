@@ -40,11 +40,18 @@ _DEFERRABLE_BUILTIN_FUNCS = frozenset((
 
 
 def _leftmost_goal(t: 'PsiTerm', wl) -> 'PsiTerm':
-    """The first goal a conjunction runs, or t itself when it is not one."""
+    """The first goal a conjunction or a disjunction runs.
+
+    A disjunction counts as well as a conjunction: the first thing
+    `(open_in(F,S), …, fail ; L = list_of_words)` runs is the open_in, and
+    reading the right-hand alternative early would settle `list_of_words`
+    against the value it held before the left-hand one ever ran.
+    """
     seen = 0
     t = t.deref()
     while seen < 64:
-        if t.type is not wl.commasym or '1' not in t.attr_list:
+        if (t.type is not wl.commasym and t.type is not wl.life_or) \
+                or '1' not in t.attr_list:
             return t
         t = t.attr_list['1'].deref()
         seen += 1
@@ -766,12 +773,15 @@ def _eval_cond_functional(cond_term: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
         If there is no E (2-arg form), fail.
     """
     wl = eng.wl
-    args = list(cond_term.attr_list.values()) if cond_term.attr_list else []
-    if len(args) < 2:
+    from wild_life.built_ins import _cond_args as _ca_cf
+    cond_g, then_g, else_g = _ca_cf(cond_term)
+    if cond_g is None or (then_g is None and else_g is None):
         return False
-    cond_g = args[0].deref()
-    then_g = args[1].deref()
-    else_g = args[2].deref() if len(args) >= 3 else None
+
+    from wild_life.built_ins import _cond_is_undecided as _ciu_cf
+    if _ciu_cf(cond_g, eng):
+        # Nothing has said which way this goes, so the term is worth itself.
+        return eng.unifier.unify(result, cond_term)
 
     mark = eng.trail.mark()
     eng._arith_error = False

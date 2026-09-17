@@ -425,9 +425,16 @@ class Parser:
                     # 位置引数
                     if f2:
                         self.ts.put_back_token(t2)
-                        t2 = self.read_life_form(',', ')')
-                        count += 1
-                        self._feature_insert(str(count), t.attr_list, t2)
+                        if self.equ_tokch(t2, ',') or (
+                                count > 0 and self.equ_tokch(t2, ')')):
+                            # An empty slot names nothing and takes up no
+                            # position: `cond(T :== fy,, Then, Else)` is the
+                            # three-argument cond the program means.
+                            pass
+                        else:
+                            t2 = self.read_life_form(',', ')')
+                            count += 1
+                            self._feature_insert(str(count), t.attr_list, t2)
 
                     t2 = self.ts.read_token()
                     if self.equ_tokch(t2, ')'):
