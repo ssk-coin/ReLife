@@ -343,6 +343,14 @@ def _term_reaches_itself(t: 'PsiTerm', _seen: frozenset = frozenset(),
     return False
 
 
+# The comparisons whose value is a boolean.
+_BOOL_VALUED_COMPARISONS = frozenset((
+    '>', '<', '>=', '=<', '=:=', '=\\=',
+    ':=<', ':>=', ':<', ':>', ':==', ':\\==',
+    '===', '\\===',
+))
+
+
 def _bool_operand_ok(t: 'PsiTerm', wl, _depth: int = 0) -> bool:
     """Whether a term can stand where a boolean is wanted.
 
@@ -357,6 +365,10 @@ def _bool_operand_ok(t: 'PsiTerm', wl, _depth: int = 0) -> bool:
     if _is_proper_bool_expr(t):
         return all(_bool_operand_ok(_v, wl, _depth + 1)
                    for _v in t.attr_list.values())
+    # A comparison answers a boolean, so it stands where one is wanted:
+    # `not A :== residuation` is a question about A, not a complaint.
+    if _get_sym(t) in _BOOL_VALUED_COMPARISONS and len(t.attr_list) == 2:
+        return True
     if t.value is not None:
         return False        # a number or a string is not a boolean
     if t.type is None or t.type is wl.top:

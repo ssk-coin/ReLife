@@ -1396,6 +1396,19 @@ class Engine:
             elif defn.type == DefType.FUNCTION:
                 rules = defn.rule or []
             elif defn.type == DefType.UNDEF:
+                if (defn.keyword is not None and defn.keyword.symbol == '.'
+                        and thegoal.attr_list):
+                    # `F.ground` standing where a goal is expected is the
+                    # feature's value proved in its place, so `cond(F.ground,
+                    # …)` goes by what the feature holds.
+                    from wild_life.built_ins import _resolve_dot_feat as _rdf_pg
+                    _cell_pg = _rdf_pg(thegoal, self)
+                    if _cell_pg is not None:
+                        self.goal_stack = aim.next
+                        self.goal_count += 1
+                        self.push_goal(GoalType.PROVE, _cell_pg.deref(),
+                                       _DEFRULES, None)
+                        return True
                 if defn.rule is None:
                     # Never declared (not via dynamic/assert) → error + abort
                     # フルターム表現 (例: 'b(@)') を表示する
