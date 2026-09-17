@@ -1150,6 +1150,15 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
             and t.type.keyword.symbol == '`'):
         inner = t.attr_list.get('1')
         if inner is not None:
+            if ps.write_canon and depth > 0:
+                # Canonical form shows the quote it is written with, as the
+                # one-argument term it is: only the outermost backtick, the
+                # one that froze what write_canonical was handed, goes.
+                ps.write("`(")
+                _pretty_tag_or_psi_term(ps, inner.deref(),
+                                        MAX_PRECEDENCE + 1, depth + 1, wl)
+                ps.write(")")
+                return
             if not ps.no_arith_eval:
                 # Normal context: strip the backtick (sort annotation display).
                 # Use _pretty_tag_or_psi_term so cycle detection (printed_pointers)

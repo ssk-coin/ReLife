@@ -343,6 +343,14 @@ def _term_reaches_itself(t: 'PsiTerm', _seen: frozenset = frozenset(),
     return False
 
 
+# The comparisons whose value is a boolean.
+_BOOL_VALUED_COMPARISONS = frozenset((
+    '>', '<', '>=', '=<', '=:=', '=\\=',
+    ':=<', ':>=', ':<', ':>', ':==', ':\\==',
+    '===', '\\===',
+))
+
+
 def _bool_operand_ok(t: 'PsiTerm', wl, _depth: int = 0) -> bool:
     """Whether a term can stand where a boolean is wanted.
 
@@ -357,6 +365,10 @@ def _bool_operand_ok(t: 'PsiTerm', wl, _depth: int = 0) -> bool:
     if _is_proper_bool_expr(t):
         return all(_bool_operand_ok(_v, wl, _depth + 1)
                    for _v in t.attr_list.values())
+    # A comparison answers a boolean, so it stands where one is wanted:
+    # `not A :== residuation` is a question about A, not a complaint.
+    if _get_sym(t) in _BOOL_VALUED_COMPARISONS and len(t.attr_list) == 2:
+        return True
     if t.value is not None:
         return False        # a number or a string is not a boolean
     if t.type is None or t.type is wl.top:
@@ -667,10 +679,15 @@ def _normalize_arith_in_term(t: PsiTerm, eng, _seen=None) -> PsiTerm:
         return t
     _seen.add(tid)
 
-    # If the whole term is an arithmetic expression, evaluate it
-    arith = _try_eval_arith_to_term(t, eng)
-    if arith is not None:
-        return arith
+    # If the whole term is an arithmetic expression, evaluate it.  An
+    # expression a tag names — the `1+2` of `X:(1+2)` — is not one to work
+    # out: assert stores what was written, and only a strict call asks the
+    # expression for its value.
+    from wild_life.data_structures import NON_STRICT_TERM as _NST_NORM
+    if not (t.flags & _NST_NORM):
+        arith = _try_eval_arith_to_term(t, eng)
+        if arith is not None:
+            return arith
 
     # Otherwise, walk attrs and normalize each child
     if not t.attr_list:
@@ -884,7 +901,10 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             try:
                 _red_ev = _eval_user_func_sync(copy_term(arg, {}), eng, 0)
                 if _red_ev is None:
-                    return None
+                    # A call still waiting for arguments has no value but
+                    # itself: `eval(f(1))` of `f(X,Y) -> [X,Y]` is f(1), and
+                    # a copy of it, so asking twice gives two of them.
+                    return copy_term(arg, {})
                 return copy_term(_red_ev.deref(), {})
             finally:
                 eng.trail.undo_to(_mark_ev)
@@ -1517,9 +1537,14 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
     # no value to show that is not itself.  What asks for its value — `=`, or
     # an argument position — still reduces it.
     _self_call = _is_user_function(t) and _term_reaches_itself(t)
+    # A call no rule of its function applies to is a partial application, and
+    # writes as itself: `fact` alone is `fact`, not the 1 that `fact(0) -> 1`
+    # would answer if the missing argument were filled in.
+    _partial_call = _is_user_function(t) and not _has_applicable_rule(t)
     try:
         t_eval = (_try_eval_arith_to_term(t, eng)
-                  if not _is_nst and not _self_call else None)
+                  if not _is_nst and not _self_call and not _partial_call
+                  else None)
         if t_eval is not None:
             t = t_eval
         else:
@@ -1552,7 +1577,8 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
                             _fresh_var.type = wl.top
                         t = _fresh_var
             elif (_is_user_function(t) and eng is not None
-                    and not _term_reaches_itself(t)):
+                    and not _term_reaches_itself(t)
+                    and _has_applicable_rule(t)):
                 # A call that reaches itself is written as the call it is:
                 # `X : f(X)` has no value to show that is not itself.
                 # User-defined function call: evaluate synchronously for display.
@@ -1581,11 +1607,14 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
                     # (e.g. {1; 1+posint_stream_to(N-1)} → {1;2;3}).
                     _evaled = _evaluate_result_for_display(_evaled, eng, 1)
                     if _is_zero_arity_fn:
-                        # For 0-arity globals: only substitute a concrete numeric
-                        # result.  Compound bodies with unbound variables must not
-                        # replace the atom name during display.
+                        # For 0-arity globals: substitute only a result that
+                        # stands on its own.  `quadruple -> *(2 => 4)` is worth
+                        # that partial application and writes as it, while a
+                        # global whose stored body still has variables in it —
+                        # `@ + 1` after backtracking — has nothing to show, so
+                        # the name is written instead.
                         _evd = _evaled.deref()
-                        if _evd.value is not None:
+                        if _evd.value is not None or _is_ground_term(_evd):
                             t = _evaled
                         # else: keep original t (print the atom name as-is)
                     else:
@@ -3299,6 +3328,21 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
     return None
 
 
+def _is_ground_term(t: 'PsiTerm', _seen=None) -> bool:
+    """Whether t holds no unbound variable anywhere under it."""
+    if _seen is None:
+        _seen = set()
+    t = t.deref()
+    if id(t) in _seen:
+        return True
+    _seen.add(id(t))
+    if t.value is None and not t.attr_list:
+        from wild_life.runtime import WL as _WL_gt
+        if t.type is None or t.type is _WL_gt.top:
+            return False
+    return all(_is_ground_term(v, _seen) for v in t.attr_list.values())
+
+
 def _has_applicable_rule(t: 'PsiTerm') -> bool:
     """Whether any rule of t's function asks only for features t supplies.
 
@@ -4442,6 +4486,20 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng) -> 'Optional[PsiTerm]':
     existing = host.attr_list.get(fkey)
     if existing is not None:
         return existing  # caller will deref as needed
+    # A call still waiting for arguments is a function, not a term with room
+    # for another feature: `X.2 = 2` on the `f(1)` of `f(X,Y) -> [X,Y]` is
+    # refused, and says which function it was.
+    if (_is_user_function(host) and host.attr_list
+            and not _has_applicable_rule(host)):
+        import io as _io_dot
+        from wild_life.print_term import write_term as _wt_dot
+        _buf_dot = _io_dot.StringIO()
+        _wt_dot(host, outfile=_buf_dot, quoted=True, wl=eng.wl,
+                max_col=1_000_000)   # the message is one line
+        sys.stderr.write(
+            f"*** Error: attempt to add a feature to curried function "
+            f"{_buf_dot.getvalue()}\n")
+        return None
     # Attr absent — create a fresh variable (type=top = unbound), insert it (trailed)
     wl_rd = eng.wl
     fresh = PsiTerm()
@@ -6857,14 +6915,33 @@ def bi_findall(goal: PsiTerm, eng) -> bool:
     return False
 
 
+def _normalize_clause_for_assert(arg: PsiTerm, eng) -> PsiTerm:
+    """Evaluate the arithmetic a clause carries, leaving its head alone.
+
+    assert(mynum(N+1)) with N=31 stores mynum(32) rather than the expression
+    tree.  The head of a rule is a pattern, though, not something to work out:
+    reducing `f1 -> 14` head-first would ask f1 for its current value and file
+    the clause under that number instead of under f1, losing the clause.
+    """
+    arg = arg.deref()
+    sym = arg.type.keyword.symbol if (arg.type and arg.type.keyword) else ''
+    if sym in (':-', '->') and '1' in arg.attr_list and '2' in arg.attr_list:
+        # A rule is filed as written.  The expression in its body is part of
+        # the clause rather than a sum to work out, and freezing it keeps a
+        # later strict call from working it out on the clause's behalf: after
+        # `assert(f2 -> X)` the X of `X:(1+2)` reads as 1 + 2 everywhere.
+        from wild_life.inference import _mark_arith_non_strict as _mans_asrt
+        _mans_asrt(arg, None, eng)
+        return arg
+    return _normalize_arith_in_term(arg, eng)
+
+
 def bi_assert(goal: PsiTerm, eng) -> bool:
     """assert(Clause) / assertz(Clause)."""
     arg = _get_one_arg(goal)
     if arg is None:
         return False
-    # Evaluate arithmetic sub-expressions before storing so that
-    # assert(mynum(N+1)) with N=31 stores mynum(32) not mynum(31+1).
-    arg = _normalize_arith_in_term(arg, eng)
+    arg = _normalize_clause_for_assert(arg, eng)
     eng.assert_first = False
     eng.assert_clause(arg)
     return True
@@ -6875,8 +6952,7 @@ def bi_asserta(goal: PsiTerm, eng) -> bool:
     arg = _get_one_arg(goal)
     if arg is None:
         return False
-    # Evaluate arithmetic sub-expressions before storing.
-    arg = _normalize_arith_in_term(arg, eng)
+    arg = _normalize_clause_for_assert(arg, eng)
     eng.assert_first = True
     eng.assert_clause(arg)
     eng.assert_first = False
@@ -8296,7 +8372,14 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
                     print(f"% '{func_name}' is a user-defined global variable "
                           f"worth @.")
                 elif not active_rules:
-                    print(f"% '{func_name}' is a user-defined predicate with an empty definition.\n")
+                    # What it was defined as is what listing calls it: a
+                    # function whose every clause has been retracted is still
+                    # a function.
+                    _kind_empty = ('function' if defn.type == DefType.FUNCTION
+                                   else 'predicate')
+                    print()
+                    print(f"% '{func_name}' is a user-defined {_kind_empty} "
+                          f"with an empty definition.")
                 else:
                     _bi_listing_one(defn, wl, imported=False)
         elif defn is not None and defn.type == DefType.TYPE:

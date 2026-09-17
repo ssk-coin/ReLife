@@ -51,6 +51,28 @@ def _leftmost_goal(t: 'PsiTerm', wl) -> 'PsiTerm':
     return t
 
 
+def _occurs_by_identity(target: PsiTerm, t: PsiTerm, visited: set = None) -> bool:
+    """Whether *t* holds the very psi-term *target*, anywhere under it.
+
+    A rule head that reads its own call — the `X` of `X:sum -> …` — is the
+    same psi-term as the X in the body, because head and body are copied
+    together.  A rule head that merely names the function — `quadruple` in
+    `quadruple -> *(2 => 4)` — is not.
+    """
+    if target is None or t is None:
+        return False
+    if visited is None:
+        visited = set()
+    td = t.deref()
+    if td is target or td is target.deref():
+        return True
+    if id(td) in visited:
+        return False
+    visited.add(id(td))
+    return any(_occurs_by_identity(target, v, visited)
+               for v in td.attr_list.values())
+
+
 def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
     """Freeze the arithmetic that a non-strict call's arguments stand for.
 
@@ -75,12 +97,22 @@ def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
         _mark_non_strict_args(sub, eng, visited)
 
 
-def _mark_arith_non_strict(t: PsiTerm, visited: set = None) -> None:
+_STRICT_ARITH_SYMS = frozenset((
+    '+', '-', '*', '/', '//', 'mod', '**', '^', 'max', 'min',
+    '/\\', '\\/', 'xor', '>>', '<<'))
+
+
+def _mark_arith_non_strict(t: PsiTerm, visited: set = None, eng=None) -> None:
     """Recursively mark arithmetic operator psiterms with NON_STRICT_TERM.
 
     Called after head unification for a non-strict predicate so that
     arithmetic sub-expressions in the bound result are not eagerly
     evaluated during printing.
+
+    Pass *eng* when the marking belongs to one solution rather than to the
+    program text: the flag is then trailed, so backtracking hands the term
+    back unfrozen.  `assert(jolly(3+X) :- …)` freezes the sum it stores for
+    that X, and the next X finds `3+X` ready to be worked out again.
     """
     from wild_life.data_structures import NON_STRICT_TERM
     if visited is None:
@@ -97,9 +129,11 @@ def _mark_arith_non_strict(t: PsiTerm, visited: set = None) -> None:
     visited.add(tdid)
     sym = td.type.keyword.symbol if (td.type and td.type.keyword) else ''
     if sym in _ARITH_OPS_NON_STRICT and td.value is None:
+        if eng is not None and not (td.flags & NON_STRICT_TERM):
+            eng.trail.trail_psi(td, 'flags')
         td.flags |= NON_STRICT_TERM
     for v in td.attr_list.values():
-        _mark_arith_non_strict(v, visited)
+        _mark_arith_non_strict(v, visited, eng)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1362,6 +1396,19 @@ class Engine:
             elif defn.type == DefType.FUNCTION:
                 rules = defn.rule or []
             elif defn.type == DefType.UNDEF:
+                if (defn.keyword is not None and defn.keyword.symbol == '.'
+                        and thegoal.attr_list):
+                    # `F.ground` standing where a goal is expected is the
+                    # feature's value proved in its place, so `cond(F.ground,
+                    # …)` goes by what the feature holds.
+                    from wild_life.built_ins import _resolve_dot_feat as _rdf_pg
+                    _cell_pg = _rdf_pg(thegoal, self)
+                    if _cell_pg is not None:
+                        self.goal_stack = aim.next
+                        self.goal_count += 1
+                        self.push_goal(GoalType.PROVE, _cell_pg.deref(),
+                                       _DEFRULES, None)
+                        return True
                 if defn.rule is None:
                     # Never declared (not via dynamic/assert) → error + abort
                     # フルターム表現 (例: 'b(@)') を表示する
@@ -1527,6 +1574,14 @@ class Engine:
         _vm: dict = {}
         head = copy_term(head_orig, _vm)
         body = copy_term(body_orig, _vm)
+        # A call written into a clause head's argument is there for its value:
+        # `p_a(pair(foo_a(Y:titi_a), …))` matches against pair(t(Y), …), which
+        # is what foo_a answers, not against the call itself.  Only a call a
+        # rule already fits is reduced: `hanoi(…, Ms:ensuite(Ms1,…))` has to
+        # wait on Ms1, and reducing it here would pick the empty-list rule and
+        # settle a question the clause has not asked.
+        if head.attr_list:
+            self._reduce_settled_head_calls(head)
 
         # Fix A: such_that daemon setup for FUNCTION rules.
         # When the body is `val | cond` (such_that), and the call has free
@@ -1618,12 +1673,25 @@ class Engine:
             # A strict predicate is given values, not calls: reduce a built-in
             # function in an argument before matching, so that a clause body
             # asserting its argument asserts `a1` and not `str2psi("a1")`.
-            from wild_life.built_ins import _try_eval_string_func as _tesf_pa
+            from wild_life.built_ins import (_try_eval_string_func as _tesf_pa,
+                                              _try_eval_arith_to_term as _teat_pa)
             for _k_pa, _a_pa in list(thegoal.attr_list.items()):
                 _a_pa_d = _a_pa.deref()
                 _ev_pa = _tesf_pa(_a_pa_d, self)
                 if _ev_pa is not None and _ev_pa is not _a_pa_d:
                     thegoal.attr_list[_k_pa] = _ev_pa
+                    continue
+                # An expression handed to a strict call is asked for its
+                # value, whatever it was written as: `p(X:(1+2))` leaves X
+                # worth 3, and everything reading X from then on reads 3.
+                from wild_life.data_structures import (
+                    NON_STRICT_TERM as _NST_pa)
+                if (_a_pa_d.attr_list and _a_pa_d.value is None
+                        and not (_a_pa_d.flags & _NST_pa)
+                        and _a_pa_d.type is not None
+                        and _a_pa_d.type.keyword is not None
+                        and _a_pa_d.type.keyword.symbol in _STRICT_ARITH_SYMS):
+                    _teat_pa(_a_pa_d, self)
         mark = self.trail.mark()
         ok = self.unifier.unify(thegoal, head)
         if _non_strict:
@@ -1639,6 +1707,51 @@ class Engine:
                 return self.backtrack_and_succeed()
             return False
         return True
+
+    def _reduce_settled_head_calls(self, head: 'PsiTerm') -> None:
+        """Reduce the calls under a clause head that a rule already fits.
+
+        A call whose arguments are not specific enough for any rule is left
+        as written: it is part of the pattern, and settling it here would
+        answer a question the clause has not asked.
+        """
+        from wild_life.built_ins import (_is_user_function as _iuf_h,
+                                         _try_eval_any_func as _teaf_h)
+        seen: set = set()
+
+        def walk(t: 'PsiTerm', depth: int) -> None:
+            if depth > 40:
+                return
+            td = t.deref()
+            if id(td) in seen:
+                return
+            seen.add(id(td))
+            for key in list(td.attr_list.keys()):
+                child = td.attr_list[key].deref()
+                if _iuf_h(child) and self._head_call_is_settled(child):
+                    evaled = _teaf_h(child, self)
+                    if evaled is not None and evaled.deref() is not child:
+                        td.attr_list[key] = evaled
+                        walk(evaled, depth + 1)
+                        continue
+                walk(child, depth + 1)
+
+        walk(head, 0)
+
+    def _head_call_is_settled(self, call: 'PsiTerm') -> bool:
+        """Whether some rule of call's function fits it as it stands."""
+        rules = call.type.rule if call.type is not None else None
+        if not rules:
+            return False
+        for _h, _b in rules:
+            if _h is None or _b is None:
+                continue
+            _hd = _h.deref()
+            if set(_hd.attr_list.keys()) - set(call.attr_list.keys()):
+                continue
+            if _rule_match_status(_hd, call, self) == 'ready':
+                return True
+        return False
 
     def backtrack_and_succeed(self) -> bool:
         if not self.choice_stack:
@@ -1983,6 +2096,29 @@ class Engine:
                 self.drop_choice_point(_rule_cp)
             return self.unifier.unify(result, funct)
 
+        # The other way round: the call carries features the rule's head does
+        # not ask for.  A rule with a bare name for a head says what the name
+        # is worth — `quadruple -> *(2 => 4)` — and the features the call
+        # carries belong to that value, not to the name: `quadruple(5)` is
+        # `*(2 => 4)` applied to 5, which is 20.  A head that is a sort
+        # variable (`X:sum -> …`) is a different thing: it stands for the call
+        # itself, features and all, and is left alone here.
+        _extra_keys = _funct_keys_set - set(_head_d_arity.attr_list.keys())
+        if (_extra_keys and not _head_d_arity.attr_list
+                and not _occurs_by_identity(head, body)
+                and getattr(wl, 'apply', None) is not None):
+            _bare = PsiTerm(type_def=funct.type)
+            _value = PsiTerm(type_def=wl.top)
+            _applied = PsiTerm(type_def=wl.apply)
+            _applied.attr_list = {k: funct.attr_list[k] for k in _extra_keys}
+            _applied.attr_list['functor'] = _value
+            if _rule_cp is not None:
+                self.drop_choice_point(_rule_cp)
+            # LIFO: the value is worked out first, then applied.
+            self.push_goal(GoalType.UNIFY, result, _applied, None)
+            self.push_goal(GoalType.EVAL, _bare, _value, rules)
+            return True
+
         # A rule head that names the same variable twice asks for the very same
         # psi-term in both places.  `f(X,X)` therefore does not apply to
         # `f(a(a(X1)), a(a(X2)))` however alike the two arguments look, and
@@ -2005,6 +2141,15 @@ class Engine:
             return True
         _free_args_for_resid = _match if isinstance(_match, list) else None
         if _free_args_for_resid:
+            # The call as a whole is waiting, not this one rule: the pending
+            # goal carries the entire rule list and starts again from the
+            # first rule once the variable is bound.  Leaving the alternatives
+            # for the later rules standing would let backtracking suspend the
+            # same call once per rule, so `A = f(B)` with three rules for `f`
+            # would answer three times over.
+            if _rule_cp is not None:
+                self.drop_choice_point(_rule_cp)
+                _rule_cp = None
             # Set up residuation: attach a pending EVAL goal to each free variable.
             # When the variable gets bound, _wakeup_resid will push the EVAL goal
             # back onto the goal stack and f(bound_val) will be re-evaluated.
