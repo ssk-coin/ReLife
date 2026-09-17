@@ -51,6 +51,28 @@ def _leftmost_goal(t: 'PsiTerm', wl) -> 'PsiTerm':
     return t
 
 
+def _occurs_by_identity(target: PsiTerm, t: PsiTerm, visited: set = None) -> bool:
+    """Whether *t* holds the very psi-term *target*, anywhere under it.
+
+    A rule head that reads its own call — the `X` of `X:sum -> …` — is the
+    same psi-term as the X in the body, because head and body are copied
+    together.  A rule head that merely names the function — `quadruple` in
+    `quadruple -> *(2 => 4)` — is not.
+    """
+    if target is None or t is None:
+        return False
+    if visited is None:
+        visited = set()
+    td = t.deref()
+    if td is target or td is target.deref():
+        return True
+    if id(td) in visited:
+        return False
+    visited.add(id(td))
+    return any(_occurs_by_identity(target, v, visited)
+               for v in td.attr_list.values())
+
+
 def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
     """Freeze the arithmetic that a non-strict call's arguments stand for.
 
@@ -2007,6 +2029,29 @@ class Engine:
             if _rule_cp is not None:
                 self.drop_choice_point(_rule_cp)
             return self.unifier.unify(result, funct)
+
+        # The other way round: the call carries features the rule's head does
+        # not ask for.  A rule with a bare name for a head says what the name
+        # is worth — `quadruple -> *(2 => 4)` — and the features the call
+        # carries belong to that value, not to the name: `quadruple(5)` is
+        # `*(2 => 4)` applied to 5, which is 20.  A head that is a sort
+        # variable (`X:sum -> …`) is a different thing: it stands for the call
+        # itself, features and all, and is left alone here.
+        _extra_keys = _funct_keys_set - set(_head_d_arity.attr_list.keys())
+        if (_extra_keys and not _head_d_arity.attr_list
+                and not _occurs_by_identity(head, body)
+                and getattr(wl, 'apply', None) is not None):
+            _bare = PsiTerm(type_def=funct.type)
+            _value = PsiTerm(type_def=wl.top)
+            _applied = PsiTerm(type_def=wl.apply)
+            _applied.attr_list = {k: funct.attr_list[k] for k in _extra_keys}
+            _applied.attr_list['functor'] = _value
+            if _rule_cp is not None:
+                self.drop_choice_point(_rule_cp)
+            # LIFO: the value is worked out first, then applied.
+            self.push_goal(GoalType.UNIFY, result, _applied, None)
+            self.push_goal(GoalType.EVAL, _bare, _value, rules)
+            return True
 
         # A rule head that names the same variable twice asks for the very same
         # psi-term in both places.  `f(X,X)` therefore does not apply to

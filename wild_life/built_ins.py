@@ -1522,9 +1522,14 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
     # no value to show that is not itself.  What asks for its value — `=`, or
     # an argument position — still reduces it.
     _self_call = _is_user_function(t) and _term_reaches_itself(t)
+    # A call no rule of its function applies to is a partial application, and
+    # writes as itself: `fact` alone is `fact`, not the 1 that `fact(0) -> 1`
+    # would answer if the missing argument were filled in.
+    _partial_call = _is_user_function(t) and not _has_applicable_rule(t)
     try:
         t_eval = (_try_eval_arith_to_term(t, eng)
-                  if not _is_nst and not _self_call else None)
+                  if not _is_nst and not _self_call and not _partial_call
+                  else None)
         if t_eval is not None:
             t = t_eval
         else:
@@ -1557,7 +1562,8 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
                             _fresh_var.type = wl.top
                         t = _fresh_var
             elif (_is_user_function(t) and eng is not None
-                    and not _term_reaches_itself(t)):
+                    and not _term_reaches_itself(t)
+                    and _has_applicable_rule(t)):
                 # A call that reaches itself is written as the call it is:
                 # `X : f(X)` has no value to show that is not itself.
                 # User-defined function call: evaluate synchronously for display.
@@ -1586,11 +1592,14 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
                     # (e.g. {1; 1+posint_stream_to(N-1)} → {1;2;3}).
                     _evaled = _evaluate_result_for_display(_evaled, eng, 1)
                     if _is_zero_arity_fn:
-                        # For 0-arity globals: only substitute a concrete numeric
-                        # result.  Compound bodies with unbound variables must not
-                        # replace the atom name during display.
+                        # For 0-arity globals: substitute only a result that
+                        # stands on its own.  `quadruple -> *(2 => 4)` is worth
+                        # that partial application and writes as it, while a
+                        # global whose stored body still has variables in it —
+                        # `@ + 1` after backtracking — has nothing to show, so
+                        # the name is written instead.
                         _evd = _evaled.deref()
-                        if _evd.value is not None:
+                        if _evd.value is not None or _is_ground_term(_evd):
                             t = _evaled
                         # else: keep original t (print the atom name as-is)
                     else:
@@ -3302,6 +3311,21 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
         return result if result is not None else body_d2
 
     return None
+
+
+def _is_ground_term(t: 'PsiTerm', _seen=None) -> bool:
+    """Whether t holds no unbound variable anywhere under it."""
+    if _seen is None:
+        _seen = set()
+    t = t.deref()
+    if id(t) in _seen:
+        return True
+    _seen.add(id(t))
+    if t.value is None and not t.attr_list:
+        from wild_life.runtime import WL as _WL_gt
+        if t.type is None or t.type is _WL_gt.top:
+            return False
+    return all(_is_ground_term(v, _seen) for v in t.attr_list.values())
 
 
 def _has_applicable_rule(t: 'PsiTerm') -> bool:
