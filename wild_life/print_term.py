@@ -388,15 +388,24 @@ class PrintState:
                 stack.append((val, True))
 
     def insert_variables(self, var_tree: dict, force: bool) -> None:
-        """Map variable names from var_tree into pointer_names."""
-        for name, pterm in var_tree.items():
+        """Map variable names from var_tree into pointer_names.
+
+        Where several names stand for one term, the first alphabetically is
+        the one shown: `A = \`(X:f(X))` writes it as A, not as X.
+        """
+        for name in sorted(var_tree):
+            pterm = var_tree[name]
             if pterm is None:
                 continue
             t = pterm.deref()
             tid = id(t)
-            if tid in self.pointer_names:
-                if self.pointer_names[tid] is not None or force:
-                    self.pointer_names[tid] = name
+            if tid not in self.pointer_names:
+                continue
+            current = self.pointer_names[tid]
+            if current is not None and current != 'SHARED' and not force:
+                continue        # an earlier name already stands for this term
+            if current is not None or force:
+                self.pointer_names[tid] = name
 
     def forbid_variables(self, var_tree: dict) -> None:
         """Pre-register top-level variables in printed_pointers.

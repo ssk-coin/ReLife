@@ -305,6 +305,21 @@ def _is_proper_bool_expr(t: 'PsiTerm') -> bool:
     return False
 
 
+def _term_reaches_itself(t: 'PsiTerm', _seen: frozenset = frozenset(),
+                        _depth: int = 0) -> bool:
+    """Whether following t's features leads back to t."""
+    if t is None or _depth > 60:
+        return False
+    t = t.deref()
+    if id(t) in _seen:
+        return True
+    _seen = _seen | {id(t)}
+    for ref in t.attr_list.values():
+        if _term_reaches_itself(ref, _seen, _depth + 1):
+            return True
+    return False
+
+
 def _bool_operand_ok(t: 'PsiTerm', wl, _depth: int = 0) -> bool:
     """Whether a term can stand where a boolean is wanted.
 
@@ -840,9 +855,22 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if _ok_ev:
             return _make_number(eng, _v_ev)
         if _is_user_function(arg):
-            return None     # its own evaluation machinery answers this
+            # Asked for the value, not for the term to become it: eval reduces
+            # a copy, so `A = eval(X:f(X))` answers 1 and leaves X the call.
+            _mark_ev = eng.trail.mark()
+            try:
+                _red_ev = _eval_user_func_sync(copy_term(arg, {}), eng, 0)
+                if _red_ev is None:
+                    return None
+                return copy_term(_red_ev.deref(), {})
+            finally:
+                eng.trail.undo_to(_mark_ev)
         _inner_ev = _try_eval_string_func(arg, eng)
-        return _inner_ev if _inner_ev is not None else arg
+        if _inner_ev is not None:
+            return _inner_ev
+        # eval hands back a value, not the term it read: `A = eval(X:a(X))`
+        # gives A a cyclic term of its own rather than making A and X one.
+        return copy_term(arg, {})
 
     elif sym in ('var', 'nonvar', 'is_function', 'is_predicate', 'is_sort'):
         # These read as functions too: `A = var(_)` answers true, not var(@).
@@ -1441,8 +1469,13 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
                                   'truncate'))
     from wild_life.data_structures import NON_STRICT_TERM as _WT_NST
     _is_nst = bool(t.flags & _WT_NST)
+    # A call that reaches itself is written as the call it is: `X : f(X)` has
+    # no value to show that is not itself.  What asks for its value — `=`, or
+    # an argument position — still reduces it.
+    _self_call = _is_user_function(t) and _term_reaches_itself(t)
     try:
-        t_eval = _try_eval_arith_to_term(t, eng) if not _is_nst else None
+        t_eval = (_try_eval_arith_to_term(t, eng)
+                  if not _is_nst and not _self_call else None)
         if t_eval is not None:
             t = t_eval
         else:
@@ -1474,7 +1507,10 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
                         if wl:
                             _fresh_var.type = wl.top
                         t = _fresh_var
-            elif _is_user_function(t) and eng is not None:
+            elif (_is_user_function(t) and eng is not None
+                    and not _term_reaches_itself(t)):
+                # A call that reaches itself is written as the call it is:
+                # `X : f(X)` has no value to show that is not itself.
                 # User-defined function call: evaluate synchronously for display.
                 # Use a trail mark so pattern-matching bindings don't leak.
                 # NOTE: 0-arity user functions (global variables declared with
@@ -1975,8 +2011,11 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
             eng.unifier._fire_delay_rules(t, t.type)
         return True, float(t.value)
 
-    # User-defined function: try to evaluate it inline (no condition case)
-    if t.type is not None and t.type.type == DefType.FUNCTION and t.type.rule:
+    # User-defined function: try to evaluate it inline (no condition case).
+    # A call under a backtick is the call, not what it answers, so it is left
+    # alone here the same way `_is_user_function` leaves it alone elsewhere;
+    # so is a call that reaches itself, which has no value but itself.
+    if _is_user_function(t):
         note_persistent_use(t.type, eng)
         active = [(h, b) for (h, b) in t.type.rule if h is not None and b is not None]
         from wild_life.unification import copy_term
@@ -2068,7 +2107,11 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         if a1_sym == '`':
             inner = a1d.attr_list.get('1')
             if inner is not None:
-                return _eval_arith(inner.deref(), eng, _depth + 1)
+                a1d = inner.deref()
+        # A call is reduced for its value, not into its value: that is left to
+        # the eval branch of _try_eval_string_func, which reduces a copy, so
+        # `A = eval(X:f(X))` answers 1 and leaves X the call it was.
+        if _is_user_function(a1d):
             return False, 0.0
         return _eval_arith(a1d, eng, _depth + 1)
 
@@ -3050,7 +3093,7 @@ def _is_user_function(t: PsiTerm) -> bool:
 
 
 def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
-    """Synchronously evaluate a user-defined function call.
+    """Synchronously evaluate a user-defined function call, cycles included.
 
     This is used to eagerly evaluate function-call arguments before pattern
     matching (e.g., reverse([1,2,3,4]) in rev(reverse([1,2,3,4]),[])).
@@ -3067,6 +3110,26 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
     if not _is_user_function(t):
         return None
 
+    from wild_life.unification import copy_term
+    from wild_life.data_structures import QUOTED_TRUE
+
+    # A call that reaches itself is not reduced through its own argument:
+    # `X : f(X)` is the very call being evaluated, so it stands as it is while
+    # the rule is matched against it.
+    _active_sync = getattr(eng, '_sync_eval_active', None)
+    if _active_sync is None:
+        _active_sync = eng._sync_eval_active = set()
+    if id(t) in _active_sync:
+        return None
+    _active_sync.add(id(t))
+    try:
+        return _eval_user_func_sync_inner(t, eng, _depth)
+    finally:
+        _active_sync.discard(id(t))
+
+
+def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm]:
+    """The body of _eval_user_func_sync, once the call is known to be new."""
     from wild_life.unification import copy_term
     from wild_life.data_structures import QUOTED_TRUE
 
@@ -4485,12 +4548,24 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     from wild_life.inference import _mark_arith_non_strict as _BI_MANS  # noqa: F811
     _bq_sym_check = (lambda td: td.type is not None and td.type.keyword is not None
                      and td.type.keyword.symbol == '`')
+    def _freeze_call(td):
+        """Keep a backticked call as the call it is, not the value it has.
+
+        `` `(X:f(X)) `` is the term f(X), so it is not reduced to what f
+        answers, the way the arithmetic under a backtick is not reduced.
+        """
+        from wild_life.data_structures import QUOTED_TRUE as _QT_bq
+        if _is_user_function(td):
+            eng.trail.trail_psi(td, 'flags')
+            td.flags |= _QT_bq
+
     _b_was_backtick = False
     if _bq_sym_check(b_d):
         _bq_inner = b_d.attr_list.get('1')
         if _bq_inner is not None:
             _bq_inner_d = _bq_inner.deref()
             _BI_MANS(_bq_inner_d)  # recursively mark arithmetic sub-terms as NON_STRICT
+            _freeze_call(_bq_inner_d)
             b_d = _bq_inner_d
             _b_was_backtick = True
     _a_was_backtick = False
@@ -4499,6 +4574,7 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         if _bq_inner is not None:
             _bq_inner_d = _bq_inner.deref()
             _BI_MANS(_bq_inner_d)
+            _freeze_call(_bq_inner_d)
             a_d = _bq_inner_d
             _a_was_backtick = True
 
