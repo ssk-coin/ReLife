@@ -258,6 +258,28 @@ def _collect_arith_vars(t: 'PsiTerm', wl, result: list, seen: set) -> None:
             _collect_arith_vars(val, wl, result, seen)
 
 
+def _can_be_a_number(t: 'PsiTerm', wl) -> bool:
+    """Whether t could turn out to be a number.
+
+    A variable could, and so could anything already numeric.  A concrete name
+    such as `a` could not, whatever else the program goes on to bind.
+    """
+    from wild_life.data_structures import SORT_VAR as _SV_num
+    if t is None:
+        return True
+    t = t.deref()
+    if t.value is not None:
+        return bool(t.type is not None and t.type.is_subtype_of(wl.real))
+    if t.attr_list:
+        return True         # an expression still to be worked out
+    if t.type is None or t.type is wl.top:
+        return True         # a variable: still waiting to be something
+    if t.flags & _SV_num:
+        from wild_life.unification import types_compatible as _tc_num
+        return _tc_num(t.type, wl.real)
+    return t.type.is_subtype_of(wl.real)
+
+
 def _attach_arith_resid(var: 'PsiTerm', wl, pending_goal, eng=None) -> None:
     """Constrain var to sort real and attach a pending residuated goal.
 
@@ -902,6 +924,21 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             if defn.is_subtype_of(wl.quoted_string):
                 return _make_string(eng, str(a1.value))
         return _make_atom(eng, defn.keyword.symbol)
+
+    elif sym == 'getenv':
+        # getenv(Name) is what the environment says Name is worth.  A name the
+        # environment says nothing about has no value, and the call fails —
+        # which is how `D = getenv("SLDIR"), chdir(D)` leaves the directory
+        # alone when SLDIR is not set.
+        a1 = t.attr_list.get('1')
+        if a1 is None or eng is None:
+            return None
+        _n = _get_str_val(a1.deref(), eng)
+        if _n is None:
+            return None
+        import os as _os_ge
+        _v = _os_ge.environ.get(_n)
+        return _make_string(eng, _v) if _v is not None else None
 
     elif sym == 'ops' and not t.attr_list:
         # `ops` is the operator table as a list of op(Precedence, Type, Name),
@@ -2384,30 +2421,8 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
 
     # asc(C) — ASCII code of character C (first character, mod 256)
     if sym == 'asc':
-        a1 = t.attr_list.get('1')
-        if a1 is None:
-            return False, 0.0
-        a1d = a1.deref()
-        # First try to evaluate as chr(N) or another string function
-        char_term = _try_eval_string_func(a1d, eng)
-        if char_term is not None:
-            if char_term.value is not None:
-                s = str(char_term.value)
-                if s:
-                    return True, float(ord(s[0]) % 256)
-            return False, 0.0
-        # Try as a direct string value
-        if a1d.value is not None and eng is not None:
-            wl = eng.wl
-            if a1d.type and a1d.type.is_subtype_of(wl.quoted_string):
-                s = str(a1d.value)
-                return (True, float(ord(s[0]) % 256)) if s else (False, 0.0)
-        # Try as atom (symbol name like 'a', 'b', etc.)
-        if a1d.type is not None and a1d.type.keyword is not None:
-            s = a1d.type.keyword.symbol
-            if len(s) == 1:
-                return True, float(ord(s[0]) % 256)
-        return False, 0.0
+        _state, _val = _asc_argument(t, eng)
+        return (True, _val) if _state == 'code' else (False, 0.0)
 
     # int(X) — integer part of X (truncate towards zero)
     if sym == 'int':
@@ -3575,6 +3590,71 @@ def _is_chr_func(t: 'PsiTerm') -> bool:
         return False
     return (t.type.keyword.symbol == 'chr' and
             '1' in t.attr_list and '2' not in t.attr_list)
+
+
+def _asc_argument(t: 'PsiTerm', eng):
+    """What asc(X) can make of its argument.
+
+    Answers ('code', n) for a character it can read, ('wait', None) for a
+    string whose characters nothing has said yet — `asc(string)` waits rather
+    than failing — and ('error', None) for an argument that is no string at
+    all, which is reported as C Wild Life reports it.
+    """
+    a1 = t.attr_list.get('1')
+    if a1 is None:
+        return ('error', None)
+    a1d = a1.deref()
+    wl = eng.wl if eng is not None else None
+    # A meet is the term it comes to: `asc(thingy & "hello")` reads the h.
+    if (wl is not None and a1d.type is not None and a1d.type is wl.and_sym
+            and a1d.attr_list):
+        _merged = _eval_and_conjunction(a1d, eng)
+        if _merged is not None:
+            a1d = _merged.deref()
+    # A string function first: `asc(chr(65))` reads what chr answers.
+    char_term = _try_eval_string_func(a1d, eng)
+    if char_term is not None:
+        a1d = char_term.deref()
+    if a1d.value is not None and wl is not None:
+        if a1d.type is not None and a1d.type.is_subtype_of(wl.quoted_string):
+            _s = str(a1d.value)
+            return ('code', float(ord(_s[0]) % 256)) if _s else ('wait', None)
+        return ('error', None)     # a number is no string
+    # A bare name of one character is read as that character.  A compound is
+    # not: `asc(2 * X)` is not the 42 that `*` would give.
+    if (not a1d.attr_list and a1d.type is not None
+            and a1d.type.keyword is not None):
+        _s = a1d.type.keyword.symbol
+        if len(_s) == 1:
+            return ('code', float(ord(_s[0]) % 256))
+    # A string with nothing in it yet, or a variable that may still be one.
+    if not a1d.attr_list and a1d.value is None and wl is not None and (
+            a1d.type is None or a1d.type is wl.top
+            or a1d.type.is_subtype_of(wl.quoted_string)):
+        return ('wait', None)
+    return ('error', None)
+
+
+def _report_asc_error(t: 'PsiTerm', eng) -> None:
+    """Say that asc was given something that is no string.
+
+    The argument is named by what it is worth: an expression still waiting on
+    its variables is a `real~`, which is how C Wild Life names it.
+    """
+    a1 = t.attr_list.get('1')
+    a1d = a1.deref() if a1 is not None else None
+    if a1d is None:
+        _shown = '@'
+    else:
+        _ok, _v = _eval_arith(a1d, eng)
+        if _ok:
+            _shown = _term_to_str(_make_number(eng, _v), eng)
+        elif _get_sym(a1d) in _ARITH_OPS_SET:
+            _shown = 'real~'
+        else:
+            _shown = _term_to_str(a1d, eng)
+    sys.stderr.write(
+        f"*** Error: String argument expected in 'asc({_shown})'\n")
 
 
 def _is_asc_func(t: 'PsiTerm') -> bool:
@@ -5229,13 +5309,29 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         r = _try_eval_string_func(a_d, eng)
         return _unify(eng, b_d, r) if r is not None else False
 
-    # Handle asc(C) functional use: N = asc(C) → ASCII code of character C
-    if _is_asc_func(b_d):
-        ok, v = _eval_arith(b_d, eng)
-        return _unify(eng, a_d, _make_number(eng, v)) if ok else False
-    if _is_asc_func(a_d):
-        ok, v = _eval_arith(a_d, eng)
-        return _unify(eng, b_d, _make_number(eng, v)) if ok else False
+    # Handle asc(C) functional use: N = asc(C) → ASCII code of character C.
+    # A string nothing has filled in yet leaves the answer open rather than
+    # failing, and an argument that is no string at all is reported.
+    for _asc_side, _asc_other in ((b_d, a_d), (a_d, b_d)):
+        if not _is_asc_func(_asc_side):
+            continue
+        _asc_state, _asc_val = _asc_argument(_asc_side, eng)
+        if _asc_state == 'code':
+            return _unify(eng, _asc_other, _make_number(eng, _asc_val))
+        if _asc_state == 'wait':
+            return True
+        _report_asc_error(_asc_side, eng)
+        return False
+
+    # No number is its own bitwise negation, so `A = \\(A)` fails — and so
+    # does `A = B` once `A = \\(B)` is waiting on them, which is the same
+    # equation with A and B made one.
+    for _bn_side, _bn_other in ((b_d, a_d), (a_d, b_d)):
+        if _get_sym(_bn_side) != '\\' or len(_bn_side.attr_list) != 1:
+            continue
+        _bn_arg = _bn_side.attr_list.get('1')
+        if _bn_arg is not None and _bn_arg.deref() is _bn_other:
+            return False
 
     # Handle bagof/findall/setof in functional position:
     #   L = bagof(Template, Goal)  →  collect all solutions and unify with L
@@ -6109,6 +6205,12 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                             _inv_arg, _inv_val = _inv
                             return _unify(eng, _inv_arg,
                                           _make_number(eng, _inv_val))
+                        # An expression answers a number, so the side it is
+                        # equated with has to be able to be one: `a = \\(Z)`
+                        # is refused rather than left waiting on Z, because no
+                        # Z makes an atom a number.
+                        if not _can_be_a_number(a_d, wl):
+                            return False
                         from wild_life.data_structures import Goal, Residuation
                         eq_defn = getattr(wl, 'eqsym', None) or wl.syntax_module.symbol_table.get('=')
                         eq_term = PsiTerm(type_def=eq_defn)
@@ -6118,6 +6220,15 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                         pending_goal = Goal(GoalType.PROVE, eq_term, None, None, pending=True)
                         for v in vars_in_expr:
                             _attach_arith_resid(v, wl, pending_goal, eng)
+                        if a_d_final.attr_list:
+                            # The left side may be an expression of its own,
+                            # and what it waits on is what will settle the
+                            # equation: `I + 7 = J + 1` is solved for J the
+                            # moment I is known, so the goal waits on I too.
+                            _lhs_vars: list = []
+                            _collect_arith_vars(a_d_final, wl, _lhs_vars, set())
+                            for _lv in _lhs_vars:
+                                _attach_arith_resid(_lv, wl, pending_goal, eng)
                         if not a_d_is_free:
                             # LHS is bound: also attach to original LHS var so tilde shows.
                             a_orig = a
@@ -8004,6 +8115,36 @@ def bi_assert_ok(goal: PsiTerm, eng) -> bool:
     return True
 
 
+# Where a loaded file is looked for when the name does not name one outright,
+# which is what `bi_load_path` stands for in built_ins.lf.
+def _life_load_dirs() -> list:
+    import os as _os_lp
+    _root = _os_lp.path.dirname(_os_lp.path.dirname(_os_lp.path.abspath(__file__)))
+    return ['',
+            _os_lp.path.join(_root, 'lib'),
+            _os_lp.path.join(_root, 'examples'),
+            _os_lp.path.join(_root, 'examples', 'SuperLint')]
+
+
+def _resolve_life_file(filename: str) -> str:
+    """The file a load names.
+
+    The name is taken as written when a file of that name is there —
+    `load("FILES/t3203.1")` names the file itself — and `.lf` is only added
+    when it is not.  A bare name that names nothing here is looked for where
+    the libraries and examples live, which is how `import("superlint")` finds
+    a module that does not sit beside the program.
+    """
+    import os as _os_rf
+    for _d in _life_load_dirs():
+        for _name in ((filename,) if filename.endswith('.lf')
+                      else (filename, filename + '.lf')):
+            _p = _os_rf.path.join(_d, _name) if _d else _name
+            if _os_rf.path.exists(_p):
+                return _p
+    return filename if filename.endswith('.lf') else filename + '.lf'
+
+
 def bi_load(goal: PsiTerm, eng) -> bool:
     """load(File) — load a LIFE source file."""
     arg = _get_one_arg(goal)
@@ -8011,12 +8152,7 @@ def bi_load(goal: PsiTerm, eng) -> bool:
         return False
     filename = str(arg.value) if arg.value else (
         arg.type.keyword.symbol if arg.type and arg.type.keyword else '')
-    # The name is taken as written when a file of that name is there —
-    # `load("FILES/t3203.1")` names the file itself — and `.lf` is only added
-    # when it is not.
-    import os as _os_ld
-    if not filename.endswith('.lf') and not _os_ld.path.exists(filename):
-        filename += '.lf'
+    filename = _resolve_life_file(filename)
 
     wl = eng.wl
     delay_count_before = len(wl.delay_rules)
@@ -9839,6 +9975,38 @@ def register_all(wl) -> None:
     _reg('gc', _bi_gc)
     _reg('garbage_collect', _bi_gc)
     _reg('load', bi_load)
+
+    def _bi_chdir(goal, eng):
+        """chdir(Dir) — make Dir the current directory."""
+        arg = _get_one_arg(goal)
+        if arg is None:
+            return False
+        _d = _get_str_val(arg.deref(), eng)
+        if not _d:
+            return False
+        import os as _os_cd
+        try:
+            _os_cd.chdir(_d)
+        except OSError:
+            return False
+        return True
+    _reg('chdir', _bi_chdir)
+
+    def _bi_getenv(goal, eng):
+        """getenv(Name, Value) — what the environment says Name is worth."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None:
+            return False
+        _n = _get_str_val(a1.deref(), eng)
+        if _n is None:
+            return False
+        import os as _os_ge2
+        _v = _os_ge2.environ.get(_n)
+        if _v is None:
+            return False
+        return _unify(eng, a2.deref(), _make_string(eng, _v)) if a2 else True
+    _reg('getenv', _bi_getenv)
     _reg('op', bi_op)
     _reg('statistics', bi_statistics)
     _reg('current_prolog_flag', bi_current_prolog_flag)

@@ -594,9 +594,29 @@ class Parser:
                             self.push(t, prec, OperatorType.NOP)
                             state = 1
                     else:
-                        # 前置演算子
-                        self.push(t, pr_2, OperatorType.FX)
-                        prec = pr_2
+                        # 前置演算子。ただし次に項が来ない場合は演算子ではなく
+                        # アトムとして扱う。
+                        # An operator with nothing to apply to is the name
+                        # itself: the `type` of `public(type, name)` is the
+                        # atom, not a prefix operator waiting for its argument.
+                        _peek = self.ts.read_token()
+                        self.ts.put_back_token(_peek)
+                        _no_term_follows = (
+                            _peek.type is WL.final_dot
+                            or _peek.type is WL.final_question
+                            or _peek.type is WL.eof
+                            or self.equ_tokch(_peek, ')')
+                            or self.equ_tokch(_peek, ']')
+                            or self.equ_tokch(_peek, '}')
+                            or self.equ_tokch(_peek, ',')
+                            or (stop1 and self.equ_tokch(_peek, stop1))
+                            or (stop2 and self.equ_tokch(_peek, stop2)))
+                        if _no_term_follows:
+                            self.push(t, prec, OperatorType.NOP)
+                            state = 1
+                        else:
+                            self.push(t, pr_2, OperatorType.FX)
+                            prec = pr_2
 
         # 最終的なスタック縮小
         if state == 1:
