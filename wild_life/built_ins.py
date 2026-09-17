@@ -5658,6 +5658,13 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                                              else (False, 0.0))
                             if _zd_ok and _zd_v == 0:
                                 return _unify(eng, a_d_final, _make_number(eng, 0.0))
+                        # `0.5 = sin(B)` says what B is: a function with one
+                        # free argument and a known result is read backwards.
+                        _inv = _invert_unary_call(a_d, b_d, eng)
+                        if _inv is not None:
+                            _inv_arg, _inv_val = _inv
+                            return _unify(eng, _inv_arg,
+                                          _make_number(eng, _inv_val))
                         from wild_life.data_structures import Goal, Residuation
                         eq_defn = getattr(wl, 'eqsym', None) or wl.syntax_module.symbol_table.get('=')
                         eq_term = PsiTerm(type_def=eq_defn)
@@ -6595,6 +6602,53 @@ def bi_asserta(goal: PsiTerm, eng) -> bool:
     return True
 
 
+# What each one-argument function undoes, where undoing it says one thing.
+_UNARY_INVERSES = {
+    'sin': math.asin, 'cos': math.acos, 'tan': math.atan,
+    'asin': math.sin, 'acos': math.cos, 'atan': math.tan,
+    'exp': math.log, 'log': math.exp,
+    'sqrt': lambda v: v * v,
+}
+
+
+def _invert_unary_call(known: PsiTerm, call: PsiTerm, eng):
+    """Read `Value = f(X)` backwards, as (X, the value X must have).
+
+    Returns None where the call is not one function of one free argument, or
+    where undoing it would say nothing definite.
+    """
+    sym = _get_sym(call)
+    inverse = _UNARY_INVERSES.get(sym)
+    if inverse is None:
+        return None
+    if len(call.attr_list) != 1:
+        return None
+    arg = call.attr_list.get('1')
+    if arg is None:
+        return None
+    arg = arg.deref()
+    if arg.value is not None or arg.attr_list:
+        return None
+    ok, value = _eval_arith(known, eng)
+    if not ok:
+        return None
+    try:
+        return arg, float(inverse(value))
+    except (ValueError, OverflowError):
+        return None
+
+
+def report_static_definition(defn) -> None:
+    """Say that a closed definition was asked to change."""
+    kw = getattr(defn, 'keyword', None)
+    if kw is None:
+        return
+    module = getattr(kw, 'module', None)
+    name = (f"{module.module_name}#{kw.symbol}"
+            if module is not None and module.module_name else kw.symbol)
+    sys.stderr.write(f"*** Error: the predicate '{name}' may not be changed.\n")
+
+
 def bi_retract(goal: PsiTerm, eng) -> bool:
     """retract(Clause) — remove first matching clause (non-deterministic).
 
@@ -6622,6 +6676,10 @@ def bi_retract(goal: PsiTerm, eng) -> bool:
     head = head.deref()
     defn = head.type
     if defn is None or defn.rule is None or callable(defn.rule):
+        return False
+    if getattr(defn, 'is_static', False):
+        # A closed definition gives nothing up.
+        report_static_definition(defn)
         return False
     # Build a body term if none given (unifies with 'true' / any body)
     if body is None:
@@ -9316,8 +9374,28 @@ def register_all(wl) -> None:
             # listing prints a `dynamic(P)?` header for a predicate declared
             # this way, so that its listing can be read back in.
             arg.type.is_dynamic = True
+            arg.type.is_static = False
         return True
     _reg('dynamic', _bi_dynamic)
+
+    def _bi_static(goal, eng):
+        """static(P, …): close P's definition.
+
+        A static predicate takes no more clauses and gives none up: asserting
+        one is quietly accepted and changes nothing, and retracting fails.
+        """
+        i = 1
+        while True:
+            arg = goal.attr_list.get(str(i))
+            if arg is None:
+                break
+            i += 1
+            arg_d = arg.deref()
+            if arg_d.type is not None:
+                arg_d.type.is_static = True
+                arg_d.type.is_dynamic = False
+        return True
+    _reg('static', _bi_static)
 
     def _bi_persistent(goal, eng):
         """persistent(X1, X2, ...) — declare global variables that keep their

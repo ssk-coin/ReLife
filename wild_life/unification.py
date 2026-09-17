@@ -1119,6 +1119,13 @@ class Unifier:
         if u is v:
             return True
 
+        # Whether each side already stood for a value before the other's was
+        # copied across: two different numbers stay two terms, but a variable
+        # meeting a number becomes that number's own term, so `A = C` leaves
+        # C reading as A.
+        _u_had_value = u.value is not None
+        _v_had_value = v.value is not None
+
         # 値の単一化 (数値・文字列)
         if not self._unify_values(u, v):
             return False
@@ -1134,8 +1141,10 @@ class Unifier:
         # Only do this for non-numeric atoms (numbers are primitive values that
         # should remain separate; ChoicePoint values in '!' terms are OK to merge).
         from wild_life.data_structures import ChoicePoint as _CP_merge, NON_STRICT_TERM as _NST_merge
-        _u_prim = isinstance(u.value, (int, float, str)) if u.value is not None else False
-        _v_prim = isinstance(v.value, (int, float, str)) if v.value is not None else False
+        _u_prim = (_u_had_value
+                   and isinstance(u.value, (int, float, str)))
+        _v_prim = (_v_had_value
+                   and isinstance(v.value, (int, float, str)))
         # Bind u → v so deref(u) returns v (the canonical psi-term).
         # This matches C Wild Life's convention: the second argument (v) is preferred
         # as the canonical representative. For example, when unifying A.c (T_c) with A,

@@ -942,6 +942,12 @@ class Engine:
         defn = head.type
         if defn is None:
             return False
+        if getattr(defn, 'is_static', False):
+            # `static(p)?` closes p: a further clause changes nothing, so a
+            # later listing shows what p was.
+            from wild_life.built_ins import report_static_definition
+            report_static_definition(defn)
+            return True
 
         if defn.type == DefType.UNDEF:
             defn.type = typ
