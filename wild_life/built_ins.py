@@ -889,7 +889,10 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             try:
                 _red_ev = _eval_user_func_sync(copy_term(arg, {}), eng, 0)
                 if _red_ev is None:
-                    return None
+                    # A call still waiting for arguments has no value but
+                    # itself: `eval(f(1))` of `f(X,Y) -> [X,Y]` is f(1), and
+                    # a copy of it, so asking twice gives two of them.
+                    return copy_term(arg, {})
                 return copy_term(_red_ev.deref(), {})
             finally:
                 eng.trail.undo_to(_mark_ev)
@@ -4471,6 +4474,20 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng) -> 'Optional[PsiTerm]':
     existing = host.attr_list.get(fkey)
     if existing is not None:
         return existing  # caller will deref as needed
+    # A call still waiting for arguments is a function, not a term with room
+    # for another feature: `X.2 = 2` on the `f(1)` of `f(X,Y) -> [X,Y]` is
+    # refused, and says which function it was.
+    if (_is_user_function(host) and host.attr_list
+            and not _has_applicable_rule(host)):
+        import io as _io_dot
+        from wild_life.print_term import write_term as _wt_dot
+        _buf_dot = _io_dot.StringIO()
+        _wt_dot(host, outfile=_buf_dot, quoted=True, wl=eng.wl,
+                max_col=1_000_000)   # the message is one line
+        sys.stderr.write(
+            f"*** Error: attempt to add a feature to curried function "
+            f"{_buf_dot.getvalue()}\n")
+        return None
     # Attr absent — create a fresh variable (type=top = unbound), insert it (trailed)
     wl_rd = eng.wl
     fresh = PsiTerm()
