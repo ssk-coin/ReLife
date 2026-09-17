@@ -1574,6 +1574,14 @@ class Engine:
         _vm: dict = {}
         head = copy_term(head_orig, _vm)
         body = copy_term(body_orig, _vm)
+        # A call written into a clause head's argument is there for its value:
+        # `p_a(pair(foo_a(Y:titi_a), …))` matches against pair(t(Y), …), which
+        # is what foo_a answers, not against the call itself.  Only a call a
+        # rule already fits is reduced: `hanoi(…, Ms:ensuite(Ms1,…))` has to
+        # wait on Ms1, and reducing it here would pick the empty-list rule and
+        # settle a question the clause has not asked.
+        if head.attr_list:
+            self._reduce_settled_head_calls(head)
 
         # Fix A: such_that daemon setup for FUNCTION rules.
         # When the body is `val | cond` (such_that), and the call has free
@@ -1699,6 +1707,51 @@ class Engine:
                 return self.backtrack_and_succeed()
             return False
         return True
+
+    def _reduce_settled_head_calls(self, head: 'PsiTerm') -> None:
+        """Reduce the calls under a clause head that a rule already fits.
+
+        A call whose arguments are not specific enough for any rule is left
+        as written: it is part of the pattern, and settling it here would
+        answer a question the clause has not asked.
+        """
+        from wild_life.built_ins import (_is_user_function as _iuf_h,
+                                         _try_eval_any_func as _teaf_h)
+        seen: set = set()
+
+        def walk(t: 'PsiTerm', depth: int) -> None:
+            if depth > 40:
+                return
+            td = t.deref()
+            if id(td) in seen:
+                return
+            seen.add(id(td))
+            for key in list(td.attr_list.keys()):
+                child = td.attr_list[key].deref()
+                if _iuf_h(child) and self._head_call_is_settled(child):
+                    evaled = _teaf_h(child, self)
+                    if evaled is not None and evaled.deref() is not child:
+                        td.attr_list[key] = evaled
+                        walk(evaled, depth + 1)
+                        continue
+                walk(child, depth + 1)
+
+        walk(head, 0)
+
+    def _head_call_is_settled(self, call: 'PsiTerm') -> bool:
+        """Whether some rule of call's function fits it as it stands."""
+        rules = call.type.rule if call.type is not None else None
+        if not rules:
+            return False
+        for _h, _b in rules:
+            if _h is None or _b is None:
+                continue
+            _hd = _h.deref()
+            if set(_hd.attr_list.keys()) - set(call.attr_list.keys()):
+                continue
+            if _rule_match_status(_hd, call, self) == 'ready':
+                return True
+        return False
 
     def backtrack_and_succeed(self) -> bool:
         if not self.choice_stack:
