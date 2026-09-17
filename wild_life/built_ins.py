@@ -1290,6 +1290,8 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
     from wild_life.print_term import write_term
     var_tree = getattr(eng, '_last_var_tree', None)
     wl = eng.wl if eng else None
+    # Writing out a global reads a cell the query does not own.
+    note_persistent_use(t.type, eng)
 
     # ── backtick-quoted term: strip ONE outer backtick ──────────────────────
     # write(`expr) prints the inner expr without the backtick.
@@ -1498,6 +1500,18 @@ def _note_global_used(eng, defn) -> None:
     pre = getattr(eng, 'pre_query_globals', None)
     if pre is not None and id(defn) in pre:
         eng.used_existing_global = True
+
+
+def note_persistent_use(defn, eng) -> None:
+    """Record that a `persistent` global was written, or read out at top level.
+
+    Its cell is not the query's to undo, so such a query opens a level and
+    keeps what it did — which is why `write(a)` answers at `--1>`.  A global
+    a predicate reads on its way to an answer is not that: power_4 reads
+    `result` throughout and still answers at the top level.
+    """
+    if defn is not None and getattr(defn, 'is_persistent', False):
+        _note_global_used(eng, defn)
 
 
 def _global_cell(t: PsiTerm, eng) -> Optional[PsiTerm]:
@@ -1912,6 +1926,7 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
 
     # User-defined function: try to evaluate it inline (no condition case)
     if t.type is not None and t.type.type == DefType.FUNCTION and t.type.rule:
+        note_persistent_use(t.type, eng)
         active = [(h, b) for (h, b) in t.type.rule if h is not None and b is not None]
         from wild_life.unification import copy_term
         # Pre-evaluate built-in function calls in args (e.g. features(X)) so
@@ -9289,6 +9304,10 @@ def register_all(wl) -> None:
         """
         if not goal.attr_list:
             return False
+        # A name that already has a definition of its own cannot become a
+        # global, and one bad name refuses the whole declaration: after
+        # `d -> 4`, `persistent(a,…,d,…,j)` declares none of them.
+        names: list = []
         i = 1
         while True:
             arg = goal.attr_list.get(str(i))
@@ -9299,6 +9318,17 @@ def register_all(wl) -> None:
             defn = arg_d.type
             if defn is None:
                 continue
+            if (defn.rule and defn.type in (DefType.FUNCTION, DefType.PREDICATE)
+                    and not getattr(defn, 'is_persistent', False)):
+                kind = ('function' if defn.type == DefType.FUNCTION
+                        else 'predicate')
+                name = defn.keyword.symbol if defn.keyword else '?'
+                sys.stderr.write(
+                    f"*** Error: {kind} {name} cannot be redeclared persistent"
+                    f" (near line {getattr(wl, 'line_count', 0)}).\n")
+                return False
+            names.append(defn)
+        for defn in names:
             if defn.rule is None:
                 defn.rule = []
             if defn.type not in (DefType.FUNCTION, DefType.PREDICATE):
