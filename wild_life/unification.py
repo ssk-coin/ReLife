@@ -373,6 +373,54 @@ class Unifier:
         self.trail.trail_psi(t, 'type')
         t.type = new_type
 
+    def apply_prototypes_deep(self, t: PsiTerm) -> None:
+        """Give every sort named inside a bound term its prototype features.
+
+        `:: titi(arg => 1).` says what a titi is, so the titi that `X =
+        f(titi)` hands X carries an arg just as the one `X = titi` hands it
+        does.  A rule head is left out of this: it is a pattern, and a
+        prototype is a consequence of narrowing rather than a bar to it.
+
+        The nodes are collected before any of them is given its features, so
+        a prototype that names its own sort — `:: P:married_person(spouse =>
+        person(spouse => P))` — does not walk into what it just added.
+        """
+        if t is None or self._skip_prototypes or not WL.proto_sorts:
+            return
+        nodes: list = []
+        seen: set = set()
+        queue = [t]
+        while queue:
+            node = queue.pop()
+            if node is None:
+                continue
+            node = node.deref()
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            nodes.append(node)
+            queue.extend(node.attr_list.values())
+        for node in nodes:
+            if node.type is None or node.type is WL.top:
+                continue
+            proto = getattr(node.type, 'prototype_attrs', None)
+            if not proto:
+                continue
+            # A sort under delay_check holds its prototype back while the
+            # term carries no features, the same as it does when bound.
+            if not node.attr_list and defers_check(node.type):
+                continue
+            missing = [_pk for _pk in proto if _pk not in node.attr_list]
+            if not missing:
+                # What the sort promises is already there.  Unifying it with
+                # the prototype again would walk a prototype that names its
+                # own sort round for ever.
+                continue
+            var_map: dict = {}
+            copies = {_pk: copy_term(_pv, var_map) for _pk, _pv in proto.items()}
+            for _pk in missing:
+                self.set_attr(node, _pk, copies[_pk])
+
     def _apply_prototype_attrs(self, t: PsiTerm) -> bool:
         """Constrain t's features by the `:: Sort(attrs).` prototype of its sort.
 
@@ -813,6 +861,12 @@ class Unifier:
                         else:
                             # Add missing attr from fresh prototype copy
                             self.set_attr(_v_canon, _pk, _pc)
+                # The sorts named further down the bound term get their
+                # prototypes too: `X = f(titi)` hands X a titi with its arg on
+                # it, the same as `X = titi` does.
+                if _v_canon.attr_list:
+                    for _sub_proto in list(_v_canon.attr_list.values()):
+                        self.apply_prototypes_deep(_sub_proto)
                 # Fire global delay rules for the sort of the term being bound to.
                 # e.g. :: C:cons | write(C.1), nl. fires when a plain var is bound to a cons.
                 if (WL.delay_rules and self.engine is not None and not _v_defers
