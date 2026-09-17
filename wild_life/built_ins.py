@@ -5795,54 +5795,72 @@ def _sort_compare_args(goal, eng):
         return None
     sorts = []
     for _arg in (a, b):
-        _d = _arg.deref()
+        _d = _strip_backtick(_arg.deref())
         _ev = _try_eval_any_func(_d, eng)
         if _ev is None:
             _ev = _try_eval_string_func(_d, eng)
         if _ev is not None:
-            _d = _ev.deref()
+            _d = _strip_backtick(_ev.deref())
         if _d.type is None:
             return None
-        sorts.append(_d.type)
+        # A number or string is a sort of its own, so 3 and 4 are no more the
+        # same sort than a and b are, though both are integers.
+        sorts.append((_d.type, _d.value))
     return sorts[0], sorts[1]
+
+
+def _strip_backtick(t: PsiTerm) -> PsiTerm:
+    """What a backtick holds, or the term itself."""
+    while (t is not None and t.type is not None and t.type.keyword is not None
+           and t.type.keyword.symbol == '`' and '1' in t.attr_list):
+        t = t.attr_list['1'].deref()
+    return t
+
+
+def _sort_key_under(lower, upper) -> bool:
+    """Whether the first sort key is the second or lies under it."""
+    (ld, lv), (ud, uv) = lower, upper
+    if uv is not None:
+        return ld is ud and lv == uv
+    return ld.is_subtype_of(ud)
 
 
 def bi_sort_eq(goal: PsiTerm, eng) -> bool:
     """X :== Y — X and Y have the same sort."""
     sorts = _sort_compare_args(goal, eng)
-    return sorts is not None and sorts[0] is sorts[1]
+    return sorts is not None and sorts[0] == sorts[1]
 
 
 def bi_sort_ne(goal: PsiTerm, eng) -> bool:
     """X :\\== Y — X and Y have different sorts."""
     sorts = _sort_compare_args(goal, eng)
-    return sorts is not None and sorts[0] is not sorts[1]
+    return sorts is not None and sorts[0] != sorts[1]
 
 
 def bi_sort_le(goal: PsiTerm, eng) -> bool:
     """X :=< Y — X's sort is Y's sort or lies under it."""
     sorts = _sort_compare_args(goal, eng)
-    return sorts is not None and sorts[0].is_subtype_of(sorts[1])
+    return sorts is not None and _sort_key_under(sorts[0], sorts[1])
 
 
 def bi_sort_lt(goal: PsiTerm, eng) -> bool:
     """X :< Y — X's sort lies strictly under Y's."""
     sorts = _sort_compare_args(goal, eng)
-    return (sorts is not None and sorts[0] is not sorts[1]
-            and sorts[0].is_subtype_of(sorts[1]))
+    return (sorts is not None and sorts[0] != sorts[1]
+            and _sort_key_under(sorts[0], sorts[1]))
 
 
 def bi_sort_ge(goal: PsiTerm, eng) -> bool:
     """X :>= Y — X's sort is Y's sort or lies above it."""
     sorts = _sort_compare_args(goal, eng)
-    return sorts is not None and sorts[1].is_subtype_of(sorts[0])
+    return sorts is not None and _sort_key_under(sorts[1], sorts[0])
 
 
 def bi_sort_gt(goal: PsiTerm, eng) -> bool:
     """X :> Y — X's sort lies strictly above Y's."""
     sorts = _sort_compare_args(goal, eng)
-    return (sorts is not None and sorts[0] is not sorts[1]
-            and sorts[1].is_subtype_of(sorts[0]))
+    return (sorts is not None and sorts[0] != sorts[1]
+            and _sort_key_under(sorts[1], sorts[0]))
 
 
 def bi_sort_not_lt(goal: PsiTerm, eng) -> bool:
