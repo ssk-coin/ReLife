@@ -344,8 +344,12 @@ def _is_settled_value(t: 'PsiTerm', origin) -> bool:
     if t is None:
         return False
     from wild_life.runtime import WL as _WL_sv
+    _td = t.deref()
+    if _td.value is None and not _td.attr_list and (
+            _td.type is None or _td.type is _WL_sv.top):
+        return False        # a bare variable: still waiting to be something
     seen: set = set()
-    stack = [t]
+    stack = [_td]
     while stack:
         n = stack.pop()
         if n is None:
@@ -355,9 +359,13 @@ def _is_settled_value(t: 'PsiTerm', origin) -> bool:
             continue        # a cycle is as settled as it will get
         if n.type is origin:
             return False    # it stands for itself, so it says nothing
-        if n.value is None and not n.attr_list and (
-                n.type is None or n.type is _WL_sv.top):
-            return False    # a variable: still waiting to be something
+        # A sum still waiting on its variables is not a value: a global's
+        # stored `@ + 1` says nothing yet.  A psi-term with variables in it
+        # is a different matter — `stu` is worth `student(roommate =>
+        # employee(representative => S), advisor => don(secretary => S))`,
+        # and the S it shares is part of what it is worth.
+        if n.attr_list and _get_sym(n) in _ARITH_OPS_SET:
+            return False
         seen.add(id(n))
         stack.extend(n.attr_list.values())
     return True
@@ -10951,6 +10959,44 @@ def register_all(wl) -> None:
             i += 1
         return True
     _reg('open', _bi_open)
+
+    def _bi_import(goal, eng):
+        """import("A", "B", ...) — load each file and open the module it holds.
+
+        built_ins.lf says the same thing in LIFE: `X:import :- load&strip(X),
+        import_list(features(X), X)`, where each feature is loaded and then
+        opened under the name the path ends in.  A file that holds no module
+        of that name is loaded all the same.
+        """
+        import os as _os_im
+        names = []
+        i = 1
+        while True:
+            a = goal.attr_list.get(str(i))
+            if a is None:
+                break
+            i += 1
+            _n = _get_str_val(a.deref(), eng)
+            if _n is None:
+                return False
+            names.append(_n)
+        if not names:
+            return False
+        for _n in names:
+            if not eng.load_file(_resolve_life_file(_n)):
+                return False
+            wl.current_module = wl.user_module
+        _open_defn = wl.update_symbol(wl.bi_module, 'open')
+        for _n in names:
+            _base = _os_im.path.basename(_n)
+            if _base.endswith('.lf'):
+                _base = _base[:-3]
+            if _base in wl.module_table:
+                _op = PsiTerm(type_def=_open_defn)
+                _op.attr_list = {'1': _make_string(eng, _base)}
+                _bi_open(_op, eng)
+        return True
+    _reg('import', _bi_import)
 
     def _bi_display_modules(goal, eng):
         """display_modules — enable module-qualified name display mode (like C Wild Life).
