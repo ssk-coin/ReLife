@@ -305,6 +305,29 @@ def _is_proper_bool_expr(t: 'PsiTerm') -> bool:
     return False
 
 
+def _is_settled_value(t: 'PsiTerm', origin, _seen: frozenset = frozenset(),
+                     _depth: int = 0) -> bool:
+    """Whether t is an answer in itself, rather than something still waiting.
+
+    A composition of named functions is: nothing in it is unknown, and none of
+    it is the very call that produced it.  A global's stored `@ + 1` is not.
+    """
+    if t is None or _depth > 40:
+        return False
+    t = t.deref()
+    if id(t) in _seen:
+        return True
+    if t.type is origin:
+        return False        # it stands for itself, so it says nothing
+    from wild_life.runtime import WL as _WL_sv
+    if t.value is None and not t.attr_list and (
+            t.type is None or t.type is _WL_sv.top):
+        return False        # a variable: still waiting to be something
+    _seen = _seen | {id(t)}
+    return all(_is_settled_value(_v, origin, _seen, _depth + 1)
+               for _v in t.attr_list.values())
+
+
 def _term_reaches_itself(t: 'PsiTerm', _seen: frozenset = frozenset(),
                         _depth: int = 0) -> bool:
     """Whether following t's features leads back to t."""
@@ -1192,6 +1215,27 @@ def _eval_and_conjunction(t: PsiTerm, eng) -> Optional[PsiTerm]:
     t2 = _eval_side(t2)
     if t2 is None:
         return None
+
+    # A composition waiting for its argument is a function, not a term with
+    # room for one: `add3 & @(23)` is refused, and says which function it was.
+    def _is_apply_side(x):
+        sym_ap = _get_sym(x)
+        return ((sym_ap == '@' or (wl.apply is not None and x.type is wl.apply))
+                and bool(x.attr_list))
+
+    for _curried, _other in ((t1, t2), (t2, t1)):
+        if (_is_user_function(_curried) and _curried.attr_list
+                and not _has_applicable_rule(_curried)
+                and _is_apply_side(_other)):
+            import io as _io_cf
+            from wild_life.print_term import write_term as _wt_cf
+            _buf_cf = _io_cf.StringIO()
+            _wt_cf(_curried, outfile=_buf_cf, quoted=True, wl=wl,
+                   max_col=1_000_000)   # the message is one line
+            sys.stderr.write(
+                f"*** Error: attempt to unify with curried function "
+                f"{_buf_cf.getvalue()}\n")
+            return None
 
     def _check_sort_member(elem: PsiTerm, sort_t: PsiTerm) -> bool:
         """Check if elem satisfies the sort sort_t.
@@ -3246,12 +3290,32 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
 
         body_d2 = body_d.deref()
         result = _eval_body_sync(body_d2, eng, _depth + 1)
-        if result is None and _is_user_function(body_d2):
+        if (result is None and _is_user_function(body_d2)
+                and _has_applicable_rule(body_d2)):
             # Body is a user function that can't eval synchronously
             return None
         return result if result is not None else body_d2
 
     return None
+
+
+def _has_applicable_rule(t: 'PsiTerm') -> bool:
+    """Whether any rule of t's function asks only for features t supplies.
+
+    `comp(func1 => succ, func2 => succ)` is a composition waiting for its
+    argument, not a call that could still be reduced: its one rule wants a
+    third feature, so the term itself is the value.
+    """
+    defn = t.type
+    if defn is None or not defn.rule:
+        return False
+    supplied = set(t.attr_list.keys())
+    for _h, _b in defn.rule:
+        if _h is None or _b is None:
+            continue
+        if not (set(_h.deref().attr_list.keys()) - supplied):
+            return True
+    return False
 
 
 def _is_cond_builtin_local(t: 'PsiTerm') -> bool:
@@ -5484,13 +5548,16 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     if _b_is_user_fn and not _b_is_non_strict and not b_d.attr_list and not _b_was_backtick:
         _0a_mark = eng.trail.mark()
         _b_evaled = _eval_user_func_sync(b_d, eng, 0)
+        # Copied while the bindings that made it are still standing, since the
+        # trail is wound back next.
+        _b_evaled_d = (copy_term(_b_evaled.deref(), {})
+                       if _b_evaled is not None else None)
         eng.trail.undo_to(_0a_mark)  # undo coref-linking of atom with rule-head copy
-        if _b_evaled is not None:
-            _b_evaled_d = _b_evaled.deref()
-            # Only accept the evaluation if it produced a CONCRETE numeric value.
-            # If it returned a compound expression (unevaluated or self-referential),
-            # try one more arithmetic evaluation pass.  If that also fails, fall
-            # through to normal unification (treats `result` as a variable).
+        if _b_evaled_d is not None:
+            # A concrete value is taken as the answer.  A compound one is too,
+            # so long as it is settled — `add3` answers the composition it
+            # stands for — where an expression still waiting on something, as a
+            # global's stored `@ + 1` is, leaves the name standing for itself.
             if _b_evaled_d.value is not None:
                 # Concrete numeric result → create a fresh number term (the
                 # original _b_evaled object may reference now-undone bindings).
@@ -5501,6 +5568,9 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                 _b_arith2 = _try_eval_arith_to_term(_b_evaled_d, eng)
                 if _b_arith2 is not None:
                     b_d = _b_arith2
+                    _b_is_user_fn = False
+                elif _is_settled_value(_b_evaled_d, b_d.type):
+                    b_d = _b_evaled_d
                     _b_is_user_fn = False
                 # else: keep original b_d (the 0-arity function atom) so that
                 # normal unification treats `result` as a sort variable.
