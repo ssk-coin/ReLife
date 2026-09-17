@@ -4465,10 +4465,17 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     from wild_life.data_structures import NON_STRICT_TERM as _BI_UNI_NST
     _wl_uni = eng.wl
     def _is_bare_arith_op(td):
+        """A two-argument operator that has not been given both arguments.
+
+        `and(B)` is a function waiting for its second argument, not a term
+        with room for one, so `A = and(B), A = @(2 => C)` is refused.
+        """
         sym = td.type.keyword.symbol if (td.type and td.type.keyword) else ''
-        return (sym in _ARITH_OPS_SET
-                and not td.attr_list        # no existing args
-                and not (td.flags & _BI_UNI_NST))  # not frozen
+        if sym not in _CURRIABLE_BINARY_OPS:
+            return False
+        if td.flags & _BI_UNI_NST:   # frozen by a backtick: a term, not a call
+            return False
+        return not ('1' in td.attr_list and '2' in td.attr_list)
     # Use symbol-based check for apply type — the parsed @(1,2) may use the '@' symbol
     # definition rather than wl.apply which is set up later during boot.
     _b_sym_apply = b_d.type.keyword.symbol if (b_d.type and b_d.type.keyword) else ''
@@ -4479,12 +4486,12 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                         (_a_sym_apply == '@' or a_d.type is _wl_uni.apply))
     if _is_bare_arith_op(a_d) and _b_is_apply_type and b_d.attr_list:
         import sys as _sys_uni
-        _sym_uni = a_d.type.keyword.symbol if (a_d.type and a_d.type.keyword) else '?'
+        _sym_uni = _term_to_str(a_d, eng)
         _sys_uni.stderr.write(f'*** Error: attempt to unify with curried function {_sym_uni}\n')
         return False
     if _is_bare_arith_op(b_d) and _a_is_apply_type and a_d.attr_list:
         import sys as _sys_uni2
-        _sym_uni2 = b_d.type.keyword.symbol if (b_d.type and b_d.type.keyword) else '?'
+        _sym_uni2 = _term_to_str(b_d, eng)
         _sys_uni2.stderr.write(f'*** Error: attempt to unify with curried function {_sym_uni2}\n')
         return False
 
@@ -6320,6 +6327,29 @@ def bi_once(goal: PsiTerm, eng) -> bool:
     return result
 
 
+def bi_call_once(goal: PsiTerm, eng) -> bool:
+    """call_once(P) — prove P once, waiting while P is still unknown.
+
+    `call_once(X)` with X free has nothing to prove yet, so it suspends on X
+    and runs once X says what it is.
+    """
+    arg = _get_one_arg(goal)
+    if arg is None:
+        return False
+    if _is_var(arg, eng):
+        from wild_life.data_structures import (Goal as _G_co, Residuation as _R_co,
+                                               SORT_VAR as _SV_co)
+        _pending = _G_co(GoalType.PROVE, goal, _DEFRULES_SENTINEL, None,
+                         next=None, pending=True)
+        eng.trail.trail_psi(arg, 'resid')
+        arg.resid = list(arg.resid or []) + [_R_co(goal=_pending)]
+        if not (arg.flags & _SV_co):
+            eng.trail.trail_psi(arg, 'flags')
+            arg.flags |= _SV_co
+        return True
+    return bi_once(goal, eng)
+
+
 def _all_builtin_goals(t: 'PsiTerm', eng, _depth: int = 0) -> bool:
     """Whether t is a goal made only of built-in predicates.
 
@@ -6671,6 +6701,11 @@ def _invert_unary_call(known: PsiTerm, call: PsiTerm, eng):
         return arg, float(inverse(value))
     except (ValueError, OverflowError):
         return None
+
+
+# Two-argument operators that stand for a function until both arguments are
+# there: `and(B)` is waiting for its second, not a term with room for one.
+_CURRIABLE_BINARY_OPS = frozenset(('and', 'or', 'xor')) | _ARITH_OPS_SET
 
 
 def report_static_definition(defn) -> None:
@@ -9227,6 +9262,7 @@ def register_all(wl) -> None:
     _reg('call', bi_call)
     _reg('implies', bi_implies)
     _reg('once', bi_once)
+    _reg('call_once', bi_call_once)
     _reg('cond', bi_cond)
     _reg('findall', bi_findall)
     _reg('bagof', bi_findall)   # simplified
