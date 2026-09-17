@@ -829,6 +829,21 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
                 return _make_string(eng, str(a1.value))
         return _make_atom(eng, defn.keyword.symbol)
 
+    elif sym == 'eval':
+        # eval(T) is T's value, and a term with no value of its own is that
+        # value: `A = eval(X:a(X))` answers the very term X stands for.
+        a1 = t.attr_list.get('1')
+        if a1 is None or eng is None:
+            return None
+        arg = _strip_backtick(a1.deref())
+        _ok_ev, _v_ev = _eval_arith(arg, eng)
+        if _ok_ev:
+            return _make_number(eng, _v_ev)
+        if _is_user_function(arg):
+            return None     # its own evaluation machinery answers this
+        _inner_ev = _try_eval_string_func(arg, eng)
+        return _inner_ev if _inner_ev is not None else arg
+
     elif sym in ('var', 'nonvar', 'is_function', 'is_predicate', 'is_sort'):
         # These read as functions too: `A = var(_)` answers true, not var(@).
         if eng is None or '1' not in t.attr_list or t.type is None:
