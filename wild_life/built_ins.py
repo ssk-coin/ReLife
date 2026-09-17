@@ -21,7 +21,7 @@ from typing import Optional, Tuple
 
 from wild_life.data_structures import (
     PsiTerm, Definition, GoalType, DefType, FACT, QUERY, ERROR,
-    int_div as _int_div
+    int_div as _int_div, NON_STRICT_TERM as _NST_SWAP
 )
 from wild_life.unification import (
     UnificationFailure, CutException, HaltException, AbortException,
@@ -564,10 +564,16 @@ def _try_eval_arith_to_term(t: PsiTerm, eng) -> Optional[PsiTerm]:
                                                                'exp','log','floor','ceiling')):
         return None  # already a number, no evaluation needed
     result = _make_number(eng, v)
-    # _eval_arith may have already fired delay rules for this value (e.g.
-    # via the binary * path or literal evaluation). Mark _delay_fired=True so
-    # that subsequent unification with a free variable does not re-fire.
+    # The number an expression comes to is a number the program has just been
+    # handed, so the sort's delay rules run on it once, here: `A = 2+2` owes
+    # `:: I:int | …` its 4.  The mark keeps a later unification from running
+    # them a second time.
     result._delay_fired = True
+    _fire_here = (eng is not None and getattr(eng, 'unifier', None) is not None
+                  and eng.wl is not None and eng.wl.delay_rules
+                  and result.type is not None
+                  and _get_sym(t) != '*'
+                  and not getattr(eng, '_in_fire_delay', False))
     # Memoize the result back into the compound arithmetic term (t) via coref.
     # This propagates the evaluated value through the variable chain:
     # after evaluation, any variable that pointed to this expression will deref to
@@ -575,6 +581,8 @@ def _try_eval_arith_to_term(t: PsiTerm, eng) -> Optional[PsiTerm]:
     if eng is not None and t.coref is None and t.value is None and t.attr_list:
         eng.trail.trail_psi(t, 'coref')
         t.coref = result
+    if _fire_here:
+        eng.unifier._fire_delay_rules(result, result.type)
     return result
 
 
@@ -2116,11 +2124,9 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     if sym in ops2 and ok1 and ok2:
         try:
             _result_val = float(ops2[sym](v1, v2))
-            # Fire int/real delay for multiplication results.
-            # In C Wild Life, each intermediate product of N*fact(N-1) triggers
-            # the :: I:int global delay rule as the partial result is narrowed.
-            # Only fire for '*' to avoid double-firing subtraction results that
-            # are already handled by the pre-eval computed-term firing above.
+            # A product is a number the program has been handed: `N*fact(N-1)`
+            # owes the int rule each partial result.  _try_eval_arith_to_term
+            # leaves products alone for the same reason.
             if sym == '*':
                 from wild_life.runtime import WL as _WL_mul
                 if (_WL_mul.delay_rules and eng is not None
@@ -5292,6 +5298,17 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     # the pending goal it passes the tagged eq_term as *goal*, so we can detect
     # re-fires here without any extra bookkeeping.
     is_resid_refiring: bool = getattr(goal, '_resid_marker', False)
+
+    # An equation is read the same either way round: `A*B = 20` states what
+    # the product is, just as `20 = A*B` does, and suspends on A and B rather
+    # than failing for having the expression on the left.
+    if (_get_sym(a_d) in _ARITH_OPS_SET and a_d.attr_list
+            and _get_sym(b_d) not in _ARITH_OPS_SET
+            and not (a_d.flags & _NST_SWAP) and not (b_d.flags & _NST_SWAP)
+            and _try_eval_arith_to_term(a_d, eng) is None):
+        _swapped = PsiTerm(type_def=goal.type)
+        _swapped.attr_list = {'1': b_d, '2': a_d}
+        return bi_unify(_swapped, eng)
 
     # Try arithmetic evaluation on the RHS (for A = 1+2 style).
     # Skip user-defined function calls here — they are handled by eval_aim,
