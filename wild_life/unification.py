@@ -117,6 +117,28 @@ def compute_lub(d1: Definition, d2: Definition) -> Optional[Definition]:
     return compute_glb(d1, d2)
 
 
+def _fired_rules_of(t: PsiTerm) -> set:
+    """Delay rules this psi-term has already run, by rule identity.
+
+    A term keeps the set as it is narrowed, so `X = b1` running `:: b1 |` does
+    not run it a second time when X narrows to a1 — only `:: a1 |` is owed.
+    """
+    fs = getattr(t, '_delay_rules_fired', None)
+    if fs is None:
+        fs = set()
+        t._delay_rules_fired = fs
+    return fs
+
+
+def _share_fired_rules(u: PsiTerm, v: PsiTerm) -> set:
+    """Join two psi-terms' fired-rule histories into one shared set."""
+    fs = _fired_rules_of(u)
+    fs |= _fired_rules_of(v)
+    u._delay_rules_fired = fs
+    v._delay_rules_fired = fs
+    return fs
+
+
 def defers_check(defn, _depth: int = 0) -> bool:
     """Whether a term of this sort holds its prototype and delay rules back.
 
@@ -292,6 +314,8 @@ class Unifier:
         # If we encounter the same pair again (via circular attrs), we return True
         # immediately (the rational-tree assumption: cyclic terms can be unified).
         self._unifying_pairs: set = set()
+        # Set while asking whether a narrowing could exist at all.
+        self._skip_prototypes: bool = False
         # ids of psi-terms whose conditional sort is being checked.
         self._proving_sort: set = set()
         # ids of psi-terms whose :: Sort(attrs). prototype is being applied.
@@ -328,6 +352,12 @@ class Unifier:
         leaves Q as julius, not as julius(last_name => caesar).
         """
         if t.type is None or not t.attr_list:
+            return True
+        if self._skip_prototypes:
+            # Asked only whether some narrowing could make a rule fit, and a
+            # prototype is a consequence of narrowing, not a bar to it: a call
+            # of `i(X:t1(l => t3))` against `i(t2)` waits on X rather than
+            # ruling the rule out over `:: t2(l => t4)`.
             return True
         # A prototype is inherited: `:: a(x=>c).` with `b <| a` gives every b
         # an x as well, so the sorts above t's own are collected too.
@@ -402,6 +432,12 @@ class Unifier:
                 if not self.unify(t, pat_copy):
                     self.trail.undo_to(mark)
                     return False
+                # A feature the pattern states as a meet holds the meet:
+                # soap_opera's `wife => W:alcoholic & long_lost_sister(H)`
+                # answers jane, not the conjunction that produced her.
+                if not self._reduce_conjunctions(t):
+                    self.trail.undo_to(mark)
+                    return False
                 cp_save, gs_save = eng.choice_stack, eng.goal_stack
                 eng.goal_stack = None
                 eng.push_goal(_GT_sc.PROVE, cond_copy.deref(), _DR_sc, None)
@@ -415,6 +451,43 @@ class Unifier:
             return True
         finally:
             self._proving_sort.clear()
+
+    def _reduce_conjunctions(self, t: PsiTerm) -> bool:
+        """Replace `A & B` features of t by the sort they meet at."""
+        if self.engine is None or WL.and_sym is None:
+            return True
+        from wild_life.built_ins import _eval_and_conjunction as _eac_rc
+        seen: set = set()
+        stack = [t]
+        while stack:
+            node = stack.pop()
+            node = node.deref()
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            for key, ref in list(node.attr_list.items()):
+                sub = ref.deref()
+                if (sub.type is WL.and_sym and '1' in sub.attr_list
+                        and '2' in sub.attr_list):
+                    met = _eac_rc(sub, self.engine)
+                    if met is None:
+                        return False
+                    met = met.deref()
+                    # `W:alcoholic & long_lost_sister(H)` is still W, now
+                    # narrowed, so the feature keeps pointing at W and stays
+                    # the same node as the W in the characters list.
+                    lhs = sub.attr_list['1'].deref()
+                    if not self.unify(lhs, met):
+                        return False
+                    lhs = lhs.deref()
+                    if lhs is not sub:
+                        if sub.coref is None:
+                            self.bind(sub, lhs)
+                        else:
+                            self.set_attr(node, key, lhs)
+                    sub = lhs
+                stack.append(sub)
+        return True
 
     def bind_value(self, t: PsiTerm, new_value: Any):
         """PsiTerm の値を変更する (バックトラック可能)"""
@@ -521,7 +594,13 @@ class Unifier:
                         and not (x.flags & (_QT_CJ | _NST_CJ))):
                     m = _eac(x, self.engine)
                     if m is not None:
-                        return m.deref()
+                        m = m.deref()
+                        # The conjunction is the meet, so what points at it
+                        # points at the meet: soap_opera's wife answers _B,
+                        # not `_B & long_lost_sister(_A)`.
+                        if m is not x and x.coref is None:
+                            self.bind(x, m)
+                        return m
                 return x
 
             u2, v2 = _meet_conj(u), _meet_conj(v)
@@ -536,6 +615,7 @@ class Unifier:
 
         # Sort-constrained variables (X:sort — marked SORT_VAR by the parser, or
         # X:ran where ran is a FUNCTION sort) are treated as bindable variables.
+        from wild_life.data_structures import DefType as _DefType_fn
         if not u_is_var and not v_is_var:
             from wild_life.data_structures import DefType, QUOTED_TRUE, SORT_VAR
             # SORT_VAR flag: set by parser for any X:sort syntax
@@ -571,6 +651,15 @@ class Unifier:
                     if not self._unify_types(u, v):
                         return False
                 self.bind(v, u)   # v.coref = u; v.deref() = u (sort kept)
+                self._wakeup_resid(u, v)
+            elif (not v_is_var and u.value is None and not u.attr_list
+                    and u.type is not None and u.type is not WL.top
+                    and u.type.type == _DefType_fn.FUNCTION
+                    and u.type._builtin_func is None and u.type.rule):
+                # A call standing where its value belongs — `X:ran` meeting the
+                # number ran comes to.  A function symbol is not a sort, so
+                # there is nothing to check: the call becomes its value.
+                self.bind(u, v)
                 self._wakeup_resid(u, v)
             elif u_is_sort_var and u_is_fn_sort and not v_is_var:
                 # Sort-constrained variable (X:sort) vs ground/non-variable term.
@@ -669,7 +758,8 @@ class Unifier:
                 # goes on once the term is modified (see _apply_deferred_check).
                 _v_defers = (_v_canon.attr_list == {}
                              and defers_check(_v_canon.type))
-                if (not _v_defers and _v_canon.type is not None
+                if (not _v_defers and not self._skip_prototypes
+                        and _v_canon.type is not None
                         and _v_canon.type is not WL.top
                         and getattr(_v_canon.type, 'prototype_attrs', None)):
                     _proto = _v_canon.type.prototype_attrs
@@ -983,6 +1073,12 @@ class Unifier:
                             _aar_aa(_v_aa, WL, _pend_aa, self.engine)
                         return True
 
+        # A term that has never run a delay rule is one the reader has just
+        # built: `X = m(1)` on an X that is already an m owes another `mm`,
+        # because the m(1) is its own term and `:: m | write(mm)` has not run
+        # on it.  The two histories join, so nothing runs twice afterwards.
+        self._fire_fresh_sorts(u, v)
+
         # 型の単一化
         if not self._unify_types(u, v):
             return False
@@ -1029,6 +1125,11 @@ class Unifier:
             # When a psi-term u has daemon resids (from such_that), and u is
             # merged into v (compound-compound), wake them now so the daemon fires.
             self._wakeup_resid(u, v)
+        elif (u.resid or v.resid) and self.engine is not None:
+            # No merge — one of them holds a value, so it stays the term it is.
+            # A goal waiting on it was waiting for the features it has just
+            # gained: `X = 23` waiting to become 23(1) is woken by `X = @(1)`.
+            self._wakeup_resid(u, v)
 
         # Sort narrowing from a :: Sort(attrs) prototype, e.g. a term that has
         # become person(nose => pretty) narrows to cleopatra.  This runs after
@@ -1056,6 +1157,41 @@ class Unifier:
                 self._in_deferred_check = False
 
         return True
+
+    def _fire_fresh_sorts(self, u: PsiTerm, v: PsiTerm) -> None:
+        """Run the delay rules of a newly built term meeting an existing one."""
+        if self.engine is None or not WL.delay_rules:
+            return
+        if getattr(self.engine, '_in_fire_delay', False):
+            return
+        for term, other in ((u, v), (v, u)):
+            if term.type is None or term.type is WL.top:
+                continue
+            if term.value is not None:
+                # A literal carries its own firing rules (see the deferred
+                # literal pass in _fire_delay_rules_inner); a head's `0` meeting
+                # a call's `4` must not announce itself before the match fails.
+                continue
+            if getattr(term, '_delay_rules_fired', None):
+                continue
+            if not getattr(other, '_delay_rules_fired', None):
+                continue
+            self._fire_delay_rules(term, term.type, use_fired_set=True)
+        _share_fired_rules(u, v)
+
+    def _fire_narrowed(self, term: PsiTerm, other: PsiTerm, new_sort) -> None:
+        """Run the delay rules a sort narrowing has just made applicable.
+
+        Unifying a b1 with a b2 makes the term an a1, and `:: a1 | write('A1')`
+        is what that owes — `:: b1 |` and `:: b2 |` already ran on the two terms
+        that went in, so the shared history of both sides is what we skip.
+        """
+        if self.engine is None or not WL.delay_rules:
+            return
+        if new_sort is None or new_sort is WL.top:
+            return
+        _share_fired_rules(term, other)
+        self._fire_delay_rules(term, new_sort, use_fired_set=True)
 
     def _unify_types(self, u: PsiTerm, v: PsiTerm) -> bool:
         """型を単一化する (GLB = infimum を採用)。
@@ -1090,6 +1226,7 @@ class Unifier:
                 import math as _math_ut
                 if not _math_ut.isfinite(v.value) or v.value != int(v.value):
                     return False
+            self._fire_narrowed(v, u, du)
             return self._apply_prototype_attrs(v) and self._prove_sort_condition(v)
         if dv.is_subtype_of(du):
             self.bind_type(u, dv)   # u の型を dv (より特殊) に引き上げ
@@ -1099,6 +1236,7 @@ class Unifier:
                 import math as _math_ut
                 if not _math_ut.isfinite(u.value) or u.value != int(u.value):
                     return False
+            self._fire_narrowed(u, v, dv)
             return self._apply_prototype_attrs(u) and self._prove_sort_condition(u)
 
         # 直交した型 (どちらもサブタイプでない) → 互換性チェック
@@ -1117,12 +1255,29 @@ class Unifier:
         if len(glbs) > 1 and self.engine is not None:
             for alt_glb in reversed(glbs[1:]):
                 alt_psi = PsiTerm(type_def=alt_glb)
-                self.engine.push_choice_point(GoalType.UNIFY, u, alt_psi, None)
+                # The alternative is a stand-in for u, not a term the reader
+                # built, so it inherits u's delay-rule history: coming back
+                # here owes `:: a2 |`, not `:: b1 |` and `:: b2 |` again.
+                alt_psi._delay_rules_fired = _fired_rules_of(u)
+                # The alternative narrows u to the other greatest lower bound
+                # and then redoes the whole unification, because everything
+                # this call goes on to do — merging u and v among it — is
+                # undone on the way back here.
+                _redo = Goal(GoalType.UNIFY, u, v, None)
+                _redo.next = self.engine.goal_stack
+                _narrow = Goal(GoalType.UNIFY, u, alt_psi, None)
+                _narrow.next = _redo
+                self.engine.choice_stack = ChoicePoint(
+                    undo_point=self.trail.mark(),
+                    goal_stack=_narrow,
+                    next=self.engine.choice_stack,
+                )
 
         # 最初の GLB で進める
         glb = glbs[0]
         self.bind_type(u, glb)
         self.bind_type(v, glb)
+        self._fire_narrowed(u, v, glb)
         return (self._apply_prototype_attrs(u) and self._apply_prototype_attrs(v)
                 and self._prove_sort_condition(u) and self._prove_sort_condition(v))
 
@@ -1334,7 +1489,7 @@ class Unifier:
         self.bind_type(u, child)
 
         # Merge prototype attrs into u (add missing attrs from prototype)
-        proto = child.prototype_attrs
+        proto = {} if self._skip_prototypes else child.prototype_attrs
         for key, proto_val in proto.items():
             if key not in u.attr_list:
                 self.set_attr(u, key, proto_val.deref())
@@ -1345,7 +1500,8 @@ class Unifier:
 
         return True
 
-    def _fire_delay_rules(self, u: PsiTerm, new_sort) -> None:  # noqa: E501
+    def _fire_delay_rules(self, u: PsiTerm, new_sort,
+                          use_fired_set: bool = False) -> None:  # noqa: E501
         """グローバル遅延ルール (:: Pattern | Goal) を起動する。
 
         u のソートが new_sort に絞り込まれたとき、パターンのソートが
@@ -1364,7 +1520,8 @@ class Unifier:
         # variables that get "bound" when the rule fires, triggering the int delay.)
         deferred_literal_fires: list = []
         try:
-            self._fire_delay_rules_inner(u, new_sort, deferred_literal_fires)
+            self._fire_delay_rules_inner(u, new_sort, deferred_literal_fires,
+                                         use_fired_set)
         finally:
             self.engine._in_fire_delay = False
         # Fire deferred delays for concrete integer/real literals found in goal copies.
@@ -1396,10 +1553,16 @@ class Unifier:
             self._collect_literal_integers(val_ref, result, visited)
 
     def _fire_delay_rules_inner(self, u: PsiTerm, new_sort,
-                                deferred_literal_fires: list = None) -> None:
+                                deferred_literal_fires: list = None,
+                                use_fired_set: bool = False) -> None:
         """_fire_delay_rules の実処理 (再入禁止ガード外側から呼ぶ)。"""
         wl = WL
+        fired_set = _fired_rules_of(u)
         for rule_inner in wl.delay_rules:
+            if use_fired_set and id(rule_inner) in fired_set:
+                # This term has already run this rule for an earlier, wider
+                # sort of its own: narrowing b1 to a1 owes A1, not B1 again.
+                continue
             # rule_inner is the | (Pattern | Goal) psiterm
             pattern_side = rule_inner.attr_list.get('1')
             goal_side = rule_inner.attr_list.get('2')
@@ -1418,6 +1581,7 @@ class Unifier:
                 # there is nothing more to check on the pattern's sort here.
             if not pat_sort_ok:
                 continue
+            fired_set.add(id(rule_inner))
 
             # Build a copy of pattern AND goal using the SAME shared_map
             # so that variables shared between pattern and goal stay shared.

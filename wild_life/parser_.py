@@ -437,7 +437,8 @@ class Parser:
                             self.parse_ok = False
                         else:
                             sys.stderr.write(
-                                "*** Syntax error: ',' expected in argument list\n"
+                                "*** Syntax error: ',' expected in argument list"
+                                f" (near line {self.ts.line_count})\n"
                             )
                         break
 
@@ -599,7 +600,8 @@ class Parser:
             if self.ts.string_parse:
                 self.parse_ok = False
             else:
-                sys.stderr.write("*** Syntax error: bad expression\n")
+                sys.stderr.write("*** Syntax error: bad expression"
+                                 f" (near line {self.ts.line_count})\n")
 
         if self.parse_ok and self.stack:
             e = self.pop()
@@ -668,7 +670,7 @@ class Parser:
     def syntax_error(self, msg: str):
         """構文エラーを報告"""
         sys.stderr.write(
-            f"*** Syntax error near line {self.ts.line_count}: {msg}\n"
+            f"*** Syntax error: {msg} (near line {self.ts.line_count})\n"
         )
         self.parse_ok = False
 

@@ -9,8 +9,10 @@ from typing import Optional, Dict, Set, List, Tuple, IO
 
 # Avoid circular imports at module level
 from wild_life.data_structures import (
-    PsiTerm, Definition, OperatorType, int_div as _int_div
+    PsiTerm, Definition, OperatorType, int_div as _int_div,
+    NON_STRICT_TERM as _NST_WALK
 )
+import wild_life.runtime as _wl_module
 
 PRINT_DEPTH = 200   # max nesting depth; list length is unlimited
 MAX_PRECEDENCE = 1200
@@ -19,6 +21,11 @@ MAX_COL = 79        # column limit for line wrapping
 DOTDOT = ": "
 
 import math as _math
+
+_ARITH_DISPLAY_SYMS = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+                                 'max', 'min', 'abs', 'sqrt', 'floor', 'ceiling',
+                                 '/\\', '\\/', 'xor', '>>', '<<'))
+
 
 def _eval_pure_arith(t: 'PsiTerm', wl, _depth: int = 0):
     """Evaluate a pure constant arithmetic expression.
@@ -367,6 +374,15 @@ class PrintState:
             # it as SHARED and adding a spurious "X: value" prefix when printed.
             _cur_sym = cur.type.keyword.symbol if (cur.type and cur.type.keyword) else ''
             if _cur_sym == 'copy_term':
+                continue
+            # A ground arithmetic expression is displayed as the number it
+            # comes to, so its operands are never written: the 3 inside
+            # m_cons(3,m_cons(3-1,…)) appears once, and wants no name.
+            if (_cur_sym in _ARITH_DISPLAY_SYMS and cur.value is None
+                    and cur.attr_list and not self.no_arith_eval
+                    and not self.frozen_arith
+                    and not (cur.flags & _NST_WALK)
+                    and _eval_pure_arith(cur, _wl_module.WL) is not None):
                 continue
             for val in cur.attr_list.values():
                 stack.append((val, True))
@@ -849,6 +865,7 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
     flat_ps.write_resids = ps.write_resids
     flat_ps.no_arith_eval = ps.no_arith_eval  # propagate frozen context
     flat_ps.frozen_arith = ps.frozen_arith
+    flat_ps.write_canon = ps.write_canon
     flat_ps.pointer_names = ps.pointer_names
     flat_ps.printed_pointers = dict(ps.printed_pointers)
     flat_ps.col = ps.col + len(prefix_str)  # column just before '['
@@ -1020,9 +1037,7 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
     # are concrete (e.g. A+5 where A=5 becomes 10, bagof results, etc.).
     # Skip terms with NON_STRICT_TERM flag — those are sort-constraint expressions
     # (X:(1+2)) that must stay unevaluated.
-    _arith_syms_display = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
-                                      'max', 'min', 'abs', 'sqrt', 'floor', 'ceiling',
-                                      '/\\', '\\/', 'xor', '>>', '<<'))
+    _arith_syms_display = _ARITH_DISPLAY_SYMS
     if (_psym in _arith_syms_display and t.value is None and t.attr_list
             and not ps.no_arith_eval and not ps.frozen_arith):
         from wild_life.data_structures import NON_STRICT_TERM as _NST_DISP
@@ -1164,9 +1179,10 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
         return
 
     args_written = False
+    value_written = False
     if t.value is not None:
         _print_value(ps, t, wl)
-        args_written = True
+        value_written = True
     else:
         if ps.print_depth == 0 or depth + 1 < ps.print_depth:
             args_written = _pretty_psi_with_ops(ps, t, sprec, depth + 1)
@@ -1182,6 +1198,8 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
                 _print_symbol_q(ps, _kw)
 
     if not args_written and t.attr_list:
+        # A term can carry features as well as a value — `23(1)` is the
+        # integer 23 with a first feature — so the features follow the value.
         if ps.print_depth > 0 and depth + 1 >= ps.print_depth:
             ps.write("(...)")
         else:
@@ -1311,6 +1329,7 @@ def _pretty_attr(ps: PrintState, attr_list: dict, depth: int, wl,
     flat_ps.write_resids = ps.write_resids
     flat_ps.no_arith_eval = ps.no_arith_eval  # propagate frozen context
     flat_ps.frozen_arith = ps.frozen_arith
+    flat_ps.write_canon = ps.write_canon
     flat_ps.pointer_names = ps.pointer_names
     flat_ps.printed_pointers = dict(ps.printed_pointers)
     flat_ps.col = ps.col            # column before '('
@@ -1351,15 +1370,24 @@ def _pretty_attr(ps: PrintState, attr_list: dict, depth: int, wl,
 def _maybe_resid(ps: PrintState, t: 'PsiTerm') -> None:
     """Print residuation markers if any.
 
-    The tilde '~' is only printed for FREE variables (value=None, no attrs).
-    Bound variables (concrete values) never show '~' even if they have stale
-    resid entries — this matches C Wild Life 1.02 behaviour where e.g. A=23
-    after 'A=B/C? A=23?' shows 'A = 23' (no tilde), not 'A = 23~'.
+    The tilde '~' marks a term a suspended goal is waiting on.  A term that
+    has taken a concrete value never shows one even if it carries stale resid
+    entries — this matches C Wild Life 1.02, where `A=B/C? A=23?` answers
+    A = 23 and not A = 23~.  A compound does show one: a call waiting for two
+    arguments to become one term waits on the arguments themselves, which is
+    how disequality1 reports X = s(B)~.
     """
-    if t.resid and t.value is None and not t.attr_list:
+    from wild_life.data_structures import GoalType as _GT_resid
+    if t.resid:
         for r in t.resid:
             # Pending via a Goal object (arithmetic/eval residuation)
             if getattr(r, 'goal', None) and getattr(r.goal, 'pending', False):
+                if (t.value is not None
+                        and getattr(r.goal, 'type', None) is not _GT_resid.EVAL):
+                    # An arithmetic constraint on a term that has taken a value
+                    # is settled, whatever is left of it on the term.  A call
+                    # still waiting for that term to gain a feature is not.
+                    continue
                 ps.write("~")
             # Pending via the Residuation's own flag (bi_residuate built-in)
             elif getattr(r, 'pending', False) and r.goal is None:
