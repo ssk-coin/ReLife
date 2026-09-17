@@ -2057,6 +2057,15 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
                 return False, 0.0
             try:
                 return True, float(ops1[sym](_un_v))
+            except OverflowError:
+                # Past what a double holds: `exp(1e300)` is Infinity, the way
+                # the C library answers it.
+                return True, (math.inf if _un_v >= 0 else -math.inf)
+            except ValueError:
+                # Undefined there: `cos(Infinity)` is NaN.
+                if not math.isfinite(_un_v):
+                    return True, math.nan
+                return False, 0.0
             except Exception:
                 return False, 0.0
 

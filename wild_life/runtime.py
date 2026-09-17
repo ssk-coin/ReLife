@@ -822,6 +822,10 @@ class WildLifeRuntime:
     def make_number(self, f: float) -> PsiTerm:
         """数値PsiTermを生成 (整数か実数か自動判定)"""
         import math
+        if not math.isfinite(f):
+            # An overflowed or undefined number is a real, not an integer:
+            # `1e310 - 1e310` is NaN and `sqrt(1e310)` is Infinity.
+            return self.make_real(f)
         if f == math.floor(f) and abs(f) < 9007199254740991.0:
             return self.make_integer(f)
         return self.make_real(f)

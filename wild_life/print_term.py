@@ -1208,11 +1208,26 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
     _maybe_resid(ps, t)
 
 
+def _format_non_finite(v):
+    """How an overflowed or undefined number reads, or None if it is neither."""
+    if not isinstance(v, float):
+        return None
+    if _math.isnan(v):
+        return 'NaN'
+    if _math.isinf(v):
+        return 'Infinity' if v > 0 else '-Infinity'
+    return None
+
+
 def _print_value(ps: PrintState, t: 'PsiTerm', wl) -> None:
     """Print the value of a psi-term that has a concrete value."""
     defn = t.type
     if defn is None:
         ps.write(repr(t.value))
+        return
+    _nf = _format_non_finite(t.value)
+    if _nf is not None:
+        ps.write(_nf)
         return
 
     # Check integer / real
