@@ -10237,6 +10237,44 @@ def register_all(wl) -> None:
         return True
     _reg('public', _bi_public)
 
+    def _bi_private(goal, eng):
+        """private(P, …) — give the current module its own P.
+
+        Without it a definition of `+` would add clauses to the syntax
+        module's `+`; with it the module gets a `+` of its own, and the one it
+        hides is still reachable as `'syntax#+'`.
+        """
+        from wild_life.data_structures import Keyword as _KW_pv, \
+            Definition as _Def_pv
+        mod = wl.current_module
+        if mod is None:
+            return True
+        i = 1
+        while True:
+            a = goal.attr_list.get(str(i))
+            if a is None:
+                break
+            i += 1
+            ad = a.deref()
+            name = _get_string_or_atom(ad, eng)
+            if name is None and ad.type and ad.type.keyword:
+                name = ad.type.keyword.symbol
+            if not name or name in mod.symbol_table:
+                continue
+            hidden = wl.update_symbol(mod, name)
+            kw = _KW_pv(name, mod)
+            defn = _Def_pv(kw)
+            kw.definition = defn
+            mod.symbol_table[name] = defn
+            _hidden_kw = getattr(hidden, 'keyword', None)
+            _hidden_mod = getattr(_hidden_kw, 'module', None) if _hidden_kw else None
+            if _hidden_mod is not None and _hidden_mod is not mod:
+                sys.stderr.write(
+                    f"*** Warning: local definition of '{name}' overrides "
+                    f"'{_hidden_mod.module_name}#{name}'\n")
+        return True
+    _reg('private', _bi_private)
+
     def _bi_private_feature(goal, eng):
         """private_feature(F, ...) — mark features as private to current module.
         public 宣言済みの特性を private_feature にする場合は警告を出す。
