@@ -8178,6 +8178,7 @@ def _life_load_dirs() -> list:
     _root = _os_lp.path.dirname(_os_lp.path.dirname(_os_lp.path.abspath(__file__)))
     return ['',
             _os_lp.path.join(_root, 'lib'),
+            _os_lp.path.join(_root, 'Tools'),
             _os_lp.path.join(_root, 'examples'),
             _os_lp.path.join(_root, 'examples', 'SuperLint')]
 

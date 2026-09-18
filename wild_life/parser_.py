@@ -500,6 +500,10 @@ class Parser:
         state = 0                # 0: 項を期待, 1: 演算子を期待
         prec = 0
         fin = False
+        # What follows a feature-access `.` is the name of a feature, not an
+        # operator: `S.type` names the feature `type` rather than starting a
+        # type declaration.
+        _dot_operand = False
 
         if not self.parse_ok:
             return WL.error_psi_term or PsiTerm()
@@ -512,6 +516,7 @@ class Parser:
 
             if not fin:
                 if state == 1:
+                    _dot_operand = False
                     # 演算子を期待する状態
                     if (stop1 and self.equ_tokch(t, stop1)) or \
                        (stop2 and self.equ_tokch(t, stop2)):
@@ -550,6 +555,8 @@ class Parser:
                                 self.crunch(pr_1, limit)
                                 self.push(t, pr_2, OperatorType.XFX)
                                 prec = pr_2
+                                _dot_operand = (t.type is not None
+                                                and t.type.symbol == '.')
                                 state = 0
                         else:
                             # 後置演算子を適用
@@ -602,7 +609,8 @@ class Parser:
                         _peek = self.ts.read_token()
                         self.ts.put_back_token(_peek)
                         _no_term_follows = (
-                            _peek.type is WL.final_dot
+                            (_dot_operand and pr_op > prec)
+                            or _peek.type is WL.final_dot
                             or _peek.type is WL.final_question
                             or _peek.type is WL.eof
                             or self.equ_tokch(_peek, ')')
