@@ -5948,11 +5948,14 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
             # Try simplification first (before self-ref check).
             b_simplified = _simplify_arith(b_d, eng)
             if b_simplified is not None:
-                # Simplification succeeded — recurse to handle the simplified form.
-                b_d = b_simplified
-                b_arith2 = _try_eval_arith_to_term(b_d, eng)
-                if b_arith2 is not None:
-                    b_d = b_arith2
+                # Simplification succeeded — start the equation again with the
+                # simpler form, so that everything an equation gets is applied
+                # to it.  `C2 + E = N + 0` is `C2 + E = N`, which states what
+                # the sum is; carrying on from here instead would try to match
+                # a sum against N and fail.
+                _eq_simp = PsiTerm(type_def=goal.type)
+                _eq_simp.attr_list = {'1': a_d, '2': b_simplified}
+                return bi_unify(_eq_simp, eng)
             else:
                 # Gather free variables in the expression.
                 vars_in_expr: list = []
