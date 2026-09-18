@@ -573,6 +573,59 @@ def _match_one(c: 'PsiTerm', h: 'PsiTerm', out: list, eng, seen: set,
     return noted
 
 
+def _free_vars_in(t: 'PsiTerm') -> list:
+    """The unbound variables a term reaches, in the order they are met."""
+    out, seen, queue = [], set(), [t]
+    while queue:
+        node = queue.pop(0)
+        if node is None:
+            continue
+        node = node.deref()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        from wild_life.runtime import WL as _WL_fv
+        if (not node.attr_list and node.value is None
+                and (node.type is None or node.type is _WL_fv.top)):
+            out.append(node)
+            continue
+        queue.extend(node.attr_list.values())
+    return out
+
+
+def _mark_arith_vars_real(cond: 'PsiTerm', eng) -> None:
+    """Give a real sort to the variables a condition does arithmetic on.
+
+    `integers(2,X)` cannot say whether `2 > X` holds, but it has already said
+    what X has to be: a number.  Proving the comparison would say so, and the
+    call waits instead of proving it, so it says so here.
+    """
+    from wild_life.built_ins import _ARITH_COMPARISONS, _ARITH_OPS_SET
+    wl = eng.wl
+    if getattr(wl, 'real', None) is None:
+        return
+    from wild_life.built_ins import _mark_real_sort
+    seen: set = set()
+
+    def walk(t, under_arith: bool) -> None:
+        if t is None:
+            return
+        t = t.deref()
+        if id(t) in seen:
+            return
+        seen.add(id(t))
+        if under_arith and not t.attr_list and t.value is None:
+            if t.type is None or t.type is wl.top:
+                _mark_real_sort(t, wl, eng)
+            return
+        sym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+        _is_arith = sym in _ARITH_COMPARISONS or sym in _ARITH_OPS_SET
+        for sub in list(t.attr_list.values()):
+            walk(sub, under_arith or _is_arith)
+
+    walk(cond, False)
+
+
 def _rule_match_status(head: 'PsiTerm', call: 'PsiTerm', eng):
     """Whether this rule applies to the call, cannot, or is not settled yet.
 
@@ -1961,6 +2014,64 @@ class Engine:
                         # would run on the goal stack with B still unbound.
                         _eval_embedded_user_funcs(_attr, self, 0, set())
 
+    def _suspend_call(self, funct, result, rules, free_vars) -> None:
+        """Make a function call wait on the terms that would settle it.
+
+        A pending EVAL goal is attached to each variable; when one is bound,
+        _wakeup_resid pushes the goal back and the call starts again from its
+        first rule.  `result` stays unbound, so whatever reads the call's
+        value reads the variable the call will fill in.
+        """
+        wl = self.wl
+        from wild_life.data_structures import (
+            Goal as _ResidGoal, Residuation as _ResidR, SORT_VAR as _SV_R)
+        # Reuse the call's own pending goal across re-fires.  A fresh one
+        # each time would never compare equal to the goals already on the
+        # variables, so every re-evaluation would pile another copy on and
+        # the term would show a tilde per round.
+        _pending_eval = getattr(funct, '_resid_eval_goal', None)
+        if _pending_eval is None:
+            _pending_eval = _ResidGoal(GoalType.EVAL, funct, result, rules, pending=True)
+            _pending_eval._resid_marker = True  # mark as residuation so re-fire knows
+            funct._resid_eval_goal = _pending_eval
+        # Firing the goal clears its pending flag; the call is suspending
+        # again, so it is pending again — and shows a tilde again.
+        _pending_eval.pending = True
+        # Mark funct so eval_aim can detect resid re-fire even from a freshly pushed Goal.
+        # _wakeup_resid calls push_goal(g.type, g.a, g.b, g.c) which creates a new Goal
+        # without _resid_marker, so we propagate via funct (which is g.a and is preserved).
+        funct._resid_refire = True
+        # A term the call waited on last time round may not be one now:
+        # `f(X,s(X))` waits on Y until Y is s(Z), and from then on it waits
+        # on Z instead.  Drop the old marks before laying down the new
+        # ones, so that only what the call is actually waiting on shows a
+        # tilde.
+        for _old_r in getattr(funct, '_resid_marked', ()) or ():
+            if _old_r.resid and any(rv.goal is _pending_eval
+                                    for rv in _old_r.resid):
+                self.trail.trail_copy(_old_r, 'resid')
+                _old_r.resid = [rv for rv in _old_r.resid
+                                if rv.goal is not _pending_eval]
+        funct._resid_marked = list(free_vars)
+        for _fv_r in free_vars:
+            if _fv_r.resid is None:
+                self.trail.trail_psi(_fv_r, 'resid')
+                _fv_r.resid = [_ResidR(goal=_pending_eval)]
+            else:
+                if not any(rv.goal is _pending_eval for rv in _fv_r.resid):
+                    self.trail.trail_copy(_fv_r, 'resid')
+                    _fv_r.resid.append(_ResidR(goal=_pending_eval))
+            # A plain variable is marked bindable so the unifier keeps
+            # binding it although it now carries a residuation.  A term
+            # that already has a sort, a value or features is not a
+            # variable and must not start looking like one — `b` would
+            # then let itself be narrowed to anything.
+            _fv_r_is_plain = (not _fv_r.attr_list and _fv_r.value is None
+                              and (_fv_r.type is None or _fv_r.type is wl.top))
+            if _fv_r_is_plain and not (_fv_r.flags & _SV_R):
+                self.trail.trail_psi(_fv_r, 'flags')
+                _fv_r.flags |= _SV_R
+
     def eval_aim(self) -> bool:
         """Handle an 'eval' goal (function evaluation)."""
         wl = self.wl
@@ -2259,56 +2370,7 @@ class Engine:
             if _rule_cp is not None:
                 self.drop_choice_point(_rule_cp)
                 _rule_cp = None
-            # Set up residuation: attach a pending EVAL goal to each free variable.
-            # When the variable gets bound, _wakeup_resid will push the EVAL goal
-            # back onto the goal stack and f(bound_val) will be re-evaluated.
-            from wild_life.data_structures import Goal as _ResidGoal, Residuation as _ResidR, SORT_VAR as _SV_R
-            # Reuse the call's own pending goal across re-fires.  A fresh one
-            # each time would never compare equal to the goals already on the
-            # variables, so every re-evaluation would pile another copy on and
-            # the term would show a tilde per round.
-            _pending_eval = getattr(funct, '_resid_eval_goal', None)
-            if _pending_eval is None:
-                _pending_eval = _ResidGoal(GoalType.EVAL, funct, result, rules, pending=True)
-                _pending_eval._resid_marker = True  # mark as residuation so re-fire knows
-                funct._resid_eval_goal = _pending_eval
-            # Firing the goal clears its pending flag; the call is suspending
-            # again, so it is pending again — and shows a tilde again.
-            _pending_eval.pending = True
-            # Mark funct so eval_aim can detect resid re-fire even from a freshly pushed Goal.
-            # _wakeup_resid calls push_goal(g.type, g.a, g.b, g.c) which creates a new Goal
-            # without _resid_marker, so we propagate via funct (which is g.a and is preserved).
-            funct._resid_refire = True
-            # A term the call waited on last time round may not be one now:
-            # `f(X,s(X))` waits on Y until Y is s(Z), and from then on it waits
-            # on Z instead.  Drop the old marks before laying down the new
-            # ones, so that only what the call is actually waiting on shows a
-            # tilde.
-            for _old_r in getattr(funct, '_resid_marked', ()) or ():
-                if _old_r.resid and any(rv.goal is _pending_eval
-                                        for rv in _old_r.resid):
-                    self.trail.trail_copy(_old_r, 'resid')
-                    _old_r.resid = [rv for rv in _old_r.resid
-                                    if rv.goal is not _pending_eval]
-            funct._resid_marked = list(_free_args_for_resid)
-            for _fv_r in _free_args_for_resid:
-                if _fv_r.resid is None:
-                    self.trail.trail_psi(_fv_r, 'resid')
-                    _fv_r.resid = [_ResidR(goal=_pending_eval)]
-                else:
-                    if not any(rv.goal is _pending_eval for rv in _fv_r.resid):
-                        self.trail.trail_copy(_fv_r, 'resid')
-                        _fv_r.resid.append(_ResidR(goal=_pending_eval))
-                # A plain variable is marked bindable so the unifier keeps
-                # binding it although it now carries a residuation.  A term
-                # that already has a sort, a value or features is not a
-                # variable and must not start looking like one — `b` would
-                # then let itself be narrowed to anything.
-                _fv_r_is_plain = (not _fv_r.attr_list and _fv_r.value is None
-                                  and (_fv_r.type is None or _fv_r.type is wl.top))
-                if _fv_r_is_plain and not (_fv_r.flags & _SV_R):
-                    self.trail.trail_psi(_fv_r, 'flags')
-                    _fv_r.flags |= _SV_R
+            self._suspend_call(funct, result, rules, _free_args_for_resid)
             # result (and hence A) stays unbound — return True so the UNIFY(A,result)
             # goal fires and merges A with the free result variable.
             return True
@@ -2423,6 +2485,33 @@ class Engine:
         # Body is a built-in cond(C, T, E) — evaluate it as a functional conditional
         # (not as a predicate). This makes cond usable in function rule bodies.
         if _is_cond_builtin(body_d2):
+            # A condition nothing has settled yet does not make the call worth
+            # the cond it was written as: the call waits on what would settle
+            # it.  `A = integers(2,X)` answers a variable and marks X, and the
+            # list is built once X is a number.
+            from wild_life.built_ins import (_cond_args as _ca_e,
+                                             _cond_is_undecided as _ciu_e,
+                                             _ARITH_COMPARISONS as _AC_e)
+            _cg_e = _ca_e(body_d2)[0]
+            _cg_e_d = _cg_e.deref() if _cg_e is not None else None
+            _cg_sym = (_cg_e_d.type.keyword.symbol
+                       if (_cg_e_d is not None and _cg_e_d.type
+                           and _cg_e_d.type.keyword) else '')
+            # An arithmetic comparison says what its sides have to be, so a
+            # variable in one is the caller's to fill in.  Other conditions —
+            # a sort comparison, a goal a clause proves before it — are
+            # settled where they stand, and left to be.
+            if _cg_sym in _AC_e and _ciu_e(_cg_e, self):
+                # Only what the caller can still settle is worth waiting
+                # for: a variable the body made up itself will never be
+                # bound from outside, and the call would wait for ever.
+                _call_vars = {id(_v) for _v in _free_vars_in(funct)}
+                _free_cond = [_v for _v in _free_vars_in(_cg_e)
+                              if id(_v) in _call_vars]
+                if _free_cond:
+                    _mark_arith_vars_real(_cg_e, self)
+                    self._suspend_call(funct, result, rules, _free_cond)
+                    return True
             return _eval_cond_functional(body_d2, result, self)
 
         # Body is built-in map(F, List) in functional position — evaluate it now.

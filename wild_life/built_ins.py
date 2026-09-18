@@ -3430,6 +3430,11 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
                 and _has_applicable_rule(body_d2)):
             # Body is a user function that can't eval synchronously
             return None
+        if result is None and _is_cond_builtin_local(body_d2):
+            # A condition nothing has settled yet: the call has no value to
+            # hand back, and handing back the cond itself would pass a cond
+            # where the caller expects what the branch produces.
+            return None
         return result if result is not None else body_d2
 
     return None
