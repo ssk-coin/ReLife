@@ -1925,12 +1925,13 @@ def bi_nl(goal: PsiTerm, eng) -> bool:
 
 
 def bi_write_err(goal: PsiTerm, eng) -> bool:
-    """write_err(T) — write to stderr (compact, no pretty-printing)."""
-    arg = _get_one_arg(goal)
-    if arg is None:
-        return False
-    _write_term(arg, eng, stream=sys.stderr, quoted=False, compact=True)
-    return True
+    """write_err(T) — write to stderr (compact, no pretty-printing).
+
+    Like write/1, it writes every positional argument in turn:
+    `write_err("*** Profile : ", Type, " '", What, "'")` is one message.
+    """
+    return _write_all_args(goal, eng, quoted=False, stream=sys.stderr,
+                           compact=True)
 
 
 def bi_writeln(goal: PsiTerm, eng) -> bool:
@@ -4893,6 +4894,18 @@ def _inline_disjunctive_funcs(t: PsiTerm, eng, depth: int = 0) -> bool:
     return changed
 
 
+def _unify_through_eq(eng, a: PsiTerm, b: PsiTerm) -> bool:
+    """Unify two terms the way `=` does, calls worked out and all."""
+    wl = eng.wl
+    _eq_defn = (getattr(wl, 'eqsym', None)
+                or wl.syntax_module.symbol_table.get('='))
+    if _eq_defn is None:
+        return _unify(eng, a, b)
+    _eq = PsiTerm(type_def=_eq_defn)
+    _eq.attr_list = {'1': a, '2': b}
+    return bi_unify(_eq, eng)
+
+
 def bi_unify(goal: PsiTerm, eng) -> bool:
     """X = Y — LIFE sort unification (with functional evaluation)."""
     a, b = _get_two_args(goal)
@@ -4918,12 +4931,15 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
             if _attr_cell_b is None:
                 return False
             return _unify(eng, _attr_cell.deref(), _attr_cell_b.deref())
-        return _unify(eng, _attr_cell.deref(), b_d)
+        # What a feature is given is a value, the same as anywhere else `=`
+        # puts one: `C.1 = root_sort(app)` gives the feature `app`, not the
+        # call.  The cell goes back through `=` for that.
+        return _unify_through_eq(eng, _attr_cell.deref(), b_d)
     if _dot_sym_check(b_d):
         _attr_cell = _resolve_dot_feat(b_d, eng)
         if _attr_cell is None:
             return False
-        return _unify(eng, a_d, _attr_cell.deref())
+        return _unify_through_eq(eng, a_d, _attr_cell.deref())
 
     # Unwrap backtick-quoted terms: `Expr = X → bind X to inner Expr (marked NON_STRICT_TERM).
     # In Wild Life, `Expr (backtick-quoted) "freezes" the expression to prevent evaluation.
@@ -7568,10 +7584,11 @@ def bi_clause(goal: PsiTerm, eng) -> bool:
     wl = eng.wl
 
     # Handle the LIFE clause form: clause(X:(Pred->Body))?
-    # When head.type is '->' (the clause arrow), the actual predicate is in attr '1'
-    # and the body variable is in attr '2'.
+    # When head.type is the clause arrow — '->' for a function, ':-' for a
+    # predicate — the actual head is in attr '1' and the body in attr '2'.
     clause_container = None  # the head->body term to unify with full clause
-    if (head.type and head.type.keyword and head.type.keyword.symbol == '->'
+    if (head.type and head.type.keyword
+            and head.type.keyword.symbol in ('->', ':-')
             and not head.value):
         # head is a psi-term of sort '->': this is the X:(f1->Y) form
         pred_term = head.attr_list.get('1')
