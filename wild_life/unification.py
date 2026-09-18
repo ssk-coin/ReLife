@@ -1092,10 +1092,45 @@ class Unifier:
             self._wakeup_resid(u, u)
             return True
         if v.type is WL.disjunction and self.engine is not None:
+            # A term meeting a disjunction takes one of its alternatives, and
+            # only one it fits: `pick_name(ursule)` against the head
+            # `pick_name({alfred;…;gertrude})` has no alternative to take and
+            # fails, where binding the disjunction to ursule outright let it
+            # through and left nothing bound.
+            from wild_life.built_ins import _collect_disjunction as _cdisj_v
+            _elems_v = _cdisj_v(v, self.engine)
+            if not _elems_v:
+                self.trail.trail_psi(v, 'coref')
+                v.coref = u
+                self._wakeup_resid(v, v)
+                return True
+            _fits_v = []
+            _eng_v = self.engine
+            _cs_v = _eng_v.choice_stack
+            _fd_v = getattr(_eng_v, '_in_fire_delay', False)
+            _eng_v._in_fire_delay = True
+            try:
+                for _e_v in _elems_v:
+                    _m_v = self.trail.mark()
+                    try:
+                        _ok_v = self.unify(u, _e_v)
+                    except UnificationFailure:
+                        _ok_v = False
+                    self.trail.undo_to(_m_v)
+                    _eng_v.choice_stack = _cs_v
+                    if _ok_v:
+                        _fits_v.append(_e_v)
+            finally:
+                _eng_v._in_fire_delay = _fd_v
+                _eng_v.choice_stack = _cs_v
+            if not _fits_v:
+                return False
+            for _alt_v in reversed(_fits_v[1:]):
+                _eng_v.push_choice_point(GoalType.UNIFY, v, _alt_v, None)
             self.trail.trail_psi(v, 'coref')
-            v.coref = u
+            v.coref = _fits_v[0]
             self._wakeup_resid(v, v)
-            return True
+            return self.unify(u, _fits_v[0])
 
         # Arithmetic evaluation: if one term is a concrete number and the other
         # is an arithmetic expression (compound with arithmetic op), evaluate the
@@ -1331,11 +1366,17 @@ class Unifier:
             return True  # 同じ型
 
         # 一方が top (@) → もう一方の型に制約
+        # Narrowing owes the sort's delay rules just as much here as it does
+        # below: `X = @(nom => amedee)` becoming a typ has to run what `::
+        # typ(nom => N:name) | constraint(inst(N))` says about a typ, the same
+        # as a bare `X = typ` does.
         if du is WL.top:
             self.bind_type(u, dv)
+            self._fire_narrowed(u, v, dv)
             return self._apply_prototype_attrs(u) and self._prove_sort_condition(u)
         if dv is WL.top:
             self.bind_type(v, du)
+            self._fire_narrowed(v, u, du)
             return self._apply_prototype_attrs(v) and self._prove_sort_condition(v)
 
         # サブタイプ関係: より特殊な型 (GLB) を採用
@@ -1713,6 +1754,14 @@ class Unifier:
                 # there is nothing more to check on the pattern's sort here.
             if not pat_sort_ok:
                 continue
+            # Trailed: what a term has run is part of what backtracking takes
+            # back.  `create_CP(X), X = typ, …, fail` gives X a second typ to
+            # be, and that one is owed the rule as much as the first was.
+            # Re-read the term's history: unifying an earlier rule's pattern
+            # with u can have joined it with another term's, and adding to the
+            # set captured before that would write where nothing reads.
+            fired_set = _fired_rules_of(u)
+            self.trail.trail_copy(u, '_delay_rules_fired')
             fired_set.add(id(rule_inner))
 
             # Build a copy of pattern AND goal using the SAME shared_map
