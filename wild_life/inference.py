@@ -830,6 +830,12 @@ def _collect_embedded_func_goals(t: 'PsiTerm', eng, visited: set) -> list:
     if not t.attr_list:
         return []
 
+    # An alternative of a disjunction is only worth working out once it is the
+    # one taken: `nat -> {0;1+nat}` would otherwise reduce the `1+nat` branch
+    # while producing the `0` one, and never come back.
+    if t.type is eng.wl.disjunction:
+        return []
+
     # Work-list: (parent_term, key) pairs to examine.
     work_queue = []
     for key in list(t.attr_list.keys()):
@@ -850,6 +856,10 @@ def _collect_embedded_func_goals(t: 'PsiTerm', eng, visited: set) -> list:
         if child_id in examined:
             continue
         examined.add(child_id)
+
+        if child.type is eng.wl.disjunction:
+            # Lazy: the alternatives wait until one of them is chosen.
+            continue
 
         if _is_user_function(child):
             # Replace with fresh variable; record EVAL goal.
@@ -2422,6 +2432,28 @@ class Engine:
         _body_sym = body_d2.type.keyword.symbol if (body_d2.type and body_d2.type.keyword) else ''
         from wild_life.built_ins import _ARITH_OPS_SET as _AOS
         _body_is_arith = (_body_sym in _AOS and _is_cae(body_d2))
+
+        # A disjunction body hands back one alternative at a time, and the one
+        # taken still has to be worked out — `nat -> {0;1+nat}` answers 1 for
+        # its second alternative, not `1 + nat`.  Each alternative goes
+        # through `=`, which works it out, and the ones not taken wait until
+        # backtracking reaches them.
+        if body_d2.type is wl.disjunction and body_d2.attr_list and not eval_goals:
+            from wild_life.built_ins import _collect_disjunction as _cd_body
+            _disj_elems = _cd_body(body_d2, self)
+            _eq_defn_dj = (getattr(wl, 'eqsym', None)
+                           or wl.syntax_module.symbol_table.get('='))
+            if _disj_elems and _eq_defn_dj is not None:
+                def _eq_to_result(_alt):
+                    _t = PsiTerm(type_def=_eq_defn_dj)
+                    _t.attr_list = {'1': result, '2': _alt}
+                    return _t
+                for _alt_dj in reversed(_disj_elems[1:]):
+                    self.push_choice_point(GoalType.PROVE,
+                                           _eq_to_result(_alt_dj), None, None)
+                self.push_goal(GoalType.PROVE, _eq_to_result(_disj_elems[0]),
+                               None, None)
+                return True
 
         if _body_is_arith and not eval_goals:
             # Arithmetic body with no embedded user-function calls:
