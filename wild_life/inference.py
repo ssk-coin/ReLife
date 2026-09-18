@@ -104,6 +104,14 @@ def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
         _mark_non_strict_args(sub, eng, visited)
 
 
+# Built-ins that print what they are given: their arguments are values.
+_WRITE_BUILTINS = frozenset((
+    'write', 'writeq', 'writeln', 'print',
+    'pretty_write', 'pretty_writeq', 'write_canonical',
+    'write_err', 'writeq_err',
+))
+
+
 _STRICT_ARITH_SYMS = frozenset((
     '+', '-', '*', '/', '//', 'mod', '**', '^', 'max', 'min',
     '/\\', '\\/', 'xor', '>>', '<<'))
@@ -1383,6 +1391,33 @@ class Engine:
 
         # ── BUILT-IN ──
         if defn is not None and defn._builtin_func is not None:
+            # What is written is a call's value, not the call: `write(
+            # hamming_f(1000))` prints the list.  The call runs as a goal of
+            # its own and the printer is handed what it produced, so a call
+            # that has to wait on a variable — a lazy list building itself —
+            # is written out in full rather than as the call.
+            _bi_sym = defn.keyword.symbol if defn.keyword else ''
+            if _bi_sym in _WRITE_BUILTINS and thegoal.attr_list:
+                from wild_life.built_ins import (
+                    _is_user_function as _iuf_w,
+                    _has_applicable_rule as _har_w,
+                    _term_reaches_itself as _tri_w,
+                )
+                for _k_w in list(thegoal.attr_list.keys()):
+                    _a_w = thegoal.attr_list[_k_w].deref()
+                    if not (_iuf_w(_a_w) and _a_w.attr_list
+                            and _har_w(_a_w) and not _tri_w(_a_w)):
+                        continue
+                    self.goal_stack = aim.next
+                    self.goal_count += 1
+                    # The argument becomes the variable the call fills in, so
+                    # the goal that comes back round finds a value there and
+                    # moves on to the next argument.
+                    _R_w = wl.make_var()
+                    self.unifier.set_attr(thegoal, _k_w, _R_w)
+                    self.push_goal(GoalType.PROVE, thegoal, aim.b, aim.c)
+                    self.push_goal(GoalType.EVAL, _a_w, _R_w, _a_w.type.rule)
+                    return True
             self.goal_stack = aim.next
             self.goal_count += 1
             if self.trace:
