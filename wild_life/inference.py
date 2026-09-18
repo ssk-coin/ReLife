@@ -40,11 +40,18 @@ _DEFERRABLE_BUILTIN_FUNCS = frozenset((
 
 
 def _leftmost_goal(t: 'PsiTerm', wl) -> 'PsiTerm':
-    """The first goal a conjunction runs, or t itself when it is not one."""
+    """The first goal a conjunction or a disjunction runs.
+
+    A disjunction counts as well as a conjunction: the first thing
+    `(open_in(F,S), …, fail ; L = list_of_words)` runs is the open_in, and
+    reading the right-hand alternative early would settle `list_of_words`
+    against the value it held before the left-hand one ever ran.
+    """
     seen = 0
     t = t.deref()
     while seen < 64:
-        if t.type is not wl.commasym or '1' not in t.attr_list:
+        if (t.type is not wl.commasym and t.type is not wl.life_or) \
+                or '1' not in t.attr_list:
             return t
         t = t.attr_list['1'].deref()
         seen += 1
@@ -97,9 +104,44 @@ def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
         _mark_non_strict_args(sub, eng, visited)
 
 
+# Built-ins that print what they are given: their arguments are values.
+_WRITE_BUILTINS = frozenset((
+    'write', 'writeq', 'writeln', 'print',
+    'pretty_write', 'pretty_writeq', 'write_canonical',
+    'write_err', 'writeq_err',
+))
+
+
 _STRICT_ARITH_SYMS = frozenset((
     '+', '-', '*', '/', '//', 'mod', '**', '^', 'max', 'min',
     '/\\', '\\/', 'xor', '>>', '<<'))
+
+
+def _arith_is_settled(t: PsiTerm, _seen: set = None) -> bool:
+    """Whether an arithmetic term could be worked out as it stands.
+
+    Freezing is about not working out something that could be: `N:(2*4)` is
+    left as `2 * 4` because a non-strict call asked for it.  An expression
+    still waiting on its variables — the `V1 + V2 * 10^(-L2)` a grammar rule
+    carries — could not be worked out anyway, and freezing it would keep it
+    from ever being worked out once the variables are known.
+    """
+    if _seen is None:
+        _seen = set()
+    t = t.deref()
+    if id(t) in _seen:
+        return False
+    _seen.add(id(t))
+    if t.value is not None:
+        return True
+    sym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+    if sym not in _ARITH_OPS_NON_STRICT:
+        return False
+    if not t.attr_list:
+        # The bare operator stands for itself — `A = (+)` — and that is as
+        # settled as it gets.
+        return True
+    return all(_arith_is_settled(_v, _seen) for _v in t.attr_list.values())
 
 
 def _mark_arith_non_strict(t: PsiTerm, visited: set = None, eng=None) -> None:
@@ -128,7 +170,8 @@ def _mark_arith_non_strict(t: PsiTerm, visited: set = None, eng=None) -> None:
         return
     visited.add(tdid)
     sym = td.type.keyword.symbol if (td.type and td.type.keyword) else ''
-    if sym in _ARITH_OPS_NON_STRICT and td.value is None:
+    if (sym in _ARITH_OPS_NON_STRICT and td.value is None
+            and _arith_is_settled(td)):
         if eng is not None and not (td.flags & NON_STRICT_TERM):
             eng.trail.trail_psi(td, 'flags')
         td.flags |= NON_STRICT_TERM
@@ -738,12 +781,15 @@ def _eval_cond_functional(cond_term: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
         If there is no E (2-arg form), fail.
     """
     wl = eng.wl
-    args = list(cond_term.attr_list.values()) if cond_term.attr_list else []
-    if len(args) < 2:
+    from wild_life.built_ins import _cond_args as _ca_cf
+    cond_g, then_g, else_g = _ca_cf(cond_term)
+    if cond_g is None or (then_g is None and else_g is None):
         return False
-    cond_g = args[0].deref()
-    then_g = args[1].deref()
-    else_g = args[2].deref() if len(args) >= 3 else None
+
+    from wild_life.built_ins import _cond_is_undecided as _ciu_cf
+    if _ciu_cf(cond_g, eng):
+        # Nothing has said which way this goes, so the term is worth itself.
+        return eng.unifier.unify(result, cond_term)
 
     mark = eng.trail.mark()
     eng._arith_error = False
@@ -792,6 +838,12 @@ def _collect_embedded_func_goals(t: 'PsiTerm', eng, visited: set) -> list:
     if not t.attr_list:
         return []
 
+    # An alternative of a disjunction is only worth working out once it is the
+    # one taken: `nat -> {0;1+nat}` would otherwise reduce the `1+nat` branch
+    # while producing the `0` one, and never come back.
+    if t.type is eng.wl.disjunction:
+        return []
+
     # Work-list: (parent_term, key) pairs to examine.
     work_queue = []
     for key in list(t.attr_list.keys()):
@@ -812,6 +864,10 @@ def _collect_embedded_func_goals(t: 'PsiTerm', eng, visited: set) -> list:
         if child_id in examined:
             continue
         examined.add(child_id)
+
+        if child.type is eng.wl.disjunction:
+            # Lazy: the alternatives wait until one of them is chosen.
+            continue
 
         if _is_user_function(child):
             # Replace with fresh variable; record EVAL goal.
@@ -1335,6 +1391,33 @@ class Engine:
 
         # ── BUILT-IN ──
         if defn is not None and defn._builtin_func is not None:
+            # What is written is a call's value, not the call: `write(
+            # hamming_f(1000))` prints the list.  The call runs as a goal of
+            # its own and the printer is handed what it produced, so a call
+            # that has to wait on a variable — a lazy list building itself —
+            # is written out in full rather than as the call.
+            _bi_sym = defn.keyword.symbol if defn.keyword else ''
+            if _bi_sym in _WRITE_BUILTINS and thegoal.attr_list:
+                from wild_life.built_ins import (
+                    _is_user_function as _iuf_w,
+                    _has_applicable_rule as _har_w,
+                    _term_reaches_itself as _tri_w,
+                )
+                for _k_w in list(thegoal.attr_list.keys()):
+                    _a_w = thegoal.attr_list[_k_w].deref()
+                    if not (_iuf_w(_a_w) and _a_w.attr_list
+                            and _har_w(_a_w) and not _tri_w(_a_w)):
+                        continue
+                    self.goal_stack = aim.next
+                    self.goal_count += 1
+                    # The argument becomes the variable the call fills in, so
+                    # the goal that comes back round finds a value there and
+                    # moves on to the next argument.
+                    _R_w = wl.make_var()
+                    self.unifier.set_attr(thegoal, _k_w, _R_w)
+                    self.push_goal(GoalType.PROVE, thegoal, aim.b, aim.c)
+                    self.push_goal(GoalType.EVAL, _a_w, _R_w, _a_w.type.rule)
+                    return True
             self.goal_stack = aim.next
             self.goal_count += 1
             if self.trace:
@@ -2078,6 +2161,23 @@ class Engine:
         )
         self._preeval_funct_args(funct)
 
+        # An argument that is a call of its own and could not be worked out
+        # just now does not stand for a term this call can be matched against:
+        # it stands for whatever it will produce.  Put it in a variable and
+        # let it run as a goal of its own, so `merge(mult_list(2,6,X),[9])`
+        # waits on that variable instead of matching a mult_list call against
+        # a list and failing.
+        from wild_life.built_ins import _is_user_function as _iuf_hoist
+        _hoisted = []
+        for _hk in list(funct.attr_list.keys()):
+            _ha = funct.attr_list[_hk].deref()
+            if _iuf_hoist(_ha) and _ha.attr_list:
+                _hv = PsiTerm(type_def=wl.top)
+                self.unifier.set_attr(funct, _hk, _hv)
+                _hoisted.append((_ha, _hv))
+        for _ha, _hv in _hoisted:
+            self.push_goal(GoalType.EVAL, _ha, _hv, _ha.type.rule)
+
         # Arity check: if head has feature keys not present in funct, this rule
         # requires arguments that the call doesn't provide.  Skip the rule —
         # adding extra features to a function call is wrong semantics (unlike
@@ -2214,6 +2314,14 @@ class Engine:
             if _is_resid_refire and len(active) == 1:
                 return self.unifier.unify(result, funct)
             return False
+        # A function is called by matching, and matching settles which rule
+        # applies: the first head that fits is the rule, and a later failure
+        # is not a reason to try the next one.  Leaving the alternatives
+        # standing let `R = compileRule(L,R2), assert(R), fail` come back for
+        # a second, half-compiled R and file it as a clause of its own.
+        if _rule_cp is not None:
+            self.drop_choice_point(_rule_cp)
+            _rule_cp = None
 
         # Sort-constrained computation rule fix:
         # Rule form: X:sort -> body_expr(X, ...)
@@ -2376,6 +2484,28 @@ class Engine:
         _body_sym = body_d2.type.keyword.symbol if (body_d2.type and body_d2.type.keyword) else ''
         from wild_life.built_ins import _ARITH_OPS_SET as _AOS
         _body_is_arith = (_body_sym in _AOS and _is_cae(body_d2))
+
+        # A disjunction body hands back one alternative at a time, and the one
+        # taken still has to be worked out — `nat -> {0;1+nat}` answers 1 for
+        # its second alternative, not `1 + nat`.  Each alternative goes
+        # through `=`, which works it out, and the ones not taken wait until
+        # backtracking reaches them.
+        if body_d2.type is wl.disjunction and body_d2.attr_list and not eval_goals:
+            from wild_life.built_ins import _collect_disjunction as _cd_body
+            _disj_elems = _cd_body(body_d2, self)
+            _eq_defn_dj = (getattr(wl, 'eqsym', None)
+                           or wl.syntax_module.symbol_table.get('='))
+            if _disj_elems and _eq_defn_dj is not None:
+                def _eq_to_result(_alt):
+                    _t = PsiTerm(type_def=_eq_defn_dj)
+                    _t.attr_list = {'1': result, '2': _alt}
+                    return _t
+                for _alt_dj in reversed(_disj_elems[1:]):
+                    self.push_choice_point(GoalType.PROVE,
+                                           _eq_to_result(_alt_dj), None, None)
+                self.push_goal(GoalType.PROVE, _eq_to_result(_disj_elems[0]),
+                               None, None)
+                return True
 
         if _body_is_arith and not eval_goals:
             # Arithmetic body with no embedded user-function calls:

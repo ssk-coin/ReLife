@@ -373,6 +373,27 @@ class Unifier:
         self.trail.trail_psi(t, 'type')
         t.type = new_type
 
+    def _settle_disjunction(self, d: PsiTerm) -> bool:
+        """Bind a disjunction node to one alternative, keeping the rest.
+
+        A prototype may promise a feature worth `{@;@}`.  The term then has
+        one of them, with the others there to come back to, the same as a
+        disjunction written into the program.
+        """
+        if self.engine is None or d is None:
+            return True
+        d = d.deref()
+        if d.type is not WL.disjunction or not d.attr_list:
+            return True
+        from wild_life.built_ins import _collect_disjunction as _cdisj_p
+        _elems = _cdisj_p(d, self.engine)
+        if not _elems:
+            return False
+        for _alt in reversed(_elems[1:]):
+            self.engine.push_choice_point(GoalType.BIND_DIRECT, d, _alt, None)
+        self.bind(d, _elems[0])
+        return True
+
     def apply_prototypes_deep(self, t: PsiTerm) -> None:
         """Give every sort named inside a bound term its prototype features.
 
@@ -420,6 +441,7 @@ class Unifier:
             copies = {_pk: copy_term(_pv, var_map) for _pk, _pv in proto.items()}
             for _pk in missing:
                 self.set_attr(node, _pk, copies[_pk])
+                self._settle_disjunction(copies[_pk])
 
     def _apply_prototype_attrs(self, t: PsiTerm) -> bool:
         """Constrain t's features by the `:: Sort(attrs).` prototype of its sort.
@@ -861,6 +883,7 @@ class Unifier:
                         else:
                             # Add missing attr from fresh prototype copy
                             self.set_attr(_v_canon, _pk, _pc)
+                            self._settle_disjunction(_pc)
                 # The sorts named further down the bound term get their
                 # prototypes too: `X = f(titi)` hands X a titi with its arg on
                 # it, the same as `X = titi` does.
@@ -926,7 +949,9 @@ class Unifier:
                 _sym2 = u.type.keyword.symbol
                 _arith_ops2 = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
                                          'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
-                if _sym2 in _arith_ops2:
+                from wild_life.inference import (
+                    _arith_is_settled as _ais_nst)
+                if _sym2 in _arith_ops2 and _ais_nst(u):
                     from wild_life.data_structures import NON_STRICT_TERM as _NST
                     self.trail.trail_psi(u, 'flags')
                     u.flags |= _NST

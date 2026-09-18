@@ -330,7 +330,11 @@ class WildLifeRuntime:
         self.top.protected = True
 
         # variable: 変数の型
-        self.variable = self.update_symbol(bi, "variable")
+        # The name is one no program can write.  This definition is only ever
+        # compared by identity — it marks a token as a variable — and giving
+        # it the plain name `variable` would put it in the way of a program
+        # that defines a predicate called that, as the grammar tests do.
+        self.variable = self.update_symbol(bi, " variable")
         self.variable.type = DefType.TYPE
 
         # nothing: パースエラーなどで使う
