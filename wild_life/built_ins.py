@@ -3395,7 +3395,26 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
                 # in-place without the conjunction unification step.
                 _ev = _eval_body_sync(_attr, eng, _depth + 1)
             if _ev is not None and _ev is not _attr:
-                t.attr_list[_key] = _ev
+                # Trailed: the value was worked out under bindings that a
+                # later backtrack may undo, and a call left holding a stale
+                # one would go on reducing against variables nothing binds
+                # any more.
+                eng.unifier.set_attr(t, _key, _ev)
+
+        # Matching is one-way here as well: `mult_list(2,6,X)` with X still a
+        # variable does not match `mult_list(U,N,[H|T])`, and narrowing X to
+        # [H|T] to make it fit would answer a question the call has not
+        # settled.  A rule no narrowing could ever fit is passed over; one the
+        # call is not specific enough for is left to the engine's own EVAL
+        # goal, which suspends the call until a variable is bound.
+        from wild_life.inference import _rule_match_status as _rms_sync
+        _sync_match = _rms_sync(head.deref(), t, eng)
+        if _sync_match == 'never':
+            t.attr_list = t_copy_attrs
+            continue
+        if _sync_match != 'ready':
+            t.attr_list = t_copy_attrs
+            return None
 
         mark = eng.trail.mark()
         ok = eng.unifier.unify(t, head)
@@ -4383,7 +4402,11 @@ def _eval_embedded_user_funcs(
         child = td.attr_list[key].deref()
         evaled = _try_eval_any_func(child, eng)
         if evaled is not None and evaled is not child:
-            td.attr_list[key] = evaled
+            # Trailed: what the call worked out holds only under the bindings
+            # in force now, and a backtrack that takes those away has to take
+            # the value with them — or the term is left holding a call whose
+            # arguments have gone back to being variables.
+            eng.unifier.set_attr(td, key, evaled)
             _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited)
         elif child.attr_list:
             # If child is a sort-conjunction `A & B`, evaluate it via
@@ -4409,7 +4432,7 @@ def _eval_embedded_user_funcs(
                 if _has_evaluable:
                     _ev_conj = _eval_body_sync(child, eng, _depth + 1)
                     if _ev_conj is not None and _ev_conj is not child:
-                        td.attr_list[key] = _ev_conj
+                        eng.unifier.set_attr(td, key, _ev_conj)
                         _eval_embedded_user_funcs(_ev_conj, eng, _depth + 1, visited)
                         continue
             _eval_embedded_user_funcs(child, eng, _depth + 1, visited)

@@ -2126,6 +2126,23 @@ class Engine:
         )
         self._preeval_funct_args(funct)
 
+        # An argument that is a call of its own and could not be worked out
+        # just now does not stand for a term this call can be matched against:
+        # it stands for whatever it will produce.  Put it in a variable and
+        # let it run as a goal of its own, so `merge(mult_list(2,6,X),[9])`
+        # waits on that variable instead of matching a mult_list call against
+        # a list and failing.
+        from wild_life.built_ins import _is_user_function as _iuf_hoist
+        _hoisted = []
+        for _hk in list(funct.attr_list.keys()):
+            _ha = funct.attr_list[_hk].deref()
+            if _iuf_hoist(_ha) and _ha.attr_list:
+                _hv = PsiTerm(type_def=wl.top)
+                self.unifier.set_attr(funct, _hk, _hv)
+                _hoisted.append((_ha, _hv))
+        for _ha, _hv in _hoisted:
+            self.push_goal(GoalType.EVAL, _ha, _hv, _ha.type.rule)
+
         # Arity check: if head has feature keys not present in funct, this rule
         # requires arguments that the call doesn't provide.  Skip the rule —
         # adding extra features to a function call is wrong semantics (unlike
