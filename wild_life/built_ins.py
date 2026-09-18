@@ -5886,6 +5886,16 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     if b_arith is not None:
         # Expression fully evaluated — proceed to unify LHS with result.
         b_d = b_arith
+        # A left side that is still an expression states a constraint, not a
+        # shape to match: `A + B = 0 + 1` says what the sum is, the same as
+        # `A + B = 1` does, and waits on A and B rather than failing to match
+        # a sum against a number.
+        if (_get_sym(a_d) in _ARITH_OPS_SET and a_d.attr_list
+                and not (a_d.flags & _BI_NST)
+                and _try_eval_arith_to_term(a_d, eng) is None):
+            _eq_rhs = PsiTerm(type_def=goal.type)
+            _eq_rhs.attr_list = {'1': a_d, '2': b_d}
+            return bi_unify(_eq_rhs, eng)
     else:
         # RHS not fully evaluated. Try evaluating the LHS if it looks like an
         # arithmetic expression (handles  eval(A) = B  or  3+4 = X  style).
