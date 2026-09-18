@@ -7059,6 +7059,21 @@ def _eval_as_bool_func(t: 'PsiTerm', eng, _depth: int = 0) -> 'Optional[bool]':
                 return cmp_map.get(sym)
         return None
 
+    # ── Sort comparisons ──
+    # `Level :\== fail` reads as a boolean wherever one is wanted, the same
+    # as an arithmetic comparison: it is the condition that
+    # `cond(Level :\== fail, call_pred(Pred,Verbose))` asks.
+    if sym in _SORT_COMPARISONS:
+        if defn._builtin_func is None or _cond_is_undecided(t, eng):
+            return None
+        _m_sc = eng.trail.mark()
+        try:
+            _r_sc = bool(defn._builtin_func(t, eng))
+        except Exception:
+            _r_sc = None
+        eng.trail.undo_to(_m_sc)
+        return _r_sc
+
     # ── Built-in FUNCTION ──
     if defn._builtin_func is not None and defn.type == DefType.FUNCTION:
         # Other built-in functions cannot be evaluated without engine machinery
