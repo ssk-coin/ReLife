@@ -1934,6 +1934,15 @@ class Engine:
                 _evaled = _eval_user_func_sync(_attr, self)
                 if _evaled is not None and _evaled is not _attr:
                     self.unifier.set_attr(funct, _key, _evaled)
+            elif _is_cond_builtin(_attr):
+                # `sift(cond(P =< Max, filter(Ns,P), Ns), Max)` passes on
+                # whichever branch the condition picks, so the cond is asked
+                # for that branch before the rule is matched.  A condition
+                # nothing settles yet is left standing.
+                from wild_life.built_ins import _eval_body_sync as _ebs_cond
+                _evaled = _ebs_cond(_attr, self, 0)
+                if _evaled is not None and _evaled is not _attr:
+                    self.unifier.set_attr(funct, _key, _evaled)
             else:
                 # Try built-in function evaluation (features, root_sort, etc.)
                 _evaled = _try_eval_string_func(_attr, self)
