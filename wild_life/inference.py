@@ -1875,7 +1875,55 @@ class Engine:
                self.choice_stack.goal_stack.a is thegoal:
                 return self.backtrack_and_succeed()
             return False
+        # `rpf(Term, [F|LF], Level, [Term.F | LNames])` builds its answer out
+        # of a feature of the term it was given, and the answer is the feature
+        # rather than the reading of it.  The term and the label are known
+        # once the head has been matched, so that is where it is read.
+        self._resolve_head_feature_terms(head)
         return True
+
+    def _resolve_head_feature_terms(self, head: 'PsiTerm') -> None:
+        """Read the `T.F` terms a matched clause head carries.
+
+        Only one whose term and label are both settled is read: `T.F` on a
+        variable T is still waiting to know what it is about.
+        """
+        from wild_life.built_ins import _resolve_dot_feat as _rdf_h
+        wl = self.wl
+        seen: set = set()
+
+        def settled(d) -> bool:
+            host = d.attr_list.get('1')
+            feat = d.attr_list.get('2')
+            if host is None or feat is None:
+                return False
+            host = host.deref()
+            feat = feat.deref()
+            if not host.attr_list and (host.type is None or host.type is wl.top):
+                return False
+            return bool(feat.value is not None
+                        or (feat.type is not None and feat.type is not wl.top))
+
+        def walk(t: 'PsiTerm', depth: int) -> None:
+            if depth > 40:
+                return
+            td = t.deref()
+            if id(td) in seen:
+                return
+            seen.add(id(td))
+            for key in list(td.attr_list.keys()):
+                child = td.attr_list[key].deref()
+                sym = (child.type.keyword.symbol
+                       if (child.type and child.type.keyword) else '')
+                if sym == '.' and settled(child):
+                    cell = _rdf_h(child, self)
+                    if cell is not None and cell.deref() is not child:
+                        self.unifier.set_attr(td, key, cell)
+                        walk(cell, depth + 1)
+                        continue
+                walk(child, depth + 1)
+
+        walk(head, 0)
 
     def _reduce_settled_head_calls(self, head: 'PsiTerm') -> None:
         """Reduce the calls under a clause head that a rule already fits.
