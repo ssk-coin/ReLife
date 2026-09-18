@@ -1646,14 +1646,43 @@ class Engine:
                 and defn._builtin_func is None and thegoal.attr_list
                 and not (hasattr(self, 'non_strict_set')
                          and defn in self.non_strict_set)):
-            from wild_life.built_ins import _is_user_function as _iuf_pa
+            from wild_life.built_ins import (
+                _is_user_function as _iuf_pa,
+                _has_applicable_rule as _har_pa,
+                _term_reaches_itself as _tri_pa,
+            )
+            from wild_life.data_structures import REDUCED as _RED_pa0
             _call_arg = None
-            for _av_pa in thegoal.attr_list.values():
+            _call_key = None
+            for _k_pa, _av_pa in list(thegoal.attr_list.items()):
                 _ad_pa = _av_pa.deref()
-                if (_iuf_pa(_ad_pa) and not _ad_pa.attr_list
+                if not (_iuf_pa(_ad_pa)
                         and not getattr(_ad_pa.type, 'is_dynamic', False)):
+                    continue
+                if not _ad_pa.attr_list:
                     _call_arg = _ad_pa
                     break
+                # A call with arguments of its own is a value too:
+                # `constraint(inst(N))` asks inst for what N is worth, and
+                # waits on N when inst cannot say yet.  A bare name passed
+                # as a value, a call no rule applies to, and a call that
+                # reaches itself are left as they are.
+                if (not (_ad_pa.flags & _RED_pa0) and _har_pa(_ad_pa)
+                        and not _tri_pa(_ad_pa)):
+                    _call_key = _k_pa
+                    _call_arg = _ad_pa
+                    break
+            if _call_key is not None:
+                self.goal_stack = aim.next
+                self.goal_count += 1
+                self.trail.trail_psi(_call_arg, 'flags')
+                _call_arg.flags |= _RED_pa0
+                _R_pk = wl.make_var()
+                self.unifier.set_attr(thegoal, _call_key, _R_pk)
+                self.push_goal(GoalType.PROVE, thegoal, aim.b, aim.c)
+                self.push_goal(GoalType.EVAL, _call_arg, _R_pk,
+                               _call_arg.type.rule)
+                return True
             if _call_arg is not None:
                 self.goal_stack = aim.next
                 self.goal_count += 1
@@ -1815,7 +1844,11 @@ class Engine:
                 _a_pa_d = _a_pa.deref()
                 _ev_pa = _tesf_pa(_a_pa_d, self)
                 if _ev_pa is not None and _ev_pa is not _a_pa_d:
-                    thegoal.attr_list[_k_pa] = _ev_pa
+                    # Trailed: `X.nom` is whatever X has now, and a backtrack
+                    # that gives X a different value must give the goal its
+                    # feature term back rather than leave it holding the one
+                    # read from the value before.
+                    self.unifier.set_attr(thegoal, _k_pa, _ev_pa)
                     continue
                 # An expression handed to a strict call is asked for its
                 # value, whatever it was written as: `p(X:(1+2))` leaves X
@@ -2188,6 +2221,21 @@ class Engine:
                     # to become q_sort([1]) before the head `q_sort([H|T])`
                     # can be matched against it.
                     self._preeval_funct_args(funct)
+                    # Matching is one-way here too: `inst(N:inst_name) -> N |
+                    # write(N)` does not apply to `inst(Y)` with Y still a
+                    # variable, and narrowing Y to inst_name to make it fit
+                    # would answer a question the call has not settled.
+                    _st_match = _rule_match_status(head.deref(), funct, self)
+                    if _st_match == 'never':
+                        return False
+                    if _st_match == 'stuck':
+                        return True
+                    if isinstance(_st_match, list) and _st_match:
+                        if _rule_cp is not None:
+                            self.drop_choice_point(_rule_cp)
+                            _rule_cp = None
+                        self._suspend_call(funct, result, rules, _st_match)
+                        return True
                     mark = self.trail.mark()
                     ok = self.unifier.unify(funct, head)
                     if not ok:
