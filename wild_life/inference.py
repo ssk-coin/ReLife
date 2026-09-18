@@ -922,6 +922,17 @@ def _collect_embedded_func_goals(t: 'PsiTerm', eng, visited: set) -> list:
             # Lazy: the alternatives wait until one of them is chosen.
             continue
 
+        # A `T.F` written into a body stands for the feature: `f(A,X) ->
+        # @(A, X.A)` hands back the feature X has at A, and waits on A while
+        # it is still a variable.
+        if child.type is not None and child.type.keyword is not None \
+                and child.type.keyword.symbol == '.':
+            from wild_life.built_ins import _resolve_dot_feat as _rdf_c
+            _cell_c = _rdf_c(child, eng)
+            if _cell_c is not None and _cell_c.deref() is not child:
+                eng.unifier.set_attr(parent, key, _cell_c)
+                continue
+
         if _is_user_function(child):
             # Replace with fresh variable; record EVAL goal.
             v = PsiTerm(type_def=eng.wl.top)

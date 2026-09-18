@@ -4413,6 +4413,16 @@ def _eval_embedded_user_funcs(
         if _skip_arg1 and key == '1':
             continue  # do not eagerly evaluate function/predicate name arguments
         child = td.attr_list[key].deref()
+        # A `T.F` written into a term stands for the feature, not for the
+        # reading of it: `f(A,X) -> @(A, X.A)` hands back the feature X has
+        # at A, and waits on A while it is still a variable.
+        if (child.type is not None and child.type.keyword is not None
+                and child.type.keyword.symbol == '.'):
+            _cell_d = _resolve_dot_feat(child, eng)
+            if _cell_d is not None and _cell_d.deref() is not child:
+                eng.unifier.set_attr(td, key, _cell_d)
+                _eval_embedded_user_funcs(_cell_d, eng, _depth + 1, visited)
+                continue
         evaled = _try_eval_any_func(child, eng)
         if evaled is not None and evaled is not child:
             # Trailed: what the call worked out holds only under the bindings
