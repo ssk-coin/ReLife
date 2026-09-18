@@ -4296,6 +4296,13 @@ def _try_eval_any_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     if td.type is None:
         return None
 
+    # A literal is its own value: there is nothing here to work out, and
+    # handing back a fresh term for it would lose the one the term already
+    # holds — `B = filter([2|L],3)` shares its 7 with L's, and it stops
+    # sharing it the moment a copy takes its place.
+    if td.value is not None and not td.attr_list:
+        return None
+
     # User-defined function
     if _is_user_function(td):
         return _eval_user_func_sync(td, eng, 0)
