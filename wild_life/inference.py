@@ -1118,6 +1118,14 @@ class Engine:
         """Create a choice point with an alternative goal."""
         alt = Goal(gtype, a, b, c)
         alt.next = self.goal_stack
+        # Trailed: an alternative belongs to the bindings it was made under.
+        # Wherever a term is worked out to answer a question — whether a rule
+        # matches, what a call is worth — the answer is read and the bindings
+        # undone, and the alternatives met on the way have to go with them.
+        # Otherwise backtracking into one takes the engine on from a goal it
+        # never proved.  backtrack() sets the stack itself after undoing, so
+        # the ordinary path is unaffected.
+        self.trail.trail_psi(self, 'choice_stack')
         mark = self.trail.mark()
         cp = ChoicePoint(
             undo_point=mark,
