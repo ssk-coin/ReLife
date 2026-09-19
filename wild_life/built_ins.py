@@ -8751,7 +8751,7 @@ def bi_statistics(goal: PsiTerm, eng) -> bool:
     return True
 
 
-def _rule_to_string(h, b, wl):
+def _rule_to_string(h, b, wl, inline: bool = False):
     """ルール (head, body) を共有 PrintState で文字列化する。
 
     body 中の conjunction ','( left, right ) を個々のゴールに分解し、
@@ -8775,19 +8775,23 @@ def _rule_to_string(h, b, wl):
             return split_conj(t.attr_list['1']) + split_conj(t.attr_list['2'])
         return [t]
 
-    body_goals = split_conj(b) if b is not None else []
-
-    # 共有 PrintState: head / body ゴール全体をまとめてスキャン
+    # 共有 PrintState: head / body 全体をまとめてスキャン
     ps = PrintState(outfile=io.StringIO())
     ps.const_quote = True
     ps.indent = False
     # A listing shows the clause as written: `a(1+2).` lists as `a(1 + 2)`,
     # not as the 3 it would evaluate to when the clause is used.
     ps.no_arith_eval = True
+    # A listing writes one goal to a line, so `,` and `:-` carry the break.
+    # A delay rule is written on one line, and keeps its goals on it.
+    ps.listing_flag = not inline
 
+    # The body is one term, not a row of goals: a clause that names itself —
+    # `assert(X:(p :- retbool, inc, assert(X), fail))` — shares its whole
+    # body with the copy inside, and it is that conjunction which wants a
+    # name, not each of the four goals under it.
     ps.go_through(h)
-    for g in body_goals:
-        ps.go_through(g)
+    ps.go_through(b)
     ps.insert_variables({}, False)
 
     # head を出力
@@ -8805,14 +8809,13 @@ def _rule_to_string(h, b, wl):
         ps.write_canon = _was_canon
     head_str = ps.outfile.getvalue()
 
-    # body ゴールを個別に出力 (outfile を切り替えて再利用)
-    goal_strs = []
-    for g in body_goals:
+    body_str = None
+    if b is not None:
         ps.outfile = io.StringIO()
-        _pretty_tag_or_psi_term(ps, g, MAX_PRECEDENCE + 1, 0, wl)
-        goal_strs.append(ps.outfile.getvalue())
+        _pretty_tag_or_psi_term(ps, b, MAX_PRECEDENCE + 1, 0, wl)
+        body_str = ps.outfile.getvalue()
 
-    return head_str, goal_strs
+    return head_str, body_str
 
 
 # What the C interpreter calls a built-in function rather than a built-in
@@ -8862,15 +8865,15 @@ def _bi_listing_one(defn, wl, imported: bool = False) -> None:
         print(f"dynamic({func_name})?")
 
     for h, b in active_rules:
-        head_str, goal_strs = _rule_to_string(h, b, wl)
+        head_str, body_str = _rule_to_string(h, b, wl)
 
         if is_function:
-            vs = goal_strs[0] if goal_strs else 'true'
+            vs = body_str if body_str else 'true'
             print(f"{head_str} -> {vs}.")
         else:
             # 述語: ボディは常に ':-' 付きで表示 (各ゴール改行)。
             # ファクトも `HEAD :- succeed.` として列挙される。
-            bs = ',\n        '.join(goal_strs) if goal_strs else 'succeed'
+            bs = body_str if body_str else 'succeed'
             print(f"{head_str} :-\n        {bs}.")
 
 
@@ -8994,10 +8997,11 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
                 _was_type, _was_flags = _pat_d.type, _pat_d.flags
                 _pat_d.type, _pat_d.flags = defn, _pat_d.flags | _SV_LST
                 try:
-                    _pat_str, _cond_strs = _rule_to_string(_pat_d, _cond, wl)
+                    _pat_str, _cond_str = _rule_to_string(_pat_d, _cond, wl,
+                                                          inline=True)
                 finally:
                     _pat_d.type, _pat_d.flags = _was_type, _was_flags
-                print(f":: {_pat_str} | {', '.join(_cond_strs)}.")
+                print(f":: {_pat_str} | {_cond_str or 'succeed'}.")
             if defn.parents:
                 for _parent in defn.parents:
                     _pname = _parent.keyword.symbol if _parent.keyword else '@'
@@ -9039,9 +9043,10 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
                     _dgoal = _dr.attr_list.get('2')
                     if _dpat is None or _dgoal is None:
                         continue
-                    _dpat_str, _dgoal_strs = _rule_to_string(_dpat.deref(),
-                                                             _dgoal, wl)
-                    print(f":: {_dpat_str} | {', '.join(_dgoal_strs)}.")
+                    _dpat_str, _dgoal_str = _rule_to_string(_dpat.deref(),
+                                                            _dgoal, wl,
+                                                            inline=True)
+                    print(f":: {_dpat_str} | {_dgoal_str or 'succeed'}.")
                 # A sort named only by a delay rule sits directly under @.
                 _dparents = defn.parents or []
                 if _dparents:
