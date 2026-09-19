@@ -2097,10 +2097,11 @@ class Engine:
         if _hd:
             self._resolve_head_feature_terms(head)
         if head.attr_list and head_orig.__dict__.get('_wl_has_call'):
-            self._bind_settled_head_calls(head)
+            self._bind_settled_head_calls(head, head_orig)
         return True
 
-    def _bind_settled_head_calls(self, head: 'PsiTerm') -> None:
+    def _bind_settled_head_calls(self, head: 'PsiTerm',
+                                 head_orig: 'PsiTerm') -> None:
         """Work out the calls a matched head carries, now that it is matched.
 
         `reduit(@(…), remet(R1,R2))` hands the caller what remet answers, and
@@ -2118,7 +2119,7 @@ class Engine:
         _cs_b = self.choice_stack
         seen: set = set()
 
-        def walk(t: 'PsiTerm', depth: int) -> None:
+        def walk(t: 'PsiTerm', shape: 'PsiTerm', depth: int) -> None:
             if depth > 40:
                 return
             td = t.deref()
@@ -2129,7 +2130,9 @@ class Engine:
                 evaled = _teaf_b(td, self)
                 if evaled is not None and evaled.deref() is not td:
                     self.unifier.bind(td, evaled)
-                    walk(evaled, depth + 1)
+                    # What the call answered is the rule's own writing too,
+                    # so the whole of it is looked through.
+                    walk(evaled, evaled, depth + 1)
                     return
                 if evaled is None:
                     # A call the engine has to run — one whose rule carries a
@@ -2143,11 +2146,19 @@ class Engine:
                     self.unifier.bind(td, _v2)
                     self.push_goal(GoalType.EVAL, _c2, _v2, _c2.type.rule)
                     return
-            for key in list(td.attr_list.keys()):
-                walk(td.attr_list[key], depth + 1)
+            # Only where the rule wrote something is there a call to find:
+            # the rest of what the term now holds came from the caller, and
+            # walking it costs a pass over every cell of a long list.
+            if shape is None:
+                return
+            _sd = shape.deref()
+            for key, _sub in _sd.attr_list.items():
+                _here = td.attr_list.get(key)
+                if _here is not None:
+                    walk(_here, _sub, depth + 1)
 
         try:
-            walk(head, 0)
+            walk(head, head_orig, 0)
         finally:
             self.choice_stack = _cs_b
 

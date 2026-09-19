@@ -4383,6 +4383,12 @@ def _try_eval_any_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     if td.value is not None and not td.attr_list:
         return None
 
+    # A list cell is a term, not a call: none of the readings below apply to
+    # one, and a walk over a list asks this question of every cell it has.
+    _td_type = td.type
+    if _td_type is eng.wl.alist or _td_type is eng.wl.nil:
+        return None
+
     # User-defined function
     if _is_user_function(td):
         return _eval_user_func_sync(td, eng, 0)
