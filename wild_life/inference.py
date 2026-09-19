@@ -2488,6 +2488,35 @@ class Engine:
                 return self.unifier.unify(result, funct)
             return False
 
+        # Expand disjunctions embedded in function arguments BEFORE pre-eval.
+        # This must happen first so that nested function calls like f2(f2({1;2}))
+        # push EVAL-level CPs (with the full continuation) rather than letting
+        # _eval_user_func_sync push inner CPs that miss the outer evaluation.
+        # e.g. f2(f2({1;2})) → push EVAL CP for f2(f2(2)), try f2(f2(1)) first.
+        # Then pre-eval evaluates inner calls on each alternative separately.
+        from wild_life.built_ins import _term_contains_disjunction, _expand_term_disjunctions
+        if _term_contains_disjunction(funct, self):
+            _alts = _expand_term_disjunctions(funct, self)
+            if len(_alts) > 1:
+                # Push choice points for alternatives 2..N (in reverse so first
+                # alternative is tried next, then 2nd, etc.)
+                for _alt in reversed(_alts[1:]):
+                    self.push_choice_point(GoalType.EVAL, _alt, result, active)
+                funct = _alts[0]
+
+        # Pre-evaluate any function call arguments in funct.
+        # This enables patterns like f(g(x)) where g(x) needs to be evaluated
+        # before pattern matching against f's head (e.g. rev(reverse(L),[]) ).
+        # Asked once for the call, before the clause choice point: a rule that
+        # does not match takes the reduction back on its way out, and an
+        # argument whose reduction was a side effect — `mk(3)` handing out
+        # numbered variables — would hand out fresh ones on the next clause.
+        from wild_life.built_ins import (
+            _eval_user_func_sync, _is_user_function,
+            _try_eval_string_func, _try_eval_arith_to_term,
+        )
+        self._preeval_funct_args(funct)
+
         head_orig, body_orig = active[0]
         # Choice point level before the remaining-clause alternatives are
         # pushed.  A guarded rule (`f(X) -> Val | Guard`) commits to its clause
@@ -2630,35 +2659,6 @@ class Engine:
                     self.push_goal(GoalType.EVAL_COMMIT, _rule_cp, None, None)
                 self.push_goal(GoalType.PROVE, _cond_d, _DEFRULES, None)
                 return True
-
-        # Expand disjunctions embedded in function arguments BEFORE pre-eval.
-        # This must happen first so that nested function calls like f2(f2({1;2}))
-        # push EVAL-level CPs (with the full continuation) rather than letting
-        # _eval_user_func_sync push inner CPs that miss the outer evaluation.
-        # e.g. f2(f2({1;2})) → push EVAL CP for f2(f2(2)), try f2(f2(1)) first.
-        # Then pre-eval evaluates inner calls on each alternative separately.
-        from wild_life.built_ins import _term_contains_disjunction, _expand_term_disjunctions
-        if _term_contains_disjunction(funct, self):
-            _alts = _expand_term_disjunctions(funct, self)
-            if len(_alts) > 1:
-                # Push choice points for alternatives 2..N (in reverse so first
-                # alternative is tried next, then 2nd, etc.)
-                for _alt in reversed(_alts[1:]):
-                    self.push_choice_point(GoalType.EVAL, _alt, result, active)
-                funct = _alts[0]
-                # Recompute fresh head/body copies for the first alternative
-                _vm = {}
-                head = copy_term(head_orig, _vm)
-                body = copy_term(body_orig, _vm)
-
-        # Pre-evaluate any function call arguments in funct.
-        # This enables patterns like f(g(x)) where g(x) needs to be evaluated
-        # before pattern matching against f's head (e.g. rev(reverse(L),[]) ).
-        from wild_life.built_ins import (
-            _eval_user_func_sync, _is_user_function,
-            _try_eval_string_func, _try_eval_arith_to_term,
-        )
-        self._preeval_funct_args(funct)
 
         # An argument that is a call of its own and could not be worked out
         # just now does not stand for a term this call can be matched against:
