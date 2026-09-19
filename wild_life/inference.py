@@ -2045,6 +2045,13 @@ class Engine:
         """
         from wild_life.built_ins import (_is_user_function as _iuf_h,
                                          _try_eval_any_func as _teaf_h)
+        # A call reduced here is one a rule already fits, so it has one value
+        # and no alternatives.  Working it out can still leave choice points
+        # behind — a disjunction it meets settles to its first element and
+        # keeps the rest — and those belong to nothing: the clause they came
+        # from may not even match, and backtracking into them would take the
+        # engine on from a goal it never proved.
+        _cs_head = self.choice_stack
         seen: set = set()
 
         def walk(t: 'PsiTerm', depth: int) -> None:
@@ -2064,7 +2071,10 @@ class Engine:
                         continue
                 walk(child, depth + 1)
 
-        walk(head, 0)
+        try:
+            walk(head, 0)
+        finally:
+            self.choice_stack = _cs_head
 
     def _head_call_is_settled(self, call: 'PsiTerm') -> bool:
         """Whether some rule of call's function fits it as it stands."""
