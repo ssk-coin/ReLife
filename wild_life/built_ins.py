@@ -2217,33 +2217,41 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     if t is None or _depth > 40:
         return False, 0.0
     t = t.deref()
-    # A global variable name stands for its cell, so `b <- a+a` reads a's
-    # value rather than treating a as a non-numeric atom.
-    cell = _global_cell(t, eng)
-    if cell is not None:
-        return _eval_arith(cell, eng, _depth + 1)
     wl = eng.wl
-    sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
 
-    # A call written through a functor variable evaluates once the functor is
-    # known, so that `F(A)*F(C) > 0` can be computed at all.
-    if getattr(wl, 'apply', None) is not None and t.type is wl.apply:
-        _ap_call = _apply_to_call(t, eng)
-        if _ap_call is None:
-            return False, 0.0
-        return _eval_arith(_ap_call, eng, _depth + 1)
-
-    if t.value is not None and t.type and t.type.is_subtype_of(wl.real):
+    # A number is its own value, and that is what most of these calls are
+    # asked about, so it is answered before anything else is looked at.  A
+    # number is neither a global's name nor a call through a functor.
+    _t_val = t.value
+    _t_type = t.type
+    if (_t_val is not None and _t_type is not None
+            and _t_type.is_subtype_of(wl.real)):
         # Fire int/real delay rule for parsed literal integers (not computed by _make_number).
         # In C Wild Life, literal integers in expressions act like narrowed sort-vars
         # and fire the :: I:int | ... delay when they are "evaluated".
         from wild_life.runtime import WL as _WL_ea
         if (_WL_ea.delay_rules and eng is not None
                 and not getattr(eng, '_in_fire_delay', False)
-                and not getattr(t, '_delay_fired', False)):
+                and not t.__dict__.get('_delay_fired')):
             t._delay_fired = True
             eng.unifier._fire_delay_rules(t, t.type)
-        return True, float(t.value)
+        return True, float(_t_val)
+
+    # A global variable name stands for its cell, so `b <- a+a` reads a's
+    # value rather than treating a as a non-numeric atom.
+    if not t.attr_list and _t_type is not None and _t_type.type is DefType.GLOBAL:
+        cell = _global_cell(t, eng)
+        if cell is not None:
+            return _eval_arith(cell, eng, _depth + 1)
+    sym = _t_type.keyword.symbol if (_t_type and _t_type.keyword) else ''
+
+    # A call written through a functor variable evaluates once the functor is
+    # known, so that `F(A)*F(C) > 0` can be computed at all.
+    if getattr(wl, 'apply', None) is not None and _t_type is wl.apply:
+        _ap_call = _apply_to_call(t, eng)
+        if _ap_call is None:
+            return False, 0.0
+        return _eval_arith(_ap_call, eng, _depth + 1)
 
     # User-defined function: try to evaluate it inline (no condition case).
     # A call under a backtick is the call, not what it answers, so it is left
