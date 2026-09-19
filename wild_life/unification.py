@@ -1226,12 +1226,6 @@ class Unifier:
                             _aar_aa(_v_aa, WL, _pend_aa, self.engine)
                         return True
 
-        # A term that has never run a delay rule is one the reader has just
-        # built: `X = m(1)` on an X that is already an m owes another `mm`,
-        # because the m(1) is its own term and `:: m | write(mm)` has not run
-        # on it.  The two histories join, so nothing runs twice afterwards.
-        self._fire_fresh_sorts(u, v)
-
         # 型の単一化
         if not self._unify_types(u, v):
             return False
@@ -1259,6 +1253,16 @@ class Unifier:
         # 特性の単一化
         if not self._unify_attrs(u, v):
             return False
+
+        # A term that has never run a delay rule is one the reader has just
+        # built: `X = m(1)` on an X that is already an m owes another `mm`,
+        # because the m(1) is its own term and `:: m | write(mm)` has not run
+        # on it.  The two histories join, so nothing runs twice afterwards.
+        # Asked once the two sides have been put together, so that what the
+        # rule reads is the whole term and not half of it: `visualize(A:
+        # activity, …)` would otherwise work out an activity's earliest start
+        # from the requests the head has yet to be given.
+        self._fire_fresh_sorts(u, v)
 
         # After successful structural unification, merge the two psi-terms by
         # binding v → u (via coref).  This preserves the sharing relationship
