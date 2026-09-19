@@ -1592,7 +1592,13 @@ class Engine:
 
         # ── UNDEFINED or LOOKUP from DEFRULES ──
         rules = rule_or_sentinel
-        if rules is _DEFRULES:
+        _live_defn = None
+        _live_start = 0
+        if type(rules) is _LiveClauses:
+            _live_defn = rules.defn
+            _live_start = rules.start
+            rules = _live_defn.rule or []
+        elif rules is _DEFRULES:
             # Check if the goal term is an unbound free variable.
             # Free vars have type=wl.top (DefType.TYPE) with no attr_list/value/coref,
             # OR type=None. In Wild Life, calling a free variable as a goal succeeds
@@ -1631,6 +1637,8 @@ class Engine:
                 return False
             if defn.type == DefType.PREDICATE:
                 rules = defn.rule or []
+                if getattr(defn, "is_dynamic", False) and not callable(rules):
+                    _live_defn = defn
             elif defn.type == DefType.FUNCTION:
                 rules = defn.rule or []
             elif defn.type == DefType.UNDEF:
@@ -1732,8 +1740,18 @@ class Engine:
             return True
 
         # Filter out retracted clauses
-        active = [(h, b) for (h, b) in (rules if rules else [])
-                  if h is not None and b is not None]
+        if _live_defn is not None:
+            _live_rl = _live_defn.rule or []
+            active = []
+            _live_at = []
+            for _li in range(_live_start, len(_live_rl)):
+                _lh, _lb = _live_rl[_li]
+                if _lh is not None and _lb is not None:
+                    active.append((_lh, _lb))
+                    _live_at.append(_li)
+        else:
+            active = [(h, b) for (h, b) in (rules if rules else [])
+                      if h is not None and b is not None]
         if not active:
             self.goal_stack = aim.next
             self.goal_count += 1
@@ -1881,7 +1899,12 @@ class Engine:
 
         head_orig, body_orig = active[0]
         if len(active) > 1:
-            self.push_choice_point(GoalType.PROVE, thegoal, active[1:], None)
+            # A dynamic predicate hands on where to read from rather than
+            # what is left to read, so a clause asserted while this one runs
+            # is found when the choice point is taken.
+            _rest = (_LiveClauses(_live_defn, _live_at[0] + 1)
+                     if _live_defn is not None else active[1:])
+            self.push_choice_point(GoalType.PROVE, thegoal, _rest, None)
 
         _vm: dict = {}
         head = copy_term(head_orig, _vm)
@@ -3321,6 +3344,24 @@ class Engine:
 # ─────────────────────────────────────────────────────────────────────────────
 # Sentinel: "use the type's own rule list"
 # ─────────────────────────────────────────────────────────────────────────────
+class _LiveClauses:
+    """Where to carry on reading a dynamic predicate's clauses.
+
+    A predicate the program adds to while it runs is read as it stands, not
+    as it stood when the call was made: chart_parser's `item(...)` is asked
+    again on backtracking and finds the items the recursion asserted in the
+    meantime.  Carrying the position rather than a copy of the remaining
+    clauses is what lets the later ones be seen; positions stay put because
+    retract blanks a clause where it is instead of removing it.
+    """
+
+    __slots__ = ('defn', 'start')
+
+    def __init__(self, defn, start):
+        self.defn = defn
+        self.start = start
+
+
 _DEFRULES = object()  # sentinel — same role as DEFRULES macro in C
 
 # Sentinel used as cs_barrier when a built-in (bi_not, bi_once, bi_cond, …)
