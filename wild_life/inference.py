@@ -1577,6 +1577,18 @@ class Engine:
         thegoal = thegoal.deref()
         defn = thegoal.type
 
+        # A call written through a functor variable is the call it stands for
+        # once the functor is known, wherever it stands: `cond(O(H,X), …)` in
+        # qsort's split asks whether H comes before X under the order it was
+        # given, and O is `<`.
+        if (getattr(wl, 'apply', None) is not None and defn is wl.apply
+                and thegoal.attr_list):
+            from wild_life.built_ins import _apply_to_call as _atc_pg
+            _call_pg = _atc_pg(thegoal, self)
+            if _call_pg is not None:
+                thegoal = _call_pg
+                defn = thegoal.type
+
         # ── AND (conjunction) ──
         # commasym (',') is the standard Prolog-style conjunction;
         # and_sym ('&') is the functional-pair form — both split into two goals.
