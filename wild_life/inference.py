@@ -1836,8 +1836,12 @@ class Engine:
         # answer does not depend on.
         if not (defn is not None and hasattr(self, 'non_strict_set')
                 and defn in self.non_strict_set):
-            from wild_life.built_ins import (_try_eval_string_func as _tesf_pa,
-                                              _try_eval_arith_to_term as _teat_pa)
+            from wild_life.built_ins import (
+                _try_eval_string_func as _tesf_pa,
+                _try_eval_arith_to_term as _teat_pa,
+                _eval_embedded_user_funcs as _eeuf_pa,
+                _is_user_function as _iuf_pa,
+            )
             from wild_life.data_structures import (
                 NON_STRICT_TERM as _NST_pa)
             for _k_pa, _a_pa in list(thegoal.attr_list.items()):
@@ -1859,6 +1863,15 @@ class Engine:
                         and _a_pa_d.type.keyword is not None
                         and _a_pa_d.type.keyword.symbol in _STRICT_ARITH_SYMS):
                     _teat_pa(_a_pa_d, self)
+                    continue
+                # A call written inside an argument is there for its value
+                # too, however deep it sits: `add_item(item(begin =>
+                # N:length(X), end => N+1, cat => lex(Word)))` hands the
+                # predicate the number the list is long and the category the
+                # word has, not the calls that stand for them.  A call that
+                # cannot be worked out yet is left as it is.
+                if _a_pa_d.attr_list and not _iuf_pa(_a_pa_d):
+                    _eeuf_pa(_a_pa_d, self, 0, set())
 
         # Multiple clauses → set up choice point for first, then proceed.
         # Record cut_barrier BEFORE pushing the multi-clause choice point so
