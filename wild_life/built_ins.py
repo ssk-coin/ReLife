@@ -6018,6 +6018,24 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     # effects, and only keep the VALUE if it turned out to be concrete.
     # This avoids corrupting `result`'s coref and prevents spurious arithmetic
     # constraints from unevaluated or self-referential rule bodies.
+    # A name on the left stands for what it answers too: `A:emp = stu` puts
+    # school's two terms together, and reading only the right-hand one leaves
+    # the answer half made.
+    _a_is_user_fn_0 = (a_d.type is not None and a_d.type.type == DefType.FUNCTION
+                       and a_d.type.rule and not callable(a_d.type.rule))
+    if (_a_is_user_fn_0 and not (a_d.flags & _BI_NST) and not a_d.attr_list
+            and not _a_was_backtick):
+        _a_evaled = _eval_user_func_sync(a_d, eng, 0)
+        if _a_evaled is not None:
+            _a_ev_d = _a_evaled.deref()
+            if _a_ev_d is not a_d and _is_settled_value(_a_ev_d, a_d.type):
+                # The name's own node becomes what it answers, so a tag on it
+                # — the A of `A:emp` — reads the term and not the name.
+                if a_d.coref is None:
+                    eng.trail.trail_psi(a_d, 'coref')
+                    a_d.coref = _a_ev_d
+                a_d = _a_ev_d
+
     if _b_is_user_fn and not _b_is_non_strict and not b_d.attr_list and not _b_was_backtick:
         _0a_mark = eng.trail.mark()
         _b_evaled = _eval_user_func_sync(b_d, eng, 0)

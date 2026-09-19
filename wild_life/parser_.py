@@ -179,9 +179,17 @@ class Parser:
                     # a2 が具体的な型定義を持つ場合は、a1.type にその型を設定する
                     # (coref ではなく type を設定することで copy_term が新しい変数を作れる)
                     from wild_life.data_structures import DefType, SORT_VAR
+                    # A name with rules of its own is a call, not a sort:
+                    # `A:emp` with `emp -> employee(…)` names what emp
+                    # answers, and constraining A to a sort called emp would
+                    # leave school's two terms unmerged.  A sort's own rules
+                    # are the condition a `:=` definition carries, and those
+                    # still read as a sort.
                     if (a2.type is not None and a2.type is not WL.top and
                             a2.value is None and not a2.attr_list and not a2.resid and
-                            a2.type.type in (DefType.FUNCTION, DefType.TYPE)):
+                            (a2.type.type is DefType.TYPE
+                             or (a2.type.type is DefType.FUNCTION
+                                 and not a2.type.rule))):
                         # sort-annotated variable: X:ran or X:s1 -> set a1.type = sort_def
                         # Mark a1 with SORT_VAR so copy_term/unify can distinguish it
                         # from a ground term of the same sort (e.g. the constant `a`
