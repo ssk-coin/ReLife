@@ -4468,8 +4468,15 @@ def _eval_embedded_user_funcs(
 
     Modifies t's attr_list in-place (replacing function calls with their
     evaluated results).  t must be a fresh copy (not a stored rule term).
+
+    The depth here counts the term's own nesting, not a chain of reductions:
+    every node is visited once, so what the limit guards against is running
+    out of Python stack on a very deep term.  It has to leave room for an
+    ordinary one — fact writes 102! as a list of 41 cells, and 150! as 66 —
+    because giving up part way through leaves calls unreduced and the answer
+    wrong rather than merely incomplete.
     """
-    if _depth > 40:
+    if _depth > 100:
         return
     td = t.deref()
     if id(td) in visited:
