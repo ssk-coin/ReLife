@@ -722,6 +722,27 @@ def _rule_match_status(head: 'PsiTerm', call: 'PsiTerm', eng):
     if not keys:
         return 'ready'
 
+    # A quick look before the question is asked in full: a head of plain
+    # variables, each named once and each meeting a different term, fits
+    # whatever the call passes.  That is the answer the question below would
+    # give, at a fraction of the work — and gcd's second rule is asked it once
+    # per step of every division.
+    _head_plain = True
+    _h_ids: set = set()
+    _c_ids: set = set()
+    for k in keys:
+        hd = head.attr_list[k].deref()
+        cd = call.attr_list[k].deref()
+        if (hd.attr_list or hd.value is not None or hd.resid
+                or (hd.type is not None and hd.type is not wl.top)
+                or id(hd) in _h_ids or id(cd) in _c_ids):
+            _head_plain = False
+            break
+        _h_ids.add(id(hd))
+        _c_ids.add(id(cd))
+    if _head_plain:
+        return 'ready'
+
     # Positions belong together where either side shares a term: a call that
     # passes one term to several positions has to meet what all of them ask at
     # once, and a head naming one variable in several positions asks those
