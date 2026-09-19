@@ -226,8 +226,10 @@ def _expand_head_disj(head: PsiTerm, wl, depth: int = 0) -> list:
     if not attr_keys:
         return [head_d]
 
-    # Build Cartesian product of attribute alternatives
-    combos = [{}]
+    # What each attribute can stand for.  Nothing is built until at least
+    # one of them turns out to have alternatives: a head with no disjunction
+    # in it — which is nearly every head — is its own only alternative.
+    per_key = []
     has_disj = False
     for key in attr_keys:
         attr_val = head_d.attr_list[key]
@@ -245,6 +247,14 @@ def _expand_head_disj(head: PsiTerm, wl, depth: int = 0) -> list:
             alts = _expand_head_disj(val_d, wl, depth + 1)
         if len(alts) > 1:
             has_disj = True
+        per_key.append((key, alts))
+
+    if not has_disj:
+        return [head_d]
+
+    # Build Cartesian product of attribute alternatives
+    combos = [{}]
+    for key, alts in per_key:
         new_combos = []
         for combo in combos:
             for alt in alts:
@@ -252,9 +262,6 @@ def _expand_head_disj(head: PsiTerm, wl, depth: int = 0) -> list:
                 new_combo[key] = alt
                 new_combos.append(new_combo)
         combos = new_combos
-
-    if not has_disj:
-        return [head_d]
 
     result = []
     for attrs in combos:
@@ -1806,6 +1813,38 @@ class Engine:
         elif len(_goal_alts) == 0:
             return False  # empty disjunction in argument → fail
 
+        # A strict predicate is given values, not calls: reduce a built-in
+        # function in an argument before matching, so that a clause body
+        # asserting its argument asserts `a1` and not `str2psi("a1")`.
+        # Asked once for the call, not once per clause: the arguments are the
+        # same for every clause, and reducing them again on each is work the
+        # answer does not depend on.
+        if not (defn is not None and hasattr(self, 'non_strict_set')
+                and defn in self.non_strict_set):
+            from wild_life.built_ins import (_try_eval_string_func as _tesf_pa,
+                                              _try_eval_arith_to_term as _teat_pa)
+            from wild_life.data_structures import (
+                NON_STRICT_TERM as _NST_pa)
+            for _k_pa, _a_pa in list(thegoal.attr_list.items()):
+                _a_pa_d = _a_pa.deref()
+                _ev_pa = _tesf_pa(_a_pa_d, self)
+                if _ev_pa is not None and _ev_pa is not _a_pa_d:
+                    # Trailed: `X.nom` is whatever X has now, and a backtrack
+                    # that gives X a different value must give the goal its
+                    # feature term back rather than leave it holding the one
+                    # read from the value before.
+                    self.unifier.set_attr(thegoal, _k_pa, _ev_pa)
+                    continue
+                # An expression handed to a strict call is asked for its
+                # value, whatever it was written as: `p(X:(1+2))` leaves X
+                # worth 3, and everything reading X from then on reads 3.
+                if (_a_pa_d.attr_list and _a_pa_d.value is None
+                        and not (_a_pa_d.flags & _NST_pa)
+                        and _a_pa_d.type is not None
+                        and _a_pa_d.type.keyword is not None
+                        and _a_pa_d.type.keyword.symbol in _STRICT_ARITH_SYMS):
+                    _teat_pa(_a_pa_d, self)
+
         # Multiple clauses → set up choice point for first, then proceed.
         # Record cut_barrier BEFORE pushing the multi-clause choice point so
         # that '!' inside the clause body only cuts choices that belong to
@@ -1928,33 +1967,6 @@ class Engine:
         _prev_no_arith = getattr(self, 'no_arith_eval', False)
         if _non_strict:
             self.no_arith_eval = True
-        else:
-            # A strict predicate is given values, not calls: reduce a built-in
-            # function in an argument before matching, so that a clause body
-            # asserting its argument asserts `a1` and not `str2psi("a1")`.
-            from wild_life.built_ins import (_try_eval_string_func as _tesf_pa,
-                                              _try_eval_arith_to_term as _teat_pa)
-            for _k_pa, _a_pa in list(thegoal.attr_list.items()):
-                _a_pa_d = _a_pa.deref()
-                _ev_pa = _tesf_pa(_a_pa_d, self)
-                if _ev_pa is not None and _ev_pa is not _a_pa_d:
-                    # Trailed: `X.nom` is whatever X has now, and a backtrack
-                    # that gives X a different value must give the goal its
-                    # feature term back rather than leave it holding the one
-                    # read from the value before.
-                    self.unifier.set_attr(thegoal, _k_pa, _ev_pa)
-                    continue
-                # An expression handed to a strict call is asked for its
-                # value, whatever it was written as: `p(X:(1+2))` leaves X
-                # worth 3, and everything reading X from then on reads 3.
-                from wild_life.data_structures import (
-                    NON_STRICT_TERM as _NST_pa)
-                if (_a_pa_d.attr_list and _a_pa_d.value is None
-                        and not (_a_pa_d.flags & _NST_pa)
-                        and _a_pa_d.type is not None
-                        and _a_pa_d.type.keyword is not None
-                        and _a_pa_d.type.keyword.symbol in _STRICT_ARITH_SYMS):
-                    _teat_pa(_a_pa_d, self)
         mark = self.trail.mark()
         ok = self.unifier.unify(thegoal, head)
         if _non_strict:

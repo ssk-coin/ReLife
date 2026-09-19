@@ -34,6 +34,9 @@ Options
   --test-dir DIR      Directory containing the test suite (default: tests_original).
   --log FILE          Write a summary log to FILE (like check.log).
   --timeout SECS      Per-test timeout in seconds (default: 20).
+
+A test that is a timing benchmark rather than a feature check is given
+its own longer limit; see LONG_TESTS.
 """
 
 from __future__ import annotations
@@ -76,6 +79,14 @@ def _filter_stderr(text: str) -> str:
 # Single test runner
 # ---------------------------------------------------------------------------
 
+# Tests whose point is how much work the interpreter gets through rather
+# than what it answers.  z_power_4 runs 4^9 additions on purpose, so the
+# limit that keeps the rest of the suite brisk is not the right one for it.
+LONG_TESTS: dict = {
+    "z_power_4": 180,
+}
+
+
 def run_one(
     name: str,
     test_dir: Path,
@@ -88,6 +99,7 @@ def run_one(
     -------
     (name, out_ok, err_ok, out_diff, err_diff)
     """
+    timeout = max(timeout, LONG_TESTS.get(name, 0))
     lf_path   = test_dir / "LF"   / f"{name}.lf"
     in_path   = test_dir / "IN"   / f"{name}.in"
     refout    = test_dir / "REFOUT"  / f"{name}.refout"

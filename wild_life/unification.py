@@ -645,6 +645,10 @@ class Unifier:
         # If we are already in the process of unifying this exact pair of
         # canonical psi-terms (via a circular attr chain), assume they can be
         # unified and return True immediately to break the cycle.
+        # Only a term with features can come round to itself, so a pair
+        # without any needs no guarding against it.
+        if not u.attr_list and not v.attr_list:
+            return self._unify_impl_inner(u, v)
         _iu = id(u)
         _iv = id(v)
         _pair_key = (_iu, _iv) if _iu < _iv else (_iv, _iu)
@@ -688,7 +692,9 @@ class Unifier:
         # term — asserting `b(A & int,S).` with A bound to real keeps
         # `real & int` in the database — and unifying against it has to use the
         # meet of the two sides, so that b(C,D) answers C = int.
-        if self.engine is not None and WL.and_sym is not None:
+        _and_sym = WL.and_sym
+        if (self.engine is not None and _and_sym is not None
+                and (u.type is _and_sym or v.type is _and_sym)):
             from wild_life.data_structures import QUOTED_TRUE as _QT_CJ, \
                 NON_STRICT_TERM as _NST_CJ
             from wild_life.built_ins import _eval_and_conjunction as _eac
@@ -920,8 +926,7 @@ class Unifier:
             _skip_arith = (getattr(self.engine, 'no_arith_eval', False)
                            if self.engine else False) or bool(u.flags & _NST_BIND)
             if self.engine is not None and not u_is_var and not _skip_arith:
-                _arith_ops = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
-                                        'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
+                _arith_ops = _ARITH_OP_SYMS
                 _sym = u.type.keyword.symbol if u.type and u.type.keyword else ''
                 if _sym in _arith_ops:
                     try:
@@ -946,14 +951,14 @@ class Unifier:
             # Non-strict context: mark the arithmetic term so display doesn't evaluate it
             if _skip_arith and u.type and u.type.keyword:
                 _sym2 = u.type.keyword.symbol
-                _arith_ops2 = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
-                                         'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
-                from wild_life.inference import (
-                    _arith_is_settled as _ais_nst)
-                if _sym2 in _arith_ops2 and _ais_nst(u):
-                    from wild_life.data_structures import NON_STRICT_TERM as _NST
-                    self.trail.trail_psi(u, 'flags')
-                    u.flags |= _NST
+                if _sym2 in _ARITH_OP_SYMS:
+                    from wild_life.inference import (
+                        _arith_is_settled as _ais_nst)
+                    if _ais_nst(u):
+                        from wild_life.data_structures import (
+                            NON_STRICT_TERM as _NST)
+                        self.trail.trail_psi(u, 'flags')
+                        u.flags |= _NST
             # Sort-constrained variable (v) vs ground/non-variable (u):
             # enforce the sort constraint — u's type must be a sub-sort of v's sort.
             if v_is_sort_var:
@@ -2014,6 +2019,10 @@ def _exec_delay_goal_sync(goal: PsiTerm, eng) -> None:
     from wild_life.data_structures import GoalType as _GT
     from wild_life.inference import _DEFRULES as _defrules_sentinel
     eng.push_goal(_GT.PROVE, goal, _defrules_sentinel, None)
+
+
+_ARITH_OP_SYMS = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+                            'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
 
 
 def _is_dot_access(t: PsiTerm) -> bool:
