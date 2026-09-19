@@ -410,9 +410,13 @@ def run_repl(
                 break
 
             if sort == ERROR:
-                sys.stderr.write(f"*** Syntax error: {line_stripped!r}\n")
+                # Say what the reader found, in the words it would have used
+                # had it been reading a file.
+                from wild_life import parser_ as _parser_mod
                 sys.stderr.write(
-                    "    (Hint: facts end with '.' and queries end with '?')\n")
+                    _parser_mod.last_parse_error
+                    or "*** Syntax error: bad expression"
+                       f" (near line {repl_line_number})\n")
                 _write_prompt(depth)
                 continue
 

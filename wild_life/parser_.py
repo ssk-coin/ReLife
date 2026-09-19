@@ -62,12 +62,21 @@ class Parser:
         self.ts = tokenizer          # トークナイザ
         self.stack: List[StackEntry] = []  # パーサスタック
         self.parse_ok: bool = True   # パースエラーフラグ
+        # What the reader would have written out had it been reading a file.
+        # Parsing a string keeps it instead, so that whoever asked for the
+        # parse says what it was rather than making up a message of its own.
+        self.error_message: Optional[str] = None
         # Variable bindings to inherit from outer query scopes.
         # Set after init_var_tree() in parse() so they survive the reset.
         self._inherited_vars: dict = inherited_vars or {}
 
         if not WL._initialized:
             init()
+
+    def _note_error(self, message: str) -> None:
+        """Keep the first thing that went wrong, for the caller to report."""
+        if self.error_message is None:
+            self.error_message = message
 
     # ==================== スタック操作 ====================
 
@@ -347,9 +356,11 @@ class Parser:
                             f"*** Syntax error: bad end of list\n"
                         )
                     else:
+                        self._note_error("*** Syntax error: bad end of list\n")
                         self.parse_ok = False
             else:
                 if self.ts.string_parse:
+                    self._note_error("*** Syntax error: bad symbol in list\n")
                     self.parse_ok = False
                 else:
                     sys.stderr.write(
@@ -441,6 +452,9 @@ class Parser:
                         break
                     elif not self.equ_tokch(t2, ','):
                         if self.ts.string_parse:
+                            self._note_error(
+                                "*** Syntax error: ',' expected in argument"
+                                f" list (near line {self.ts.line_count})\n")
                             self.parse_ok = False
                         else:
                             sys.stderr.write(
@@ -587,6 +601,8 @@ class Parser:
                                 t2 = self.ts.read_token()
                                 if not self.equ_tokch(t2, ')'):
                                     if self.ts.string_parse:
+                                        self._note_error(
+                                            "*** Syntax error: ')' missing\n")
                                         self.parse_ok = False
                                     else:
                                         sys.stderr.write(
@@ -633,6 +649,8 @@ class Parser:
         # スタックチェック
         if self.parse_ok and len(self.stack) != limit + 1:
             if self.ts.string_parse:
+                self._note_error("*** Syntax error: bad expression"
+                                 f" (near line {self.ts.line_count})\n")
                 self.parse_ok = False
             else:
                 sys.stderr.write("*** Syntax error: bad expression"
@@ -681,11 +699,12 @@ class Parser:
                 elif t.type is WL.final_dot:
                     kind = FACT
                 else:
+                    _msg = (f"*** Syntax error: expected '?' or '.' "
+                            f"but got '{t.type.symbol if t.type else '?'}'\n")
                     if not self.ts.string_parse:
-                        sys.stderr.write(
-                            f"*** Syntax error: expected '?' or '.' "
-                            f"but got '{t.type.symbol if t.type else '?'}'\n"
-                        )
+                        sys.stderr.write(_msg)
+                    else:
+                        self._note_error(_msg)
                     kind = ERROR
             else:
                 kind = QUERY  # EOF は暗黙の終了
@@ -711,6 +730,13 @@ class Parser:
 
 
 # ==================== 文字列からパース ====================
+
+# What the last parse_string() call went wrong on, as the reader would have
+# written it out.  A string parse keeps its diagnostics to itself so that
+# `parse/2` can report a status instead; the REPL reads this to say what the
+# reader found rather than inventing a message of its own.
+last_parse_error: Optional[str] = None
+
 
 def parse_string(s: str, line_num: int = 0,
                  inherited_vars: dict = None) -> Tuple[Optional[PsiTerm], int, dict]:
@@ -739,7 +765,10 @@ def parse_string(s: str, line_num: int = 0,
     # names in a nested query reuse the existing psi-term objects.
     # (The Parser sets them AFTER init_var_tree() in its parse() call.)
     p = Parser(ts, inherited_vars=inherited_vars)
+    global last_parse_error
+    last_parse_error = None
     term, kind = p.parse()
+    last_parse_error = p.error_message
     if not p.parse_ok:
         return None, ERROR, {}
     # Return only variables that were ACTUALLY USED in the parsed text.
