@@ -3281,10 +3281,17 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
     if id(t) in _active_sync:
         return None
     _active_sync.add(id(t))
+    # Working a call out here answers what it is worth; the alternatives met
+    # on the way — a disjunction settling to its first element and keeping
+    # the rest — belong to that working out, not to any goal, and a
+    # backtrack into one would take the engine on from a goal it never
+    # proved.
+    _cs_sync = eng.choice_stack
     try:
         return _eval_user_func_sync_inner(t, eng, _depth)
     finally:
         _active_sync.discard(id(t))
+        eng.choice_stack = _cs_sync
 
 
 def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm]:

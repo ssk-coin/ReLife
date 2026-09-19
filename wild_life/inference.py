@@ -763,6 +763,10 @@ def _rule_match_status(head: 'PsiTerm', call: 'PsiTerm', eng):
     # under c, so no narrowing could ever make that rule fit.  Asked on copies,
     # so that nothing the call carries is narrowed by the question.
     _never_mark = eng.trail.mark()
+    # Asking the question must leave nothing behind: unifying copies can
+    # settle a disjunction and keep its other alternatives as choice points,
+    # and those belong to a question, not to a goal anything proved.
+    _never_cs = eng.choice_stack
     _was_firing = getattr(eng, '_in_fire_delay', False)
     # The question is asked by unifying copies, and a delay rule firing on one
     # of them would be an answer written out to the user: manual8's
@@ -790,12 +794,14 @@ def _rule_match_status(head: 'PsiTerm', call: 'PsiTerm', eng):
         eng._in_fire_delay = _was_firing
         eng.unifier._skip_prototypes = _was_skipping
         eng.trail.undo_to(_never_mark)
+        eng.choice_stack = _never_cs
 
     blockers: list = []
     bindings: dict = {}
     stuck = [False]
     seen: set = set()
     mark = eng.trail.mark()
+    _match_cs = eng.choice_stack
     try:
         head_map: dict = {}
         asked: dict = {}
@@ -816,6 +822,7 @@ def _rule_match_status(head: 'PsiTerm', call: 'PsiTerm', eng):
                 return 'never'
     finally:
         eng.trail.undo_to(mark)
+        eng.choice_stack = _match_cs
     if blockers:
         return blockers
     return 'stuck' if stuck[0] else 'ready'
@@ -2077,18 +2084,36 @@ class Engine:
             self.choice_stack = _cs_head
 
     def _head_call_is_settled(self, call: 'PsiTerm') -> bool:
-        """Whether some rule of call's function fits it as it stands."""
+        """Whether the rule that applies to the call is already settled.
+
+        The rule is the first head that fits, so the call is settled only
+        when the first rule no narrowing could ever rule out is one that
+        fits it as it stands.  `can_catch(Y:{projectile;disease})` is not:
+        `can_catch(human_disease)` comes first and would apply once Y is a
+        human_disease, so reducing it now through the last rule would answer
+        a question the clause has not asked — and would lose what the head
+        says about Y along the way.
+        """
         rules = call.type.rule if call.type is not None else None
         if not rules:
             return False
+        # An argument that is still a disjunction is not settled: it stands
+        # for whichever alternative is taken, and which rule applies depends
+        # on that.  `can_catch(Y:{projectile;disease})` waits.
+        from wild_life.built_ins import _term_contains_disjunction as _tcd_h
+        for _av_h in call.attr_list.values():
+            if _tcd_h(_av_h, self):
+                return False
         for _h, _b in rules:
             if _h is None or _b is None:
                 continue
             _hd = _h.deref()
             if set(_hd.attr_list.keys()) - set(call.attr_list.keys()):
                 continue
-            if _rule_match_status(_hd, call, self) == 'ready':
-                return True
+            _status = _rule_match_status(_hd, call, self)
+            if _status == 'never':
+                continue
+            return _status == 'ready'
         return False
 
     def backtrack_and_succeed(self) -> bool:
