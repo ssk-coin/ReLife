@@ -7551,6 +7551,18 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
             # that points back at itself the way `X <- s(1+4,X)` does.
             rhs_term = _substitute_old_self(rhs_term, lhs, eng)
 
+    # `X <- T` points X at T rather than taking a copy of what T holds, so a
+    # later `T <- U` moves X along with it: boites keeps a list of pointers
+    # into a configuration and deletes each in turn with `L <- Tl`, and a
+    # pointer in front has to follow the one behind it out of the list.  A
+    # copy would leave it holding the cell that was just removed.  A number
+    # is written in as the number it is, since there is nothing to follow.
+    if _backtrackable and not ok_arith and rhs_term.deref() is not lhs:
+        eng.trail.trail_psi(lhs, 'coref')
+        lhs.coref = rhs_term
+        eng.unifier._wakeup_resid(lhs, lhs)
+        return True
+
     # Both forms update the dereferenced endpoint in place, so that every
     # variable pointing into this chain sees the new value; each changed field
     # is trailed, so a failed query leaves X the 3 it was.
