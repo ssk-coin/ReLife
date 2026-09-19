@@ -2075,7 +2075,60 @@ class Engine:
             head_orig._wl_has_dot = _hd
         if _hd:
             self._resolve_head_feature_terms(head)
+        if head.attr_list and head_orig.__dict__.get('_wl_has_call'):
+            self._bind_settled_head_calls(head)
         return True
+
+    def _bind_settled_head_calls(self, head: 'PsiTerm') -> None:
+        """Work out the calls a matched head carries, now that it is matched.
+
+        `reduit(@(…), remet(R1,R2))` hands the caller what remet answers, and
+        R1 and R2 are what the match has just bound.  The call's own node is
+        bound to the value, so the caller's variable — which the match made
+        one with that node — reads the value too rather than the call.
+
+        A call the match has not settled is left as it is: it is still
+        waiting for what a later goal will bind.
+        """
+        from wild_life.built_ins import (_is_user_function as _iuf_b,
+                                         _try_eval_any_func as _teaf_b)
+        # As in _reduce_settled_head_calls: a reduction can leave choice
+        # points behind that belong to nothing.
+        _cs_b = self.choice_stack
+        seen: set = set()
+
+        def walk(t: 'PsiTerm', depth: int) -> None:
+            if depth > 40:
+                return
+            td = t.deref()
+            if id(td) in seen:
+                return
+            seen.add(id(td))
+            if _iuf_b(td) and self._head_call_is_settled(td):
+                evaled = _teaf_b(td, self)
+                if evaled is not None and evaled.deref() is not td:
+                    self.unifier.bind(td, evaled)
+                    walk(evaled, depth + 1)
+                    return
+                if evaled is None:
+                    # A call the engine has to run — one whose rule carries a
+                    # guard, say — is put on the goal stack and its node
+                    # pointed at the answer to come, so `test(gauss([], …))`
+                    # hands the caller what gauss works out.
+                    _c2 = PsiTerm(type_def=td.type)
+                    _c2.attr_list = dict(td.attr_list)
+                    _c2.flags = td.flags
+                    _v2 = PsiTerm(type_def=self.wl.top)
+                    self.unifier.bind(td, _v2)
+                    self.push_goal(GoalType.EVAL, _c2, _v2, _c2.type.rule)
+                    return
+            for key in list(td.attr_list.keys()):
+                walk(td.attr_list[key], depth + 1)
+
+        try:
+            walk(head, 0)
+        finally:
+            self.choice_stack = _cs_b
 
     def _resolve_head_feature_terms(self, head: 'PsiTerm') -> None:
         """Read the `T.F` terms a matched clause head carries.
