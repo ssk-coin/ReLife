@@ -490,19 +490,77 @@ class Unifier:
                 # One shared var_map per declaration, so variables the
                 # prototype shares across features stay shared in the copies.
                 var_map: dict = {}
+                _fresh_arith = []
                 for key, proto_val in proto.items():
                     copy = copy_term(proto_val, var_map)
                     existing = t.attr_list.get(key)
-                    if existing is not None and not self.unify(existing, copy):
-                        return False
+                    if existing is not None:
+                        # A sum is read as the equation it states, not matched
+                        # against the feature shape for shape: `today => A + Y`
+                        # meeting 1992 says what A and Y come to between them.
+                        if (self.engine is not None
+                                and self._is_open_arith_proto(copy)):
+                            if not self._proto_arith_eq(existing, copy):
+                                return False
+                            continue
+                        if not self.unify(existing, copy):
+                            return False
                     # Point the feature at the prototype's own node, so features
                     # the prototype shares stay shared on the term: every feature
                     # of `:: square(side => S, length => S, width => S)` is one
                     # node even where the term already carried equal values.
                     self.set_attr(t, key, copy)
+                    if existing is None:
+                        _fresh_arith.append(key)
+                # A prototype feature written as a sum — `:: person(age => A,
+                # yob => Y, today => A + Y)` — is what a person's today comes
+                # to, not an expression the term carries around.  The term is
+                # given a number waiting to be worked out, and the equation
+                # waits on the features that would settle it.
+                for key in _fresh_arith:
+                    if not self._constrain_proto_arith(t, key):
+                        return False
+            t._proto_applied = True
             return True
         finally:
             self._applying_proto.discard(id(t))
+
+    def _is_open_arith_proto(self, cell: PsiTerm) -> bool:
+        """Whether a prototype feature is an arithmetic expression."""
+        from wild_life.built_ins import _ARITH_OPS_SET as _AOS_pa
+        from wild_life.data_structures import NON_STRICT_TERM as _NST_pa
+        cell = cell.deref()
+        sym = cell.type.keyword.symbol if (cell.type and cell.type.keyword) else ''
+        return (sym in _AOS_pa and cell.value is None and bool(cell.attr_list)
+                and not (cell.flags & _NST_pa))
+
+    def _proto_arith_eq(self, target: PsiTerm, expr: PsiTerm) -> bool:
+        """State a prototype's arithmetic feature as an equation.
+
+        `=` is what knows how to read a sum: it works the sum out when the
+        features it names are known and waits on them when they are not,
+        which is what makes a person's today a number rather than a term.
+        """
+        from wild_life.built_ins import bi_unify as _bu_pa
+        eq_defn = (getattr(WL, 'eqsym', None)
+                   or WL.syntax_module.symbol_table.get('='))
+        if eq_defn is None:
+            return True
+        eq = PsiTerm(type_def=eq_defn)
+        eq.attr_list = {'1': target, '2': expr}
+        return bool(_bu_pa(eq, self.engine))
+
+    def _constrain_proto_arith(self, t: PsiTerm, key: str) -> bool:
+        """Turn an arithmetic prototype feature into the equation it states."""
+        if self.engine is None:
+            return True
+        cell = t.attr_list.get(key)
+        if cell is None or not self._is_open_arith_proto(cell):
+            return True
+        cell = cell.deref()
+        var = PsiTerm(type_def=WL.top)
+        self.set_attr(t, key, var)
+        return self._proto_arith_eq(var, cell)
 
     def _prove_sort_condition(self, t: PsiTerm) -> bool:
         """Prove the membership condition a conditional sort carries.
@@ -764,6 +822,10 @@ class Unifier:
                     if not self._unify_types(u, v):
                         return False
                 self.bind(v, u)   # v.coref = u; v.deref() = u (sort kept)
+                # Two variables becoming one variable are waiting for
+                # everything either of them waited for: `A = B + C, D = E + F,
+                # A = D` leaves A waiting on two sums, and shows two tildes.
+                self._carry_resids(v, u)
                 self._wakeup_resid(u, v)
             elif (not v_is_var and u.value is None and not u.attr_list
                     and u.type is not None and u.type is not WL.top
@@ -882,16 +944,29 @@ class Unifier:
                     _var_map: dict = {}
                     _proto_copies = {k: copy_term(pv, _var_map)
                                      for k, pv in _proto.items()}
+                    _proto_fresh: list = []
                     for _pk, _pc in _proto_copies.items():
                         if _pk in _v_canon.attr_list:
                             # Unify existing attr value with prototype copy to
                             # propagate constraints (e.g. width=4 → S=4 → L*4=16 → L=4)
                             _existing_ref = _v_canon.attr_list[_pk]
-                            self.unify(_existing_ref, _pc)
+                            if (self.engine is not None
+                                    and self._is_open_arith_proto(_pc)):
+                                self._proto_arith_eq(_existing_ref, _pc)
+                            else:
+                                self.unify(_existing_ref, _pc)
                         else:
                             # Add missing attr from fresh prototype copy
                             self.set_attr(_v_canon, _pk, _pc)
                             self._settle_disjunction(_pc)
+                            _proto_fresh.append(_pk)
+                    # A prototype feature written as a sum — `:: person(age =>
+                    # A, yob => Y, today => A + Y)` — is what a person's today
+                    # comes to, not an expression the term carries around.
+                    for _pk in _proto_fresh:
+                        if not self._constrain_proto_arith(_v_canon, _pk):
+                            return False
+                    _v_canon._proto_applied = True
                 # The sorts named further down the bound term get their
                 # prototypes too: `X = f(titi)` hands X a titi with its arg on
                 # it, the same as `X = titi` does.
@@ -1253,6 +1328,25 @@ class Unifier:
         # 値の単一化 (数値・文字列)
         if not self._unify_values(u, v):
             return False
+
+        # A term written with a sort that has a `:: Sort(attrs)` prototype
+        # carries that prototype: `Joe = person(today => 1992)` is a person
+        # with an age and a yob as much as the first `person(...)` was, and
+        # says of this one too that its today is its age plus its yob.  Once
+        # per term — saying it twice of the same term would state the same
+        # equation twice over.
+        if not self._skip_prototypes:
+            for _side in (u, v):
+                if (_side.attr_list and _side.type is not None
+                        and _side.type is not WL.top
+                        and not getattr(_side, '_proto_applied', False)
+                        and getattr(_side.type, 'prototype_attrs', None)):
+                    if not self._apply_prototype_attrs(_side):
+                        return False
+            u = u.deref()
+            v = v.deref()
+            if u is v:
+                return True
 
         # 特性の単一化
         if not self._unify_attrs(u, v):
@@ -1918,6 +2012,24 @@ class Unifier:
                 # In C Wild Life, delay fires for inner terms before outer ones.
                 self._fire_delay_rules_for_subterms(sub, visited)
                 self._fire_delay_rules(sub, sub_type)
+
+    def _carry_resids(self, src: PsiTerm, dst: PsiTerm) -> None:
+        """Move what one variable is waiting for onto the one it becomes."""
+        if not src.resid or src is dst:
+            return
+        if src.value is not None or src.attr_list:
+            return
+        _have = {id(r.goal) for r in (dst.resid or ()) if getattr(r, 'goal', None)}
+        _new = [r for r in src.resid
+                if getattr(r, 'goal', None) is not None and id(r.goal) not in _have]
+        if not _new:
+            return
+        if dst.resid is None:
+            self.trail.trail_psi(dst, 'resid')
+            dst.resid = list(_new)
+        else:
+            self.trail.trail_copy(dst, 'resid')
+            dst.resid = list(dst.resid) + _new
 
     def _wakeup_resid(self, var: PsiTerm, val: PsiTerm):
         """残留ゴールを覚醒させる
