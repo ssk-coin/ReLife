@@ -3647,6 +3647,10 @@ def _eval_children_func(t: 'PsiTerm', eng) -> 'PsiTerm':
     nil_term = PsiTerm(type_def=wl.nil)
     if defn is None:
         return nil_term
+    # A number or a string is a sort with nothing under it: `children(23.3)`
+    # asks about that one real, not about real, whose child is int.
+    if arg.value is not None:
+        return nil_term
     child_defs = getattr(defn, 'children', [])
     lst = nil_term
     for cd in reversed(child_defs):
