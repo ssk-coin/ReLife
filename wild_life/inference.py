@@ -1016,6 +1016,21 @@ def _collect_embedded_func_goals(t: 'PsiTerm', eng, visited: set) -> list:
                 eng.unifier.set_attr(parent, key, _cell_c)
                 continue
 
+        # A cond written into a body stands for the branch it picks, wherever
+        # it sits: `const(T,L,R) -> tree(Root, cond(Left :== list,
+        # insforet(L), append(insforet(L),Left)), …)` hands back the branch
+        # the sort comparison chooses.  One nothing settles yet is left
+        # standing, and neither branch is worked out on the way past.
+        from wild_life.built_ins import _is_cond_builtin_local as _icb_c
+        if _icb_c(child):
+            from wild_life.built_ins import _eval_body_sync as _ebs_c
+            _cv_c = _ebs_c(child, eng, 0)
+            if _cv_c is not None and _cv_c.deref() is not child:
+                eng.unifier.set_attr(parent, key, _cv_c)
+                work_queue.append((parent, key))
+                examined.discard(id(child))
+            continue
+
         if _is_user_function(child):
             # Replace with fresh variable; record EVAL goal.
             v = PsiTerm(type_def=eng.wl.top)
