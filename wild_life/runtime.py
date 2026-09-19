@@ -660,7 +660,6 @@ class WildLifeRuntime:
         op(700,  OT.XFX, "=..",    enumerable=False)  # univ (Prolog)
         op(1200, OT.XFX, "-->",    enumerable=False)  # DCG rule
         op(1200, OT.FX,  "?-",     enumerable=False)  # Prolog query prefix
-        op(200,  OT.XFX, "**",     enumerable=False)  # power (Prolog)
         op(400,  OT.YFX, "rem",    enumerable=False)  # remainder (Prolog)
         op(600,  OT.XFX, "=>",     enumerable=False)  # feature assignment
         op(500,  OT.FX,  "+",      enumerable=False)  # unary plus
@@ -721,7 +720,6 @@ class WildLifeRuntime:
         new_bi(syn, "/",   DefType.FUNCTION, bi.c_div)
         new_bi(syn, "//",  DefType.FUNCTION, bi.c_idiv)
         new_bi(syn, "mod", DefType.FUNCTION, bi.c_mod)
-        new_bi(syn, "**",  DefType.FUNCTION, bi.c_power)
         new_bi(syn, "^",   DefType.FUNCTION, bi.c_power)
         new_bi(bim, "sqrt",  DefType.FUNCTION, bi.c_sqrt)
         new_bi(bim, "sin",   DefType.FUNCTION, bi.c_sin)

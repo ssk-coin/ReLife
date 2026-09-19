@@ -22,7 +22,7 @@ DOTDOT = ": "
 
 import math as _math
 
-_ARITH_DISPLAY_SYMS = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+_ARITH_DISPLAY_SYMS = frozenset(('+', '-', '*', '/', '//', 'mod', '^',
                                  'max', 'min', 'abs', 'sqrt', 'floor', 'ceiling',
                                  '/\\', '\\/', 'xor', '>>', '<<'))
 
@@ -87,7 +87,6 @@ def _eval_pure_arith(t: 'PsiTerm', wl, _depth: int = 0):
         '/': lambda a, b: a / b if b != 0 else None,
         '//': lambda a, b: _int_div(a, b) if b != 0 else None,
         'mod': lambda a, b: float(int(a) % int(b)) if b != 0 else None,
-        '**': lambda a, b: a ** b,
         '^': lambda a, b: a ** b,
         'max': lambda a, b: max(a, b),
         'min': lambda a, b: min(a, b),

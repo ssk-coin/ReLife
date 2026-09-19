@@ -87,7 +87,7 @@ def _get_sym(t: PsiTerm) -> str:
 
 # Binary and unary operators that return a real number.
 _ARITH_OPS_SET = frozenset((
-    '+', '-', '*', '/', '//', 'mod', '**', '^',
+    '+', '-', '*', '/', '//', 'mod', '^',
     'max', 'min', 'abs', 'sqrt', 'sin', 'cos', 'tan',
     'exp', 'log', 'floor', 'ceiling', 'truncate', 'round',
     # Bitwise operators (also produce numeric results)
@@ -681,7 +681,7 @@ def _try_eval_arith_to_term(t: PsiTerm, eng) -> Optional[PsiTerm]:
     t = t.deref()
     if t.value is not None and not (t.type and t.type.keyword and
                                     t.type.keyword.symbol in ('+','-','*','/','//',
-                                                               'mod','**','^','max','min',
+                                                               'mod','^','max','min',
                                                                'abs','sqrt','sin','cos','tan',
                                                                'exp','log','floor','ceiling')):
         return None  # already a number, no evaluation needed
@@ -1668,7 +1668,7 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
     # Skip arithmetic evaluation for terms with NON_STRICT_TERM flag: these are
     # expressions passed to non-strict predicates (e.g. `write(1+2)` where the
     # argument was labeled in a non-strict context); they must be printed as-is.
-    _arith_binary_ops = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+    _arith_binary_ops = frozenset(('+', '-', '*', '/', '//', 'mod', '^',
                                    'max', 'min'))
     _arith_unary_ops = frozenset(('abs', 'sqrt', 'sin', 'cos', 'tan', 'exp',
                                   'log', 'floor', 'ceiling', 'round',
@@ -2399,7 +2399,7 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     # Binary operators — early exit if sym is not a known arithmetic binary op.
     # This prevents infinite recursion on cyclic terms like cons(A,A) where
     # the 'cons' symbol is not arithmetic but the pre-check would recurse forever.
-    _arith_binary_syms = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+    _arith_binary_syms = frozenset(('+', '-', '*', '/', '//', 'mod', '^',
                                      'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
     # The handlers further down (strlen, asc, int, real and the 0-ary
     # cpu_time / real_time / genint) sit past this exit, so they are named
@@ -2417,7 +2417,6 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         '-': lambda a, b: a - b,
         '*': lambda a, b: a * b,
         'mod': lambda a, b: float(int(a) % int(b)) if b != 0 else 0.0,
-        '**': lambda a, b: a ** b,
         '^': lambda a, b: a ** b,
         'max': lambda a, b: max(a, b),
         'min': lambda a, b: min(a, b),
@@ -3924,7 +3923,7 @@ def _eval_parse_func(t: 'PsiTerm', eng) -> Optional['PsiTerm']:
     # number (3) during printing.  This matches C Wild Life behaviour where
     # parse() returns structural terms, not computed values.
     from wild_life.data_structures import NON_STRICT_TERM as _NST_P
-    _arith_syms_p = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+    _arith_syms_p = frozenset(('+', '-', '*', '/', '//', 'mod', '^',
                                'max', 'min', 'abs', 'sqrt', 'floor', 'ceiling',
                                'round', 'truncate', 'exp', 'log', 'sin', 'cos', 'tan'))
 
@@ -4576,7 +4575,7 @@ def _eval_arith_psi(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
         return None
 
     # ── binary operators ─────────────────────────────────────────────────────
-    _ops2 = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+    _ops2 = frozenset(('+', '-', '*', '/', '//', 'mod', '^',
                        'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
     _ops1 = frozenset(('-', 'abs', 'sqrt', 'sin', 'cos', 'tan',
                        'asin', 'acos', 'atan', 'exp', 'log',
@@ -4623,7 +4622,7 @@ def _eval_arith_psi(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
                 '/': lambda a, b: a / b if b != 0 else float('inf'),
                 '//': lambda a, b: _int_div(a, b) if b != 0 else 0.0,
                 'mod': lambda a, b: float(int(a) % int(b)) if b != 0 else 0.0,
-                '**': lambda a, b: a ** b, '^': lambda a, b: a ** b,
+                '^': lambda a, b: a ** b,
                 'max': lambda a, b: max(a, b), 'min': lambda a, b: min(a, b),
                 '/\\': lambda a, b: float(int(a) & int(b)),
                 '\\/': lambda a, b: float(int(a) | int(b)),
@@ -4721,7 +4720,7 @@ def _evaluate_result_for_display(t: PsiTerm, eng, _depth: int = 0) -> PsiTerm:
 
     # ── arithmetic op (possibly with disjunction operands) ───────────────────
     sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
-    _ops = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+    _ops = frozenset(('+', '-', '*', '/', '//', 'mod', '^',
                       'max', 'min', '/\\', '\\/', 'xor', '>>', '<<',
                       'abs', 'sqrt', 'sin', 'cos', 'tan',
                       'asin', 'acos', 'atan', 'exp', 'log',
@@ -8714,7 +8713,7 @@ _BUILTIN_FUNCTION_SYMS = frozenset((
     'strcon', 'strlen', 'substr', 'chr', 'asc', 'upper', 'lower',
     'root_sort', 'sort', 'features', 'parents', 'children',
     'least_sorts', 'glb', 'lub', 'copy_term', 'eval',
-    '+', '-', '*', '/', '//', 'mod', '**', '^', 'min', 'max', 'abs',
+    '+', '-', '*', '/', '//', 'mod', '^', 'min', 'max', 'abs',
     'sqrt', 'exp', 'log', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
     'floor', 'ceiling', 'round', 'truncate',
     '>', '<', '>=', '=<', '=:=', '=\\=',

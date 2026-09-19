@@ -26,7 +26,7 @@ from wild_life.unification import (
 # ─────────────────────────────────────────────────────────────────────────────
 
 _ARITH_OPS_NON_STRICT = frozenset((
-    '+', '-', '*', '/', '//', 'mod', '**', '^',
+    '+', '-', '*', '/', '//', 'mod', '^',
     'max', 'min', 'abs', 'sqrt', 'floor', 'ceiling',
     'round', 'truncate', 'exp', 'log', 'sin', 'cos', 'tan',
 ))
@@ -113,7 +113,7 @@ _WRITE_BUILTINS = frozenset((
 
 
 _STRICT_ARITH_SYMS = frozenset((
-    '+', '-', '*', '/', '//', 'mod', '**', '^', 'max', 'min',
+    '+', '-', '*', '/', '//', 'mod', '^', 'max', 'min',
     '/\\', '\\/', 'xor', '>>', '<<'))
 
 
@@ -3160,7 +3160,7 @@ class Engine:
                                 and _bd_v_d.type is not None and _bd_v_d.type.keyword is not None):
                             _bd_sym = _bd_v_d.type.keyword.symbol
                             _bd_arith_ops = frozenset(('+', '-', '*', '/', '//', 'mod',
-                                                        '**', '^', 'max', 'min',
+                                                        '^', 'max', 'min',
                                                         '/\\', '\\/', 'xor', '>>', '<<'))
                             if _bd_sym in _bd_arith_ops:
                                 try:

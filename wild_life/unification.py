@@ -2039,7 +2039,7 @@ def _exec_delay_goal_sync(goal: PsiTerm, eng) -> None:
     eng.push_goal(_GT.PROVE, goal, _defrules_sentinel, None)
 
 
-_ARITH_OP_SYMS = frozenset(('+', '-', '*', '/', '//', 'mod', '**', '^',
+_ARITH_OP_SYMS = frozenset(('+', '-', '*', '/', '//', 'mod', '^',
                             'max', 'min', '/\\', '\\/', 'xor', '>>', '<<'))
 
 
