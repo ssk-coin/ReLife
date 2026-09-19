@@ -2461,6 +2461,18 @@ class Engine:
                         # discards the argument.  Without this, bodify_list(B)
                         # would run on the goal stack with B still unbound.
                         _eval_embedded_user_funcs(_attr, self, 0, set())
+                        # The argument may be a call in its own right: a
+                        # built-in written for its value — `sum(map(F, L))`
+                        # asks sum for the list map makes — is reduced too.
+                        from wild_life.built_ins import (
+                            _try_eval_any_func as _teaf_pf,
+                            _is_user_function as _iuf_pf)
+                        if (_attr.value is None and _attr.type is not None
+                                and _attr.type._builtin_func is not None
+                                and not _iuf_pf(_attr)):
+                            _ev_any = _teaf_pf(_attr, self)
+                            if _ev_any is not None and _ev_any is not _attr:
+                                self.unifier.set_attr(funct, _key, _ev_any)
 
     def _suspend_call(self, funct, result, rules, free_vars) -> None:
         """Make a function call wait on the terms that would settle it.

@@ -2304,6 +2304,16 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
                     t_pre.attr_list[_k] = _computed
             else:
                 _evaled_arg = _try_eval_string_func(_vd, eng)
+                if (_evaled_arg is None and _vd.attr_list
+                        and not _is_user_function(_vd)):
+                    # An argument that is a built-in call of its own stands
+                    # for what it answers: `sum(map(F, L))` reads the list
+                    # map makes.  A call to a rule of the program's own is
+                    # left to the rules below, which put back what does not
+                    # match rather than reducing it where it stands.
+                    _evaled_arg = _try_eval_any_func(_vd, eng)
+                    if _evaled_arg is _vd:
+                        _evaled_arg = None
                 t_pre.attr_list[_k] = _evaled_arg if _evaled_arg is not None else _vd
         _cp_save = eng.choice_stack  # Save choice stack before user-func unification
         for _ri, (h0, b0) in enumerate(active):
@@ -3384,6 +3394,12 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
             # unify with LHS), rather than just evaluating sub-functions
             # in-place without the conjunction unification step.
             _ev = _eval_body_sync(_attr, eng, _depth + 1)
+        # A number that carries features is already its own value, and the
+        # bare number is less than the term is: `term_explore(2(2), Seen)`
+        # has a feature to count.
+        if (_ev is not None and _attr.value is not None and _attr.attr_list
+                and not _ev.deref().attr_list):
+            _ev = None
         if _ev is not None and _ev is not _attr:
             # Trailed: the value was worked out under bindings that a
             # later backtrack may undo, and a call left holding a stale
@@ -4448,6 +4464,11 @@ def _try_eval_any_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     # so calling it unconditionally is safe.
     ok, v = _eval_arith(td, eng)
     if ok:
+        # A number that carries features is already its own value, and the
+        # number on its own is less than the term is: `2(2)` handed to
+        # term_explore has a feature to count.
+        if td.value is not None and td.attr_list:
+            return None
         return _make_number(eng, v)
 
     return None
@@ -7660,6 +7681,13 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         rhs_term.value = val
     else:
         rhs_term = a2.deref()
+        # What is written in is a value, so a call is asked for the one it
+        # answers: `V <<- term_explore(X, Seen)` stores the count, not the
+        # call.  A call nothing can work out yet is stored as it stands.
+        if rhs_term.attr_list:
+            _rhs_ev = _try_eval_any_func(rhs_term, eng)
+            if _rhs_ev is not None and _rhs_ev.deref() is not rhs_term:
+                rhs_term = _rhs_ev.deref()
         if not _backtrackable:
             # `X <<- s([1+6],X)` reads X before it writes it, so the X inside
             # the new term is the 3 that was there — `s([7],3)`, not a term
@@ -7679,13 +7707,28 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         return True
 
     # Both forms update the dereferenced endpoint in place, so that every
-    # variable pointing into this chain sees the new value; each changed field
-    # is trailed, so a failed query leaves X the 3 it was.
-    eng.trail.trail_psi(lhs, 'value')
-    eng.trail.trail_psi(lhs, 'coref')
-    eng.trail.trail_psi(lhs, 'type')
-    eng.trail.trail_psi(lhs, 'attr_list')
-    eng.trail.trail_psi(lhs, 'flags')
+    # variable pointing into this chain sees the new value.  `<-` trails each
+    # changed field, so a failed query leaves X the 3 it was; `<<-` writes for
+    # good, which is what lets term_size count a term in one pass, fail back
+    # out of the counting, and still read the number it arrived at.
+    # `X <<- V` on a variable that stands for nothing yet makes a cell of its
+    # own — termsize's `V<<-@` calls it "an anonymous persistent term" — and
+    # what is written into such a cell stays written: term_size counts a term,
+    # fails back out of the counting to undo its marks, and still reads the
+    # number it arrived at.  Writing over a term that already holds something
+    # is an ordinary write, undone with everything else the query did.
+    _persistent = (not _backtrackable
+                   and (lhs.__dict__.get('_wl_persistent_cell', False)
+                        or (lhs.value is None and not lhs.attr_list
+                            and (lhs.type is None or lhs.type is eng.wl.top))))
+    if _persistent:
+        lhs._wl_persistent_cell = True
+    else:
+        eng.trail.trail_psi(lhs, 'value')
+        eng.trail.trail_psi(lhs, 'coref')
+        eng.trail.trail_psi(lhs, 'type')
+        eng.trail.trail_psi(lhs, 'attr_list')
+        eng.trail.trail_psi(lhs, 'flags')
     if ok_arith:
         lhs.value = val
         lhs.coref = None
@@ -9875,8 +9918,16 @@ def bi_map(goal: PsiTerm, eng) -> bool:
                 if str_result is not None:
                     results.append(str_result)
                 else:
-                    # Leave as unevaluated application term
-                    results.append(applied)
+                    # A rule of the program's own says what the function
+                    # answers: `map(term_explore(2 => Seen), FV)` asks
+                    # term_explore of each feature value.
+                    _uf = (_eval_user_func_sync(applied, eng, 0)
+                           if _is_user_function(applied) else None)
+                    if _uf is not None and _uf.deref() is not applied:
+                        results.append(_uf)
+                    else:
+                        # Leave as unevaluated application term
+                        results.append(applied)
             node = tail_ref if tail_ref is not None else wl.make_atom('nil', wl.bi_module)
         else:
             # Not a list — apply to the single element
