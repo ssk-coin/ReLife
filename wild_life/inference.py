@@ -702,6 +702,39 @@ def _mark_arith_vars_real(cond: 'PsiTerm', eng) -> None:
     walk(cond, False)
 
 
+def _term_depth(t: 'PsiTerm', limit: int = 40, _seen: frozenset = frozenset()) -> int:
+    """How far down a term's own structure goes, counted up to `limit`."""
+    t = t.deref()
+    if not t.attr_list or limit <= 0 or id(t) in _seen:
+        return 0
+    below = _seen | {id(t)}
+    return 1 + max(_term_depth(v, limit - 1, below) for v in t.attr_list.values())
+
+
+def _copy_to_depth(t: 'PsiTerm', var_map: dict, depth: int) -> 'PsiTerm':
+    """A copy of t down to `depth`, sharing whatever lies below that.
+
+    Matching only ever reaches as far down as the pattern goes, so a copy
+    made to ask whether a pattern could fit needs to go no further: the
+    cells below are never narrowed, only pointed at.  This is what keeps
+    the question about `[L|BigIn]` from walking a hundred-cell bignum.
+    """
+    td = t.deref()
+    if depth <= 0 or not td.attr_list:
+        return copy_term(td, var_map) if not td.attr_list else td
+    _seen = var_map.get(id(td))
+    if _seen is not None:
+        return _seen
+    n = PsiTerm(type_def=td.type)
+    n.value = td.value
+    n.flags = td.flags
+    n.resid = td.resid
+    var_map[id(td)] = n
+    n.attr_list = {k: _copy_to_depth(v, var_map, depth - 1)
+                   for k, v in td.attr_list.items()}
+    return n
+
+
 def _rule_match_status(head: 'PsiTerm', call: 'PsiTerm', eng):
     """Whether this rule applies to the call, cannot, or is not settled yet.
 
@@ -806,8 +839,10 @@ def _rule_match_status(head: 'PsiTerm', call: 'PsiTerm', eng):
                     if not eng.unifier.unify(merged,
                                              copy_term(head.attr_list[k], _hm)):
                         return 'never'
-                    if not eng.unifier.unify(merged,
-                                             copy_term(call.attr_list[k], _cm)):
+                    if not eng.unifier.unify(
+                            merged,
+                            _copy_to_depth(call.attr_list[k], _cm,
+                                           _term_depth(head.attr_list[k]))):
                         return 'never'
                 except UnificationFailure:
                     return 'never'
