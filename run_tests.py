@@ -80,10 +80,13 @@ def _filter_stderr(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 # Tests whose point is how much work the interpreter gets through rather
-# than what it answers.  z_power_4 runs 4^9 additions on purpose, so the
-# limit that keeps the rest of the suite brisk is not the right one for it.
+# than what it answers.  z_power_4 runs 4^9 additions on purpose, and fact
+# works 150! out four times over in list-of-digits arithmetic to watch what
+# the collector recovers, so the limit that keeps the rest of the suite brisk
+# is not the right one for either.
 LONG_TESTS: dict = {
     "z_power_4": 180,
+    "fact": 90,
 }
 
 
