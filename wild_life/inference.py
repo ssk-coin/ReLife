@@ -1092,6 +1092,23 @@ def _collect_embedded_func_goals(t: 'PsiTerm', eng, visited: set) -> list:
                 examined.discard(id(child))
             continue
 
+        # A built-in written for its value stands for the value wherever it
+        # sits: `transpose(S) -> [map(car,S)|transpose(map(cdr,S))]` hands
+        # back the row map makes, not the call that makes it.
+        _ch_sym = (child.type.keyword.symbol
+                   if (child.type and child.type.keyword) else '')
+        if ((_ch_sym == 'map' and '1' in child.attr_list
+             and '2' in child.attr_list and '3' not in child.attr_list)
+                or (_ch_sym == 'reduce' and '3' in child.attr_list
+                    and '4' not in child.attr_list)):
+            from wild_life.built_ins import _try_eval_any_func as _teaf_c
+            _bv_c = _teaf_c(child, eng)
+            if _bv_c is not None and _bv_c.deref() is not child:
+                eng.unifier.set_attr(parent, key, _bv_c)
+                work_queue.append((parent, key))
+                examined.discard(id(child))
+            continue
+
         if _is_user_function(child):
             # Replace with fresh variable; record EVAL goal.
             v = PsiTerm(type_def=eng.wl.top)
@@ -1286,6 +1303,19 @@ class Engine:
                 return False
 
         if defn._builtin_func is not None:
+            # A built-in function is what it is: `feature_values(X) ->
+            # map(project(2 => X), features(X))` is refused, and the built-in
+            # goes on answering.  A built-in predicate may still be shadowed,
+            # and so may a library function such as `reverse`.
+            from wild_life.built_ins import (
+                _BUILTIN_FUNCTION_SYMS as _BFS_ar)
+            if (defn.type == DefType.FUNCTION
+                    and defn.keyword is not None
+                    and defn.keyword.symbol in _BFS_ar):
+                print(f"*** Error: the built-in function "
+                      f"'{defn.keyword.symbol}' may not be extended.",
+                      file=sys.stderr)
+                return False
             # Allow user rules to shadow builtins — clear the builtin function
             # so user-defined rules take over (Wild Life original behavior).
             defn._builtin_func = None
@@ -1647,6 +1677,18 @@ class Engine:
             # that has to wait on a variable — a lazy list building itself —
             # is written out in full rather than as the call.
             _bi_sym = defn.keyword.symbol if defn.keyword else ''
+            # What is written is one term, and a variable standing for a
+            # disjunction is worth one alternative at a time: `write(X:{1;2;3})`
+            # writes 1 and comes back for 2 and 3, with X worth what was
+            # written each time.
+            if _bi_sym in _WRITE_BUILTINS and thegoal.attr_list:
+                for _w_k in list(thegoal.attr_list.keys()):
+                    _w_a = thegoal.attr_list[_w_k].deref()
+                    if _w_a.type is wl.disjunction and _w_a.attr_list:
+                        if not self.unifier._settle_disjunction(_w_a):
+                            self.goal_stack = aim.next
+                            self.goal_count += 1
+                            return False
             if _bi_sym in _WRITE_BUILTINS and thegoal.attr_list:
                 from wild_life.built_ins import (
                     _is_user_function as _iuf_w,
@@ -1988,6 +2030,17 @@ class Engine:
                         and _a_pa_d.type.keyword.symbol in _STRICT_ARITH_SYMS):
                     _teat_pa(_a_pa_d, self)
                     continue
+                # A comparison handed to a strict call is asked whether it
+                # holds: t3207's `cond_pred(X =:= 9, …)` matches the clause
+                # for false while X is 1, not a clause for a comparison.
+                if (_a_pa_d.attr_list and _a_pa_d.value is None
+                        and not (_a_pa_d.flags & _NST_pa)):
+                    from wild_life.built_ins import (
+                        _eval_arith_comparison as _eac_pa)
+                    _cmp_pa = _eac_pa(_a_pa_d, self)
+                    if _cmp_pa is not None:
+                        self.unifier.set_attr(thegoal, _k_pa, _cmp_pa)
+                        continue
                 # A call written inside an argument is there for its value
                 # too, however deep it sits: `add_item(item(begin =>
                 # N:length(X), end => N+1, cat => lex(Word)))` hands the
@@ -3009,6 +3062,19 @@ class Engine:
                 return False
             ok2 = self.unifier.unify(result, mapped)
             if not ok2:
+                self.trail.undo_to(mark)
+                return False
+            return True
+
+        # Body is built-in reduce(F, E, List) — `sum_up(L) -> reduce((+),0,L)`.
+        from wild_life.built_ins import _eval_reduce_func as _erf
+        if (_body_sym_map == 'reduce'
+                and '1' in body_d2.attr_list and '2' in body_d2.attr_list
+                and '3' in body_d2.attr_list and '4' not in body_d2.attr_list):
+            _reduced = _erf(body_d2, self)
+            if _reduced is None:
+                return False
+            if not self.unifier.unify(result, _reduced):
                 self.trail.undo_to(mark)
                 return False
             return True

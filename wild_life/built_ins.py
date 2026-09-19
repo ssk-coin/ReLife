@@ -246,7 +246,13 @@ def _collect_arith_vars(t: 'PsiTerm', wl, result: list, seen: set) -> None:
     seen.add(tid)
     # Unbound variable: top-sort, or sort-constrained (SORT_VAR flag), no attrs, no value
     is_free = not t.attr_list and t.value is None and t.coref is None
-    if is_free and (t.type is wl.top or t.type is None or bool(t.flags & SORT_VAR)):
+    # A bare `int` written into a term is an integer nobody has said which
+    # one of yet — magic's grid is nine of them — so it is a variable an
+    # equation can wait on, the same as `X:int` is.
+    _is_num_sort = (t.type is not None and wl.real is not None
+                    and t.type is not wl.top and t.type.is_subtype_of(wl.real))
+    if is_free and (t.type is wl.top or t.type is None
+                    or bool(t.flags & SORT_VAR) or _is_num_sort):
         if t not in result:
             result.append(t)
         return
@@ -837,6 +843,19 @@ def _proper_list_elems(t: PsiTerm, eng) -> Optional[list]:
         cur = t2.deref()
 
 
+def _feature_defn(eng):
+    """The `features` built-in's own definition, used to ask it a question."""
+    wl = eng.wl
+    for mod in (getattr(wl, 'bi_module', None), getattr(wl, 'syntax_module', None),
+                getattr(wl, 'user_module', None)):
+        if mod is None:
+            continue
+        d = mod.symbol_table.get('features')
+        if d is not None:
+            return d
+    return None
+
+
 def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     """Try to evaluate string built-in functions (psi2str, str2psi, strcon).
 
@@ -1222,6 +1241,13 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None:
             return None
         a1 = a1.deref()
+        # A backtick holds a term as it is written, so `` `f `` is the term f
+        # and has the features f has — none of them the backtick's own.
+        if (a1.type is not None and a1.type.keyword is not None
+                and a1.type.keyword.symbol == '`'):
+            _inner_bq = a1.attr_list.get('1')
+            if _inner_bq is not None:
+                a1 = _inner_bq.deref()
         # Try to evaluate a1 first (e.g. local_time built-in)
         _a1_ev = _try_eval_string_func(a1, eng)
         if _a1_ev is not None:
@@ -1290,6 +1316,51 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             pair.attr_list = {'1': kterm, '2': lst}
             lst = pair
 
+        return lst
+
+    elif sym == 'feature_values':
+        # feature_values(T[, MOD]) -> the values of T's features, in the same
+        # order features(T) names them.
+        a1 = t.attr_list.get('1')
+        if a1 is None:
+            return None
+        a1 = a1.deref()
+        _a1_ev = _try_eval_string_func(a1, eng)
+        if _a1_ev is not None:
+            a1 = _a1_ev.deref()
+        wl = eng.wl
+        # Ask features() which labels are visible from here, so that a
+        # private feature stays out of both answers alike.
+        _feat_defn = _feature_defn(eng)
+        if _feat_defn is None:
+            return None
+        _feat_call = PsiTerm(type_def=_feat_defn)
+        _feat_call.attr_list = dict(t.attr_list)
+        _feat_call.attr_list['1'] = a1
+        _labels = _try_eval_string_func(_feat_call, eng)
+        _elems = _proper_list_elems(_labels, eng) if _labels is not None else None
+        if _elems is None:
+            return None
+        vals = []
+        for _lab in _elems:
+            _ld = _lab.deref()
+            if _ld.value is not None:
+                _key = (str(int(_ld.value))
+                        if float(_ld.value).is_integer() else str(_ld.value))
+            elif _ld.type is not None and _ld.type.keyword is not None:
+                _key = _ld.type.keyword.symbol
+            else:
+                continue
+            _v = a1.attr_list.get(_key)
+            if _v is not None:
+                vals.append(_v)
+        lst = PsiTerm()
+        lst.type = wl.nil
+        for _v in reversed(vals):
+            pair = PsiTerm()
+            pair.type = wl.alist
+            pair.attr_list = {'1': _v, '2': lst}
+            lst = pair
         return lst
 
     elif sym == '.':
@@ -4499,6 +4570,13 @@ def _try_eval_any_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             and '1' in td.attr_list and '2' in td.attr_list and '3' not in td.attr_list):
         return _eval_map_func(td, eng)
 
+    # Built-in reduce(F, E, List) functional use
+    if (td.type is not None and td.type.keyword is not None
+            and td.type.keyword.symbol == 'reduce'
+            and '1' in td.attr_list and '2' in td.attr_list
+            and '3' in td.attr_list and '4' not in td.attr_list):
+        return _eval_reduce_func(td, eng)
+
     # General string function (strcon, substr, strlen, int2str, …)
     r = _try_eval_string_func(td, eng)
     if r is not None:
@@ -4593,6 +4671,15 @@ def _eval_embedded_user_funcs(
                 continue
         evaled = _try_eval_any_func(child, eng)
         if evaled is not None and evaled is not child:
+            # An expression asked for its value is worth that value from then
+            # on, wherever else it is written: `nvar -> vr(X:(varcount+1)) |
+            # setq(varcount,X)` asks X for a number to file under varcount,
+            # and the `vr(X)` it hands back is that same number rather than a
+            # fresh count of a varcount that has since moved on.
+            if (_get_sym(child) in _ARITH_OPS_SET and child.attr_list
+                    and child.value is None and child.coref is None):
+                eng.trail.trail_psi(child, 'coref')
+                child.coref = evaled.deref()
             # Trailed: what the call worked out holds only under the bindings
             # in force now, and a backtrack that takes those away has to take
             # the value with them — or the term is left holding a call whose
@@ -7692,12 +7779,21 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
     lhs = a1.deref()
     defn = lhs.type
 
-    # Mode 1: LHS is a named function/predicate symbol (global variable)
-    if (defn is not None and
-            hasattr(defn, 'rule') and
-            defn.rule is not None and
-            lhs.value is None and
-            not lhs.attr_list):
+    # Mode 1: LHS is a named function/predicate symbol (global variable).
+    # A name with rules that take arguments is not a global variable but a
+    # function of the program's own: termsize marks the term it has counted
+    # with `X <- Seen`, and when that term is the name `f` of `f(X) -> X*X`
+    # the mark must not rewrite what f is.
+    _lhs_is_global = (
+        defn is not None and
+        hasattr(defn, 'rule') and
+        defn.rule is not None and
+        lhs.value is None and
+        not lhs.attr_list and
+        (defn.type == DefType.GLOBAL
+         or all(h is None or not h.deref().attr_list
+                for h, _b in defn.rule)))
+    if _lhs_is_global:
         # Use setq-like behavior: clear all rules, assert new value
         # Always destructive for global variables (global state is intentional)
         from wild_life.unification import copy_term as _copy_term
@@ -8914,7 +9010,7 @@ _BUILTIN_FUNCTION_SYMS = frozenset((
     'is_number', 'is_value', 'has_feature',
     'int2str', 'str2int', 'str2psi', 'psi2str', 'str2num', 'num2str',
     'strcon', 'strlen', 'substr', 'chr', 'asc', 'upper', 'lower',
-    'root_sort', 'sort', 'features', 'parents', 'children',
+    'root_sort', 'sort', 'features', 'feature_values', 'parents', 'children',
     'least_sorts', 'glb', 'lub', 'copy_term', 'eval',
     '+', '-', '*', '/', '//', 'mod', '^', 'min', 'max', 'abs',
     'sqrt', 'exp', 'log', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
@@ -9920,6 +10016,54 @@ def _apply_func(f_term: PsiTerm, arg: PsiTerm, eng) -> Optional[PsiTerm]:
     return f_copy
 
 
+def _eval_reduce_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
+    """reduce(F, E, List) — fold the list from the right with F.
+
+    `reduce(F,E,[H|T]) -> F(H, reduce(F,E,T))`, and `reduce(F,E,[]) -> E`,
+    which is how `sum_up(L) -> reduce((+),0,L)` adds a list up and how
+    `entries(S) -> reduce(append,[],S)` runs a list of lists together.
+    """
+    a1 = t.attr_list.get('1')   # F
+    a2 = t.attr_list.get('2')   # E
+    a3 = t.attr_list.get('3')   # List
+    if a1 is None or a2 is None or a3 is None:
+        return None
+    f_term = a1.deref()
+    lst = a3.deref()
+    _lst_ev = _try_eval_any_func(lst, eng)
+    if _lst_ev is not None and _lst_ev.deref() is not lst:
+        lst = _lst_ev.deref()
+    elems = _proper_list_elems(lst, eng)
+    if elems is None:
+        return None
+    acc = a2.deref()
+    for _h in reversed(elems):
+        applied = _apply_func(f_term, _h.deref(), eng)
+        if applied is None:
+            return None
+        applied = _apply_func(applied, acc, eng)
+        if applied is None:
+            return None
+        _v = _try_eval_any_func(applied, eng)
+        if _v is None:
+            _ok, _n = _eval_arith(applied, eng)
+            _v = _make_number(eng, _n) if _ok else None
+        acc = (_v.deref() if _v is not None else applied)
+    return acc
+
+
+def bi_reduce(goal: PsiTerm, eng) -> bool:
+    """reduce(F, E, List[, Result]) — the predicate form of the fold."""
+    if '4' in goal.attr_list:
+        _call = PsiTerm(type_def=goal.type)
+        _call.attr_list = {k: v for k, v in goal.attr_list.items() if k != '4'}
+        _val = _eval_reduce_func(_call, eng)
+        if _val is None:
+            return False
+        return _unify(eng, goal.attr_list['4'].deref(), _val)
+    return _eval_reduce_func(goal, eng) is not None
+
+
 def bi_map(goal: PsiTerm, eng) -> bool:
     """map(F, List) → MappedList  — apply function F to each element.
 
@@ -10264,6 +10408,7 @@ def register_all(wl) -> None:
     _reg('nospy', bi_notrace)   # simplified: nospy = notrace
     # Higher-order
     _reg('map', bi_map)
+    _reg('reduce', bi_reduce)
     # Residuation
     _reg('residuate', bi_residuate)
     # Globals
@@ -10454,19 +10599,23 @@ def register_all(wl) -> None:
     _reg('delay_check', _bi_delay_check)
 
     def _bi_dynamic(goal, eng):
-        """dynamic(P): declare P as dynamic. Ensure the predicate has an empty rule list."""
-        arg = _get_one_arg(goal)
-        if arg is None:
+        """dynamic(P, …): declare each P dynamic, with an empty rule list."""
+        from wild_life.data_structures import featcmp_key as _fck_dyn
+        if not goal.attr_list:
             return True
-        arg = arg.deref()
-        # If the type has no rule, set it to an empty list so assert/retract work
-        if arg.type:
-            if arg.type.rule is None:
-                arg.type.rule = []
-            # listing prints a `dynamic(P)?` header for a predicate declared
-            # this way, so that its listing can be read back in.
-            arg.type.is_dynamic = True
-            arg.type.is_static = False
+        # One declaration may name several predicates: cb writes
+        # `dynamic(varcount, elim)?` and means both of them.
+        for _k in sorted(goal.attr_list, key=_fck_dyn):
+            arg = goal.attr_list[_k].deref()
+            # If the type has no rule, set it to an empty list so
+            # assert/retract work
+            if arg.type:
+                if arg.type.rule is None:
+                    arg.type.rule = []
+                # listing prints a `dynamic(P)?` header for a predicate
+                # declared this way, so that its listing can be read back in.
+                arg.type.is_dynamic = True
+                arg.type.is_static = False
         return True
     _reg('dynamic', _bi_dynamic)
 
@@ -10753,6 +10902,24 @@ def register_all(wl) -> None:
             return True
         return _unify(eng, a2.deref(), lst)
     _reg('features', _bi_features)
+
+    def _bi_feature_values(goal, eng):
+        """feature_values(T[, MOD], L) — L is the list of T's feature values."""
+        _keys = sorted(goal.attr_list.keys(), key=lambda k: k)
+        if '1' not in goal.attr_list:
+            return False
+        _out_key = '3' if '3' in goal.attr_list else (
+            '2' if len(goal.attr_list) >= 2 else None)
+        _call = PsiTerm(type_def=goal.type)
+        _call.attr_list = {k: v for k, v in goal.attr_list.items()
+                           if k != _out_key}
+        _val = _try_eval_string_func(_call, eng)
+        if _val is None:
+            return False
+        if _out_key is None:
+            return True
+        return _unify(eng, goal.attr_list[_out_key].deref(), _val)
+    _reg('feature_values', _bi_feature_values, def_type=DefType.FUNCTION)
 
     def _make_strip_result(src, use_src_type):
         """Core of strip / copy_pointer.
