@@ -3346,6 +3346,36 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
     # Try each rule in order (no backtracking support here)
     rules = t.type.rule or []
     active = [(h, b) for (h, b) in rules if h is not None and b is not None]
+
+    # Pre-evaluate any user-defined or built-in functional sub-terms in
+    # the input term's arguments before trying to unify with the head.
+    # This mirrors the EVAL goal handler in inference.py (lines ~843-857)
+    # and is necessary so that e.g. app([1], rev([2,3])) can match
+    # app(L, [H|T]) after rev([2,3]) is reduced to [3,2].
+    # Asked once for the call, not once per rule: a rule that does not match
+    # puts the call's arguments back as they were, and an argument whose
+    # reduction was a side effect — cb's create_vvars handing out numbered
+    # variables — would hand out fresh ones on the next rule.
+    for _key in list(t.attr_list.keys()):
+        _attr = t.attr_list[_key].deref()
+        _ev = _try_eval_any_func(_attr, eng)
+        if _ev is None and _attr.attr_list:
+            # Compound arg (e.g. `(CX, NT) & memo_copy(X, Table)` or
+            # `(B, NT) & copy_body(...)`) — use _eval_body_sync so that
+            # `&` conjunction semantics are handled (evaluate RHS and
+            # unify with LHS), rather than just evaluating sub-functions
+            # in-place without the conjunction unification step.
+            _ev = _eval_body_sync(_attr, eng, _depth + 1)
+        if _ev is not None and _ev is not _attr:
+            # Trailed: the value was worked out under bindings that a
+            # later backtrack may undo, and a call left holding a stale
+            # one would go on reducing against variables nothing binds
+            # any more.
+            eng.unifier.set_attr(t, _key, _ev)
+    # What a rule that does not match puts back is the call as it now
+    # stands, with its arguments worked out.
+    t_copy_attrs = dict(t.attr_list)
+
     for h0, b0 in active:
         _vm: dict = {}
         head = copy_term(h0, _vm)
@@ -3426,29 +3456,6 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
             else:
                 eng.trail.undo_to(mark)
                 continue
-
-        # Pre-evaluate any user-defined or built-in functional sub-terms in
-        # the input term's arguments before trying to unify with the head.
-        # This mirrors the EVAL goal handler in inference.py (lines ~843-857)
-        # and is necessary so that e.g. app([1], rev([2,3])) can match
-        # app(L, [H|T]) after rev([2,3]) is reduced to [3,2].
-        t_copy_attrs = dict(t.attr_list)
-        for _key in list(t.attr_list.keys()):
-            _attr = t.attr_list[_key].deref()
-            _ev = _try_eval_any_func(_attr, eng)
-            if _ev is None and _attr.attr_list:
-                # Compound arg (e.g. `(CX, NT) & memo_copy(X, Table)` or
-                # `(B, NT) & copy_body(...)`) — use _eval_body_sync so that
-                # `&` conjunction semantics are handled (evaluate RHS and
-                # unify with LHS), rather than just evaluating sub-functions
-                # in-place without the conjunction unification step.
-                _ev = _eval_body_sync(_attr, eng, _depth + 1)
-            if _ev is not None and _ev is not _attr:
-                # Trailed: the value was worked out under bindings that a
-                # later backtrack may undo, and a call left holding a stale
-                # one would go on reducing against variables nothing binds
-                # any more.
-                eng.unifier.set_attr(t, _key, _ev)
 
         # Matching is one-way here as well: `mult_list(2,6,X)` with X still a
         # variable does not match `mult_list(U,N,[H|T])`, and narrowing X to
