@@ -4569,6 +4569,40 @@ def _eval_embedded_user_funcs(
                 eng.unifier.set_attr(td, key, _re_ev)
 
 
+def _reduce_embedded_calls(t: PsiTerm, eng, _depth: int, visited: set) -> None:
+    """Reduce the user-function calls written inside a term, and nothing else.
+
+    `X = pair(foo_b(Y), s_b(B))` hands X the term foo_b builds.  Unlike
+    _eval_embedded_user_funcs this leaves everything else alone: the term is
+    the one the goal was written with, and its arithmetic, its features and
+    its built-in calls are part of what is being said, not questions to ask.
+    """
+    if _depth > 100:
+        return
+    td = t.deref()
+    if id(td) in visited:
+        return
+    visited.add(id(td))
+    if (td.type is not None and td.type.keyword is not None
+            and td.type.keyword.symbol == '`'):
+        return
+    from wild_life.data_structures import NON_STRICT_TERM as _NST_rec
+    if td.flags & _NST_rec:
+        return
+    for key in list(td.attr_list.keys()):
+        child = td.attr_list[key].deref()
+        if not child.attr_list:
+            continue
+        if (_is_user_function(child) and _has_applicable_rule(child)
+                and not _term_reaches_itself(child)):
+            evaled = _eval_user_func_sync(child, eng, _depth)
+            if evaled is not None and evaled.deref() is not child:
+                eng.unifier.set_attr(td, key, evaled)
+                _reduce_embedded_calls(evaled, eng, _depth + 1, visited)
+                continue
+        _reduce_embedded_calls(child, eng, _depth + 1, visited)
+
+
 def _make_disjunction_psi(elems: list, wl) -> PsiTerm:
     """Build {e1;e2;...} from a list of PsiTerms.  Empty list → disj_nil ({})."""
     tail = PsiTerm()
@@ -6519,6 +6553,21 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
         _r = _str_func_delay(a_d, b_d, eng)
         if _r is not None:
             return _r
+
+    # A call written inside a term stands for what it answers, however deep
+    # it sits: `X = pair(foo_b(Y), s_b(B))` hands X the term foo_b builds,
+    # not the call.  Only a term written into this goal is read that way —
+    # a variable's value was built once already, and reading it again would
+    # ask `random(1000)` for a second number — and only calls are reduced:
+    # the arithmetic of `s(a(X),b(X:(1+2)))` is the term's, not this goal's.
+    from wild_life.data_structures import NON_STRICT_TERM as _NST_eq
+    for _eq_side, _eq_raw in ((b_d, b), (a_d, a)):
+        if (_eq_side is _eq_raw and _eq_side.attr_list
+                and _eq_side.type is not None
+                and _eq_side.type._builtin_func is None
+                and not (_eq_side.flags & _NST_eq)
+                and not _is_user_function(_eq_side)):
+            _reduce_embedded_calls(_eq_side, eng, 0, set())
 
     # Non-delaying string functions (psi2str, root_sort, children, chr evaluated already above)
     b_str = _try_eval_string_func(b_d, eng)

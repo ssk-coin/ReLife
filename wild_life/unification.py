@@ -1639,7 +1639,16 @@ class Unifier:
             has_evidence = False
             for key, proto_val in proto.items():
                 if key in u.attr_list:
-                    has_evidence = True
+                    # A prototype feature worth nothing in particular —
+                    # `:: p_c(_)` — says nothing about a term that has a
+                    # first feature, so it is no reason to call that term a
+                    # p_c.  Only a feature the declaration gives a sort or a
+                    # value to is evidence.
+                    _pv_ev = proto_val.deref()
+                    if (_pv_ev.value is not None
+                            or (_pv_ev.type is not None
+                                and _pv_ev.type is not WL.top)):
+                        has_evidence = True
                     u_val = u.attr_list[key]
                     u_val_d = u_val.deref()
                     proto_val_d = proto_val.deref()
