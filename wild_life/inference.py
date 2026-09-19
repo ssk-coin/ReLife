@@ -1339,9 +1339,16 @@ class Engine:
         # Determine the (child, parent) pairs to add.
         pairs = []   # list of (child_def, parent_def)
         if sym == '<|':
-            # A <| B → child=A, parent=B
+            # A <| B → child=A, parent=B.  `c <| {a;b}` names both of them:
+            # a c is an a and a b, so `A:a = c` leaves A a c.
             if arg1.type and arg2.type:
-                pairs.append((arg1.type, arg2.type))
+                if arg2.type is self.wl.disjunction:
+                    for _elem_sd in _collect_disj_elems(arg2, self.wl):
+                        _ed_sd = _elem_sd.deref()
+                        if _ed_sd.type:
+                            pairs.append((arg1.type, _ed_sd.type))
+                else:
+                    pairs.append((arg1.type, arg2.type))
         else:
             # := → for each element e in the RHS disjunction: child=e, parent=LHS
             if not arg1.type:
