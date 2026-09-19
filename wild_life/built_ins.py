@@ -3429,8 +3429,15 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
             # Evaluate built-in / user-defined functional sub-terms inside
             # the guard goal (e.g. genChildren(children(X), A) → the
             # children(X) arg must be reduced before the predicate is called).
+            # A conjunction is proven left to right, so only its leftmost goal
+            # is ready: a later one is still waiting on what the goals before
+            # it will bind or change, and reading `F = g` before the goals in
+            # front of it have set the global g is how fact's factorial came
+            # back with the number it started from.
+            from wild_life.inference import _leftmost_goal as _lmg_sync
             _cond_d = cond_part.deref()
-            _eval_embedded_user_funcs(_cond_d, eng, _depth + 1, set())
+            _eval_embedded_user_funcs(_lmg_sync(_cond_d, eng.wl), eng,
+                                      _depth + 1, set())
             # Run the guard in an inner proof loop.
             # IMPORTANT: clear goal_stack so only the guard is proved;
             # the outer continuation must not run inside this inner loop.
