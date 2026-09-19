@@ -1186,11 +1186,19 @@ class Unifier:
             _AA_EFFECTFUL = frozenset(('random', 'genint', 'cpu_time',
                                        'real_time'))
 
+            from wild_life.built_ins import _is_user_function as _iuf_aa
+
             def _is_open_arith(t):
                 sym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+                # A program may give an operator a meaning of its own —
+                # overload writes `A:list + B:list -> append(A,B)` — and then
+                # `+` is not arithmetic at all: what the two sides come to is
+                # not a number, and asking for it matches the rule's head,
+                # which brings two of them together again for ever.
                 return (sym in _AOS_AA and sym not in _AA_EFFECTFUL
                         and t.value is None and bool(t.attr_list)
-                        and not (t.flags & _NST_AA))
+                        and not (t.flags & _NST_AA)
+                        and not _iuf_aa(t))
 
             if _is_open_arith(u) and _is_open_arith(v):
                 _ok_u_aa, _val_u_aa = _ea_aa(u, self.engine)
