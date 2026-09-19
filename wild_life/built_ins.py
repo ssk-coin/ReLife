@@ -5003,6 +5003,23 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
         if host is None:
             return None
         host = host.deref()
+    # A name with rules of its own stands for what those rules make of it,
+    # and it is that term the feature belongs to: `X:a1` with `a1 -> t(A,B)`
+    # reads `X.1` off the t, not off the name.
+    if (eng is not None and _is_user_function(host)
+            and _has_applicable_rule(host)):
+        _hv = _eval_user_func_sync(host, eng, 0)
+        if _hv is not None and _hv.deref() is not host:
+            _hv_d = _hv.deref()
+            # The name becomes the term its rules make of it, so everything
+            # else pointing at the name reads that term too.
+            try:
+                if eng.unifier.unify(host, _hv_d):
+                    host = host.deref()
+                else:
+                    host = _hv_d
+            except Exception:
+                host = _hv_d
     # If the feature label is an unbound variable, we cannot eagerly create a
     # feature with key '@'.  Suspend: register a pending residuated goal so
     # that when the label is later bound the dot-access is re-evaluated.
@@ -10409,6 +10426,58 @@ def register_all(wl) -> None:
     # Higher-order
     _reg('map', bi_map)
     _reg('reduce', bi_reduce)
+
+    def _bi_mresiduate(goal, eng):
+        """mresiduate(List, Goal) — wait on every term in List at once.
+
+        The goal is proven as soon as any one of them is given something,
+        and only that once: `mresiduate([X,Y], write(qwe))` writes qwe when
+        X is bound, and says nothing more when Y is bound after it.  A term
+        that is not a list of its own — an unfinished list, a disjunction —
+        is nothing to wait on, so the call fails.
+        """
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None or a2 is None:
+            return False
+        from wild_life.data_structures import (
+            Goal as _MRGoal, Residuation as _MRResid, SORT_VAR as _MR_SV)
+        _pending = _MRGoal(GoalType.PROVE, a2.deref(), _DEFRULES_SENTINEL,
+                           None, pending=True)
+        # Walked a cell at a time, and each term met is given the goal to
+        # wait for as it is met: a list that turns out not to end in `[]` is
+        # reported with the tildes the walk so far has put on it.
+        _node = a1.deref()
+        _seen_mr: set = set()
+        while True:
+            if _node.type is eng.wl.nil or _get_sym(_node) in ('nil', '[]'):
+                return True
+            if (not _is_list_term(_node, eng) or id(_node) in _seen_mr
+                    or '1' not in _node.attr_list
+                    or '2' not in _node.attr_list):
+                import sys as _sys_mr
+                _sys_mr.stderr.write(
+                    "*** Error: %s should be a nil-terminated list in "
+                    "mresiduate.\n" % _term_to_str(a1.deref(), eng))
+                return False
+            _seen_mr.add(id(_node))
+            _v = _node.attr_list['1'].deref()
+            _node = _node.attr_list['2'].deref()
+            if _v.resid is None:
+                eng.trail.trail_psi(_v, 'resid')
+                _v.resid = [_MRResid(goal=_pending)]
+            elif not any(r.goal is _pending for r in _v.resid):
+                eng.trail.trail_copy(_v, 'resid')
+                _v.resid = list(_v.resid) + [_MRResid(goal=_pending)]
+            # A plain variable is marked bindable so the unifier goes on
+            # binding it although it now carries a residuation; a term that
+            # already is something must not start looking like a variable.
+            _v_plain = (not _v.attr_list and _v.value is None
+                        and (_v.type is None or _v.type is eng.wl.top))
+            if _v_plain and not (_v.flags & _MR_SV):
+                eng.trail.trail_psi(_v, 'flags')
+                _v.flags |= _MR_SV
+    _reg('mresiduate', _bi_mresiduate)
     # Residuation
     _reg('residuate', bi_residuate)
     # Globals

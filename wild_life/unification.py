@@ -868,6 +868,16 @@ class Unifier:
                     v.type._builtin_func is None):
                 v_is_var = True
 
+        # A variable meeting a sum is given what the sum comes to, whichever
+        # side it is written on: `a(1+2)` hands `a(X)` the 3, and the clause
+        # that files `b -> X` files a 3.  The reading below is written for the
+        # variable on the right, so the two are turned round here.
+        if u_is_var and not v_is_var and v.value is None and v.attr_list:
+            _sym_sw = v.type.keyword.symbol if (v.type and v.type.keyword) else ''
+            if _sym_sw in _ARITH_OP_SYMS:
+                u, v = v, u
+                u_is_var, v_is_var = False, True
+
         if u_is_var:
             # If u is a sort-constrained variable (type != WL.top) and v is a plain
             # top variable, bind v→u so that dereferencing v returns u (which
@@ -1161,6 +1171,14 @@ class Unifier:
                 return True
             self.bind(v, u)
             self._wakeup_resid(v, u)
+            # Both sides' waiting goals are woken when the side being joined
+            # is already something — a sort, a value, features: meeting
+            # `X:int~` with a fresh `@` is something happening to X, and what
+            # waited on X was waiting for exactly that.  A plain variable
+            # meeting another plain variable is still waiting.
+            if u.resid and (u.attr_list or u.value is not None
+                            or (u.type is not None and u.type is not WL.top)):
+                self._wakeup_resid(u, v)
             # Sort narrowing for terms with attributes
             _u_canon = u.deref()
             # Fire global delay rules for the sort of the term being bound to.
