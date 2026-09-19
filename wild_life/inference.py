@@ -268,6 +268,75 @@ def _expand_head_disj(head: PsiTerm, wl, depth: int = 0) -> list:
 # Cut barrier helper
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _term_has_dot(t: PsiTerm, seen=None) -> bool:
+    """Whether a stored term holds a `T.F` anywhere under it."""
+    if t is None:
+        return False
+    if seen is None:
+        seen = set()
+    oid = id(t)
+    if oid in seen:
+        return False
+    seen.add(oid)
+    while t.coref is not None:
+        t = t.coref
+    if t.type is not None and t.type.keyword is not None \
+            and t.type.keyword.symbol == '.':
+        return True
+    return any(_term_has_dot(v, seen) for v in t.attr_list.values())
+
+
+def _term_has_callable_sub(t: PsiTerm, seen=None, top: bool = True) -> bool:
+    """Whether a stored head holds anything under it that could be a call.
+
+    A number or a plain variable never is one; a compound, or a name that
+    could have rules of its own, might be.  A head with none of those needs
+    no reducing, however often it is matched.
+    """
+    if t is None:
+        return False
+    if seen is None:
+        seen = set()
+    oid = id(t)
+    if oid in seen:
+        return False
+    seen.add(oid)
+    while t.coref is not None:
+        t = t.coref
+    if not top:
+        from wild_life.runtime import WL as _WL_cs
+        if t.attr_list:
+            return True
+        if t.value is None and t.type is not None and t.type is not _WL_cs.top:
+            return True
+    return any(_term_has_callable_sub(v, seen, False)
+               for v in t.attr_list.values())
+
+
+def _body_has_cut(term: PsiTerm, wl, seen=None) -> bool:
+    """Whether a stored clause body holds a cut anywhere under it.
+
+    A body that has none needs no patching when it is copied, and most do
+    not, so the answer is worked out once and kept on the stored term.
+    """
+    if term is None:
+        return False
+    if seen is None:
+        seen = set()
+    oid = id(term)
+    if oid in seen:
+        return False
+    seen.add(oid)
+    while term.coref is not None:
+        term = term.coref
+    if term.type is wl.cut:
+        return True
+    for v in term.attr_list.values():
+        if _body_has_cut(v, wl, seen):
+            return True
+    return False
+
+
 def _patch_cut_barriers(term: PsiTerm, wl, cut_point, seen=None) -> None:
     """Recursively set cut atoms' .value to cut_point in a copied body.
 
@@ -1411,7 +1480,7 @@ class Engine:
         # ── AND (conjunction) ──
         # commasym (',') is the standard Prolog-style conjunction;
         # and_sym ('&') is the functional-pair form — both split into two goals.
-        if defn == wl.and_sym or defn == wl.commasym:
+        if defn is wl.and_sym or defn is wl.commasym:
             self.goal_stack = aim.next
             self.goal_count += 1
             arg1 = thegoal.attr_list.get('1')
@@ -1423,7 +1492,7 @@ class Engine:
             return True
 
         # ── CUT ──
-        if defn == wl.cut:
+        if defn is wl.cut:
             self.goal_stack = aim.next
             self.goal_count += 1
             cut_point = thegoal.value  # stored choice point
@@ -1432,7 +1501,7 @@ class Engine:
 
         # ── OR / disjunction ──
         # Both wl.disjunction ({a;b} curly form) and wl.life_or (a;b infix form)
-        if defn == wl.disjunction or defn == wl.life_or:
+        if defn is wl.disjunction or defn is wl.life_or:
             self.goal_stack = aim.next
             self.goal_count += 1
             arg1 = thegoal.attr_list.get('1')
@@ -1444,11 +1513,11 @@ class Engine:
             return True
 
         # ── TRUE / FALSE atoms ──
-        if defn == wl.true:
+        if defn is wl.true:
             self.goal_stack = aim.next
             self.goal_count += 1
             return True
-        if defn == wl.false:
+        if defn is wl.false:
             self.goal_stack = aim.next
             self.goal_count += 1
             return False
@@ -1757,7 +1826,14 @@ class Engine:
         # wait on Ms1, and reducing it here would pick the empty-list rule and
         # settle a question the clause has not asked.
         if head.attr_list:
-            self._reduce_settled_head_calls(head)
+            # A head with nothing under it that could be a call has nothing
+            # to reduce, and that does not change from one match to the next.
+            _hcs = head_orig.__dict__.get('_wl_has_call')
+            if _hcs is None:
+                _hcs = _term_has_callable_sub(head_orig)
+                head_orig._wl_has_call = _hcs
+            if _hcs:
+                self._reduce_settled_head_calls(head)
 
         # Fix A: such_that daemon setup for FUNCTION rules.
         # When the body is `val | cond` (such_that), and the call has free
@@ -1832,9 +1908,16 @@ class Engine:
                 return True
 
         # Unify head with goal
-        if body.type != wl.succeed:
-            # Patch cut atoms in the body copy so they respect the cut barrier.
-            _patch_cut_barriers(body, wl, cut_barrier)
+        if body.type is not wl.succeed:
+                # Patch cut atoms in the body copy so they respect the cut barrier.
+            # A body with no cut in it has nothing to patch, and the answer
+            # is the same for every copy, so it is kept on the stored body.
+            _hc = body_orig.__dict__.get('_wl_has_cut')
+            if _hc is None:
+                _hc = _body_has_cut(body_orig, wl)
+                body_orig._wl_has_cut = _hc
+            if _hc:
+                _patch_cut_barriers(body, wl, cut_barrier)
             self.push_goal(GoalType.PROVE, body, _DEFRULES, None)
 
         # Bind head's coref to thegoal (= head ← thegoal)
@@ -1890,7 +1973,12 @@ class Engine:
         # of a feature of the term it was given, and the answer is the feature
         # rather than the reading of it.  The term and the label are known
         # once the head has been matched, so that is where it is read.
-        self._resolve_head_feature_terms(head)
+        _hd = head_orig.__dict__.get('_wl_has_dot')
+        if _hd is None:
+            _hd = _term_has_dot(head_orig)
+            head_orig._wl_has_dot = _hd
+        if _hd:
+            self._resolve_head_feature_terms(head)
         return True
 
     def _resolve_head_feature_terms(self, head: 'PsiTerm') -> None:
@@ -2865,7 +2953,7 @@ class Engine:
                 break
             t = term.deref()
             wl = self.wl
-            if t.type == wl.eof:
+            if t.type is wl.eof:
                 break
             if sort == FACT:
                 self.assert_first = False

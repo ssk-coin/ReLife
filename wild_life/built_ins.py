@@ -21,7 +21,8 @@ from typing import Optional, Tuple
 
 from wild_life.data_structures import (
     PsiTerm, Definition, GoalType, DefType, FACT, QUERY, ERROR,
-    int_div as _int_div, NON_STRICT_TERM as _NST_SWAP
+    int_div as _int_div, NON_STRICT_TERM as _NST_SWAP,
+    QUOTED_TRUE, REDUCED
 )
 from wild_life.unification import (
     UnificationFailure, CutException, HaltException, AbortException,
@@ -1770,17 +1771,20 @@ def note_persistent_use(defn, eng) -> None:
         _note_global_used(eng, defn)
 
 
+_IUF_SKIP_FLAGS = QUOTED_TRUE | REDUCED
+
+
 def _global_cell(t: PsiTerm, eng) -> Optional[PsiTerm]:
     """The cell a global variable name stands for, or None for anything else.
 
     Every reference reads the same psi-term, so what one name binds is visible
     through the others — that is what makes a global assignable.
     """
-    from wild_life.data_structures import DefType as _DT_g
     if t is None:
         return None
-    t = t.deref()
-    if t.attr_list or t.type is None or t.type.type is not _DT_g.GLOBAL:
+    while t.coref is not None:
+        t = t.coref
+    if t.attr_list or t.type is None or t.type.type is not DefType.GLOBAL:
         return None
     _note_global_used(eng, t.type)
     return t.type.global_value
@@ -1796,7 +1800,7 @@ def _term_to_str(t: PsiTerm, eng, quoted=True) -> str:
 
 def _is_var(t: PsiTerm, eng) -> bool:
     wl = eng.wl
-    return t.type == wl.top and t.value is None and not t.attr_list and t.coref is None
+    return t.type is wl.top and t.value is None and not t.attr_list and t.coref is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3232,26 +3236,19 @@ def _is_user_function(t: PsiTerm) -> bool:
     """Return True if t is a user-defined function call (has -> rules)."""
     if t is None:
         return False
-    t = t.deref()
-    # Backtick-quoted terms (QUOTED_TRUE) are sort references, not function calls
-    from wild_life.data_structures import QUOTED_TRUE, REDUCED
-    if t.flags & QUOTED_TRUE:
-        return False
-    # A call being reduced is the value its own rule body sees: `X:sum -> f(X)`
-    # binds X to the very sum term under evaluation, and reducing it again
-    # there would restart the rule instead of reading the term's features.
-    if t.flags & REDUCED:
-        return False
+    while t.coref is not None:
+        t = t.coref
     defn = t.type
-    if defn is None:
+    if defn is None or defn.type != DefType.FUNCTION:
         return False
-    if defn.type != DefType.FUNCTION:
+    if defn._builtin_func is not None or not defn.rule:
         return False
-    if defn._builtin_func is not None:
-        return False
-    if not defn.rule:
-        return False
-    return True
+    # Backtick-quoted terms (QUOTED_TRUE) are sort references, not function
+    # calls.  A call being reduced is the value its own rule body sees:
+    # `X:sum -> f(X)` binds X to the very sum term under evaluation, and
+    # reducing it again there would restart the rule instead of reading the
+    # term's features.
+    return not (t.flags & _IUF_SKIP_FLAGS)
 
 
 def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
@@ -6707,9 +6704,9 @@ def bi_is_list(goal: PsiTerm, eng) -> bool:
     t = arg
     while True:
         t = t.deref()
-        if t.type == wl.nil:
+        if t.type is wl.nil:
             return True
-        if t.type != wl.alist:
+        if t.type is not wl.alist:
             return False
         t2 = t.attr_list.get('2')
         if t2 is None:
@@ -7782,7 +7779,7 @@ def bi_univ(goal: PsiTerm, eng) -> bool:
         lst = lst.deref()
         items = []
         cur = lst
-        while cur.type == wl.alist:
+        while cur.type is wl.alist:
             h = cur.attr_list.get('1')
             t2 = cur.attr_list.get('2')
             if h:
@@ -7861,7 +7858,7 @@ def bi_atom_chars(goal: PsiTerm, eng) -> bool:
         # Build atom from char list
         chars = []
         cur = a2.deref()
-        while cur.type == wl.alist:
+        while cur.type is wl.alist:
             h = cur.attr_list.get('1')
             t2 = cur.attr_list.get('2')
             if h:

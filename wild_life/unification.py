@@ -27,7 +27,7 @@ import sys
 
 from wild_life.data_structures import (
     PsiTerm, Definition, DefType, Rule, UndoEntry, ChoicePoint, Goal, GoalType,
-    Residuation
+    Residuation, SORT_VAR as _SORT_VAR, QUOTED_TRUE as _QUOTED_TRUE
 )
 from wild_life.runtime import WL
 
@@ -645,7 +645,9 @@ class Unifier:
         # If we are already in the process of unifying this exact pair of
         # canonical psi-terms (via a circular attr chain), assume they can be
         # unified and return True immediately to break the cycle.
-        _pair_key = frozenset((id(u), id(v)))
+        _iu = id(u)
+        _iv = id(v)
+        _pair_key = (_iu, _iv) if _iu < _iv else (_iv, _iu)
         if _pair_key in self._unifying_pairs:
             return True
         self._unifying_pairs.add(_pair_key)
@@ -662,10 +664,8 @@ class Unifier:
         # s(A.B, A.C) = s(A.D, A.E) where the dot-terms appear as sub-terms.
         # NOTE: a plain '.' atom (no args) must NOT be treated as a dot-access —
         # it is a legitimate operator name and must unify freely with variables.
-        _dot_check = (lambda t: (t.type is not None and t.type.keyword is not None
-                                 and t.type.keyword.symbol == '.'
-                                 and t.attr_list.get('1') is not None))
-        if _dot_check(u) or _dot_check(v):
+        _dot_check = _is_dot_access
+        if _is_dot_access(u) or _is_dot_access(v):
             if self.engine is not None:
                 from wild_life.built_ins import _resolve_dot_feat as _rdf
                 if _dot_check(u):
@@ -720,21 +720,20 @@ class Unifier:
 
         # Sort-constrained variables (X:sort — marked SORT_VAR by the parser, or
         # X:ran where ran is a FUNCTION sort) are treated as bindable variables.
-        from wild_life.data_structures import DefType as _DefType_fn
+        _DefType_fn = DefType
         if not u_is_var and not v_is_var:
-            from wild_life.data_structures import DefType, QUOTED_TRUE, SORT_VAR
             # SORT_VAR flag: set by parser for any X:sort syntax
-            if u.flags & SORT_VAR:
+            if u.flags & _SORT_VAR:
                 u_is_var = True
             elif (u.value is None and not u.attr_list and not u.resid and
-                    not (u.flags & QUOTED_TRUE) and
+                    not (u.flags & _QUOTED_TRUE) and
                     u.type is not None and u.type.type == DefType.FUNCTION and
                     u.type._builtin_func is None):
                 u_is_var = True
-            if v.flags & SORT_VAR:
+            if v.flags & _SORT_VAR:
                 v_is_var = True
             elif (v.value is None and not v.attr_list and not v.resid and
-                    not (v.flags & QUOTED_TRUE) and
+                    not (v.flags & _QUOTED_TRUE) and
                     v.type is not None and v.type.type == DefType.FUNCTION and
                     v.type._builtin_func is None):
                 v_is_var = True
@@ -745,7 +744,7 @@ class Unifier:
             # retains its sort constraint).  For FUNCTION sorts this preserves sort
             # information for _is_user_function checks; for regular SORT sorts it
             # ensures the sort constraint is visible after binding.
-            from wild_life.data_structures import SORT_VAR as _SORT_VAR_FLAG
+            _SORT_VAR_FLAG = _SORT_VAR
             u_is_fn_sort = (u.type is not WL.top)
             u_is_sort_var = bool(u.flags & _SORT_VAR_FLAG)  # user X:sort annotation
             if u_is_fn_sort and v_is_var:
@@ -2017,6 +2016,14 @@ def _exec_delay_goal_sync(goal: PsiTerm, eng) -> None:
     eng.push_goal(_GT.PROVE, goal, _defrules_sentinel, None)
 
 
+def _is_dot_access(t: PsiTerm) -> bool:
+    """Whether t is a `T.F` projection rather than a bare `.` atom."""
+    _ty = t.type
+    return (_ty is not None and _ty.keyword is not None
+            and _ty.keyword.symbol == '.'
+            and t.attr_list.get('1') is not None)
+
+
 def copy_term(t: PsiTerm, var_map: Optional[Dict[int, PsiTerm]] = None) -> PsiTerm:
     """psi-term をコピーする (変数を新しい変数に置き換える)
     C版の copy.c の copy_term() に対応
@@ -2041,48 +2048,52 @@ def copy_term(t: PsiTerm, var_map: Optional[Dict[int, PsiTerm]] = None) -> PsiTe
     # IMPORTANT: If the SORT_VAR has already been bound (coref is not None), we must deref
     # and copy the concrete bound value rather than creating a fresh unbound sort-var.
     # This handles goal materialization where e.g. C:cons is already bound to a cons cell.
-    from wild_life.data_structures import SORT_VAR
-    if t.flags & SORT_VAR:
+    if t.flags & _SORT_VAR:
         if t.coref is not None:
             # Already bound — deref and fall through to copy the concrete value
             t = t.deref()
         else:
             tid = id(t)
-            if tid not in var_map:
+            new_var = var_map.get(tid)
+            if new_var is None:
                 new_var = PsiTerm()
                 new_var.type = t.type  # same sort constraint
                 new_var.flags = t.flags
                 var_map[tid] = new_var
-            return var_map[tid]
+            return new_var
 
-    t = t.deref()
+    while t.coref is not None:
+        t = t.coref
 
     # Post-deref SORT_VAR check: handles proxy tokens (tok.coref = stored_X)
     # where the SORT_VAR flag is on stored_X, not on tok.
-    if t.flags & SORT_VAR:
+    if t.flags & _SORT_VAR:
         if t.coref is not None:
             # Already bound — deref and fall through to copy the concrete value
             t = t.deref()
         else:
             tid = id(t)
-            if tid not in var_map:
+            new_var = var_map.get(tid)
+            if new_var is None:
                 new_var = PsiTerm()
                 new_var.type = t.type
                 new_var.flags = t.flags
                 var_map[tid] = new_var
-            return var_map[tid]
+            return new_var
 
+    _attrs = t.attr_list
     # 変数 (未束縛 top)
-    if t.type is WL.top and not t.attr_list and not t.resid:
+    if not _attrs and t.type is WL.top and not t.resid:
         tid = id(t)
-        if tid not in var_map:
+        new_var = var_map.get(tid)
+        if new_var is None:
             new_var = PsiTerm()
             new_var.type = WL.top
             var_map[tid] = new_var
-        return var_map[tid]
+        return new_var
 
     # 定数・アトム
-    if not t.attr_list and t.value is not None:
+    if not _attrs and t.value is not None:
         result = PsiTerm()
         result.type = t.type
         result.value = t.value
@@ -2091,9 +2102,10 @@ def copy_term(t: PsiTerm, var_map: Optional[Dict[int, PsiTerm]] = None) -> PsiTe
         # Copy delay-tracking flags so that goal copies don't re-fire delay rules.
         # Without this, _write_term → _eval_arith on a goal copy would fire delay again
         # for each fresh copy, causing infinite recursion.
-        if getattr(t, '_delay_fired', False):
+        _td = t.__dict__
+        if _td.get('_delay_fired', False):
             result._delay_fired = True
-        if getattr(t, '_is_computed', False):
+        if _td.get('_is_computed', False):
             result._is_computed = True
         return result
 
@@ -2104,8 +2116,9 @@ def copy_term(t: PsiTerm, var_map: Optional[Dict[int, PsiTerm]] = None) -> PsiTe
     # occurrences must map to the SAME fresh copy.  Register the result in
     # var_map *before* recursing so that circular structures are also safe.
     tid = id(t)
-    if tid in var_map:
-        return var_map[tid]
+    result = var_map.get(tid)
+    if result is not None:
+        return result
     result = PsiTerm()
     var_map[tid] = result  # register before recursing
     result.type = t.type
@@ -2113,8 +2126,9 @@ def copy_term(t: PsiTerm, var_map: Optional[Dict[int, PsiTerm]] = None) -> PsiTe
     result.flags = t.flags
     result.status = t.status
 
-    for key, val in t.attr_list.items():
-        result.attr_list[key] = copy_term(val, var_map)
+    _out = result.attr_list
+    for key, val in _attrs.items():
+        _out[key] = copy_term(val, var_map)
 
     return result
 

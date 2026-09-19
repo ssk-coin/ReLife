@@ -258,9 +258,6 @@ class PsiTerm:
                  attr_list: Optional[Dict[str, 'PsiTerm']] = None,
                  coref: Optional['PsiTerm'] = None,
                  resid=None):
-        PsiTerm._id_counter += 1
-        self._id = PsiTerm._id_counter
-
         self.type = type_def      # Definition (ソート)
         self.value = value        # 定数値: float, str, または None
         self.attr_list: Dict[str, 'PsiTerm'] = attr_list or {}
@@ -384,7 +381,8 @@ class PsiTerm:
         return f"PsiTerm({type_name})"
 
     def __hash__(self):
-        return self._id
+        # Identity is what __eq__ compares, so identity is what hashes.
+        return id(self)
 
     def __eq__(self, other):
         return self is other
