@@ -767,7 +767,40 @@ def _is_list_term(t: PsiTerm, eng) -> bool:
     wl = eng.wl
     if wl.nil is not None and t.type.is_subtype_of(wl.nil):
         return True
-    return wl.alist is not None and t.type.is_subtype_of(wl.alist)
+    if wl.alist is None or not t.type.is_subtype_of(wl.alist):
+        return False
+    # A `list` that is still a variable is not a list yet: it stands for
+    # whichever list it comes to be, and reading it as the empty one is how
+    # `append(X:list, [])` lost what X was going to hold.
+    return bool(t.attr_list) or t.value is not None
+
+
+def _proper_list_elems(t: PsiTerm, eng) -> Optional[list]:
+    """The elements of a list that really ends in [], or None.
+
+    `[H|append(X,[])]` is a list still being worked out, and reading it as
+    `[H]` is how insforet lost the forest it was inserting.
+    """
+    wl = eng.wl
+    items: list = []
+    cur = t.deref()
+    seen: set = set()
+    while True:
+        if cur.type is None:
+            return None
+        if wl.nil is not None and cur.type.is_subtype_of(wl.nil):
+            return items
+        if wl.alist is None or not cur.type.is_subtype_of(wl.alist):
+            return None
+        if id(cur) in seen:
+            return None
+        seen.add(id(cur))
+        h = cur.attr_list.get('1')
+        t2 = cur.attr_list.get('2')
+        if h is None or t2 is None:
+            return None
+        items.append(h.deref())
+        cur = t2.deref()
 
 
 def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
@@ -1116,10 +1149,10 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         a1 = t.attr_list.get('1')
         if a1 is None:
             return None
-        lst = a1.deref()
-        if not _is_list_term(lst, eng):
+        _elems_len = _proper_list_elems(a1.deref(), eng)
+        if _elems_len is None:
             return None
-        return eng.wl.make_integer(len(_list_to_python(lst, eng)))
+        return eng.wl.make_integer(len(_elems_len))
 
     elif sym == 'append' and len(t.attr_list) == 2:
         # append(L1, L2) -> L1 with L2 appended, the functional form of
@@ -1129,11 +1162,11 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         a2 = t.attr_list.get('2')
         if a1 is None or a2 is None:
             return None
-        head = a1.deref()
-        if not _is_list_term(head, eng):
+        _elems_app = _proper_list_elems(a1.deref(), eng)
+        if _elems_app is None:
             return None
         result = a2.deref()
-        for item in reversed(_list_to_python(head, eng)):
+        for item in reversed(_elems_app):
             result = eng.wl.make_cons(item, result)
         return result
 
