@@ -4450,6 +4450,11 @@ def _eval_embedded_user_funcs(
     if id(td) in visited:
         return
     visited.add(id(td))
+    # A backtick holds its term as it is written: the `1 + 2` of
+    # ``write(X:`(1+2), eval(X))`` is printed as the sum, not as 3.
+    if (td.type is not None and td.type.keyword is not None
+            and td.type.keyword.symbol == '`'):
+        return
     # Check if this term is a non-strict-first-arg built-in (e.g. setq, assert).
     # For these, skip evaluating argument '1' — it is a function/predicate NAME
     # that should be looked up, not evaluated as a value.
@@ -4508,6 +4513,12 @@ def _eval_embedded_user_funcs(
                         _eval_embedded_user_funcs(_ev_conj, eng, _depth + 1, visited)
                         continue
             _eval_embedded_user_funcs(child, eng, _depth + 1, visited)
+            # What the child stands for can become clear once the calls under
+            # it have been worked out: `append([H|append(L,[])],[])` is a list
+            # to append to only after the inner append has made one.
+            _re_ev = _try_eval_any_func(child, eng)
+            if _re_ev is not None and _re_ev is not child:
+                eng.unifier.set_attr(td, key, _re_ev)
 
 
 def _make_disjunction_psi(elems: list, wl) -> PsiTerm:

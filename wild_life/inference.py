@@ -1595,6 +1595,17 @@ class Engine:
                     self.push_goal(GoalType.PROVE, thegoal, aim.b, aim.c)
                     self.push_goal(GoalType.EVAL, _a_w, _R_w, _a_w.type.rule)
                     return True
+                # A call written inside an argument is written as its value
+                # too: `write(Rulename, "-->", [F1, const(X2, …)])` prints the
+                # tree const builds, not the call that stands for it.
+                from wild_life.built_ins import (
+                    _eval_embedded_user_funcs as _eeuf_w)
+                for _k_w in list(thegoal.attr_list.keys()):
+                    _a_w = thegoal.attr_list[_k_w].deref()
+                    if (_a_w.attr_list and not _iuf_w(_a_w)
+                            and _a_w.type is not None
+                            and _a_w.type._builtin_func is None):
+                        _eeuf_w(_a_w, self, 0, set())
             self.goal_stack = aim.next
             self.goal_count += 1
             if self.trace:
