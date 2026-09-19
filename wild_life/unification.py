@@ -728,15 +728,18 @@ class Unifier:
         # X:ran where ran is a FUNCTION sort) are treated as bindable variables.
         _DefType_fn = DefType
         if not u_is_var and not v_is_var:
-            # SORT_VAR flag: set by parser for any X:sort syntax
-            if u.flags & _SORT_VAR:
+            # SORT_VAR flag: set by parser for any X:sort syntax.  A term
+            # that has since been given features is no longer a variable:
+            # binding it away would throw those features out, which is how
+            # `q(X), X.1 = 1, X.2 = 2` lost its 1 and 2 to the head's `@`s.
+            if u.flags & _SORT_VAR and not u.attr_list:
                 u_is_var = True
             elif (u.value is None and not u.attr_list and not u.resid and
                     not (u.flags & _QUOTED_TRUE) and
                     u.type is not None and u.type.type == DefType.FUNCTION and
                     u.type._builtin_func is None):
                 u_is_var = True
-            if v.flags & _SORT_VAR:
+            if v.flags & _SORT_VAR and not v.attr_list:
                 v_is_var = True
             elif (v.value is None and not v.attr_list and not v.resid and
                     not (v.flags & _QUOTED_TRUE) and
