@@ -2781,6 +2781,15 @@ class Engine:
         _funct_keys_set = set(funct.attr_list.keys())
         _head_only_keys = set(_head_d_arity.attr_list.keys()) - _funct_keys_set
         if _head_only_keys:
+            # Unless the call is one this rule simply does not fit and
+            # another might: `strleq(S1, S2)` is not the four-argument
+            # `strleq("", string, _, _)`, and the rule after it is the one
+            # that says what two strings compare to.  A call that also
+            # carries features of its own is a different matter, handled
+            # below.
+            if (not (_funct_keys_set - set(_head_d_arity.attr_list.keys()))
+                    and len(active) > 1):
+                return False
             # A rule asks for features the call does not carry, so the call is
             # a partial application: it may yet gain them, and which rule
             # applies is not settled.  It stands for itself rather than
@@ -3057,6 +3066,15 @@ class Engine:
         _body_sym = body_d2.type.keyword.symbol if (body_d2.type and body_d2.type.keyword) else ''
         from wild_life.built_ins import _ARITH_OPS_SET as _AOS
         _body_is_arith = (_body_sym in _AOS and _is_cae(body_d2))
+        # A body that says something either holds or does not — strleq's
+        # `or(C1 < C2, and(C1 =:= C2, …))` — answers true or false, and `=`
+        # is what works that out.
+        from wild_life.built_ins import (_is_proper_bool_expr as _ipbe_body,
+                                         _ARITH_COMPARISONS as _AC_body)
+        _body_is_bool = (_ipbe_body(body_d2)
+                         or (_body_sym in _AC_body
+                             and '1' in body_d2.attr_list
+                             and '2' in body_d2.attr_list))
 
         # A disjunction body hands back one alternative at a time, and the one
         # taken still has to be worked out — `nat -> {0;1+nat}` answers 1 for
@@ -3080,7 +3098,7 @@ class Engine:
                                None, None)
                 return True
 
-        if _body_is_arith and not eval_goals:
+        if (_body_is_arith or _body_is_bool) and not eval_goals:
             # Arithmetic body with no embedded user-function calls:
             # push via bi_unify (PROVE) so arithmetic constraints fire properly.
             _eq_defn_ei = getattr(wl, 'eqsym', None)

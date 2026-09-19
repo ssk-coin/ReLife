@@ -569,6 +569,33 @@ def _simplify_arith(t: 'PsiTerm', eng) -> 'Optional[PsiTerm]':
     return None
 
 
+def _eval_arith_comparison(t: PsiTerm, eng) -> Optional[PsiTerm]:
+    """What an arithmetic comparison comes to, when both sides are numbers.
+
+    A comparison answers true or false, so it stands where a boolean is
+    wanted: strleq writes `or(C1 < C2, and(C1 =:= C2, …))`, and the `or`
+    can only be worked out once the two comparisons have been.
+    """
+    if t is None:
+        return None
+    t = t.deref()
+    sym = _get_sym(t)
+    if sym not in ('>', '<', '>=', '=<', '=:=', '=\\='):
+        return None
+    a1, a2 = _get_two_args(t)
+    if a1 is None or a2 is None:
+        return None
+    ok1, v1 = _eval_arith(a1, eng)
+    if not ok1:
+        return None
+    ok2, v2 = _eval_arith(a2, eng)
+    if not ok2:
+        return None
+    held = {'>': v1 > v2, '<': v1 < v2, '>=': v1 >= v2, '=<': v1 <= v2,
+            '=:=': v1 == v2, '=\\=': v1 != v2}[sym]
+    return _make_atom(eng, 'true' if held else 'false')
+
+
 def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
     """Try to evaluate a boolean function application.
 
@@ -585,8 +612,10 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None or a2 is None:
             return None
         # Recursively evaluate args
-        a1 = _try_eval_bool(a1, eng) or a1.deref()
-        a2 = _try_eval_bool(a2, eng) or a2.deref()
+        a1 = (_try_eval_bool(a1, eng) or _eval_arith_comparison(a1, eng)
+              or a1.deref())
+        a2 = (_try_eval_bool(a2, eng) or _eval_arith_comparison(a2, eng)
+              or a2.deref())
         s1, s2 = _get_sym(a1), _get_sym(a2)
         if s1 == 'false' or s2 == 'false':
             return _make_atom(eng, 'false')
@@ -606,8 +635,10 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
         a1, a2 = _get_two_args(t)
         if a1 is None or a2 is None:
             return None
-        a1 = _try_eval_bool(a1, eng) or a1.deref()
-        a2 = _try_eval_bool(a2, eng) or a2.deref()
+        a1 = (_try_eval_bool(a1, eng) or _eval_arith_comparison(a1, eng)
+              or a1.deref())
+        a2 = (_try_eval_bool(a2, eng) or _eval_arith_comparison(a2, eng)
+              or a2.deref())
         s1, s2 = _get_sym(a1), _get_sym(a2)
         if s1 == 'true' or s2 == 'true':
             return _make_atom(eng, 'true')
@@ -627,7 +658,8 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
         a1 = t.attr_list.get('1')
         if a1 is None:
             return None
-        a1 = _try_eval_bool(a1.deref(), eng) or a1.deref()
+        a1 = (_try_eval_bool(a1.deref(), eng)
+              or _eval_arith_comparison(a1, eng) or a1.deref())
         s1 = _get_sym(a1)
         if s1 == 'true':
             return _make_atom(eng, 'false')
@@ -639,8 +671,10 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
         a1, a2 = _get_two_args(t)
         if a1 is None or a2 is None:
             return None
-        a1 = _try_eval_bool(a1, eng) or a1.deref()
-        a2 = _try_eval_bool(a2, eng) or a2.deref()
+        a1 = (_try_eval_bool(a1, eng) or _eval_arith_comparison(a1, eng)
+              or a1.deref())
+        a2 = (_try_eval_bool(a2, eng) or _eval_arith_comparison(a2, eng)
+              or a2.deref())
         s1, s2 = _get_sym(a1), _get_sym(a2)
         if s1 in ('true', 'false') and s2 in ('true', 'false'):
             result = (s1 == 'true') ^ (s2 == 'true')
@@ -1379,6 +1413,17 @@ def _eval_and_conjunction(t: PsiTerm, eng) -> Optional[PsiTerm]:
             if ev is not None:
                 return _evaluate_result_for_display(ev.deref(), eng, 1)
             return None
+        # A built-in written for its value is asked for it here too:
+        # tri_ins meets `strip(L)` with `root_sort(L)` to make a fresh head
+        # for the list, and neither side is the term it stands for.
+        if _is_strip_func(s):
+            return _eval_strip_or_copy_func(s, eng, False)
+        if _is_copy_pointer_func(s):
+            return _eval_strip_or_copy_func(s, eng, True)
+        if s.attr_list:
+            ev = _try_eval_any_func(s, eng)
+            if ev is not None and ev.deref() is not s:
+                return ev.deref()
         return s
 
     t1 = _eval_side(t1)
