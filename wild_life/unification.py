@@ -1809,6 +1809,14 @@ class Unifier:
                 self.trail.undo_to(_trial_mark)
                 continue
 
+            # A feature the rule's pattern brings as `{[];list}` is worth the
+            # first of them, with the rest there to come back to: an activity
+            # written without requests has an empty list of them, and its
+            # earliest start is what latest([]) answers.  A feature the term
+            # already stated is settled by the unification above and is no
+            # longer a choice.
+            self._settle_pattern_disjunctions(pattern_d_copy)
+
             # Prove the goal itself, not a copy: it shares the pattern's
             # variables, and that sharing is how the proof reaches the term.
             # `get_along(P,Q)` binding Q to julius is what gives the cleopatra
@@ -1857,6 +1865,21 @@ class Unifier:
                 # Goal failed: undo pattern unification (tentative semantics).
                 # Remove attrs added by the pattern (e.g. best_friend => Q_fresh).
                 self.trail.undo_to(_trial_mark)
+
+    def _settle_pattern_disjunctions(self, t: PsiTerm, _seen: set = None) -> None:
+        """Bind the disjunctions a delay rule's pattern left on a term."""
+        if _seen is None:
+            _seen = set()
+        t = t.deref()
+        if id(t) in _seen:
+            return
+        _seen.add(id(t))
+        for _v in list(t.attr_list.values()):
+            _vd = _v.deref()
+            if _vd.type is WL.disjunction:
+                self._settle_disjunction(_vd)
+                _vd = _vd.deref()
+            self._settle_pattern_disjunctions(_vd, _seen)
 
     def _fire_delay_rules_for_subterms(self, t: PsiTerm, visited: set = None) -> None:
         """Fire delay rules recursively for all typed sub-terms of t.
