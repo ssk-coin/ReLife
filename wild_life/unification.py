@@ -1239,13 +1239,6 @@ class Unifier:
         if u is v:
             return True
 
-        # Whether each side already stood for a value before the other's was
-        # copied across: two different numbers stay two terms, but a variable
-        # meeting a number becomes that number's own term, so `A = C` leaves
-        # C reading as A.
-        _u_had_value = u.value is not None
-        _v_had_value = v.value is not None
-
         # 値の単一化 (数値・文字列)
         if not self._unify_values(u, v):
             return False
@@ -1268,18 +1261,16 @@ class Unifier:
         # binding v → u (via coref).  This preserves the sharing relationship
         # so that print_variables can detect when two variables refer to the
         # same canonical term and show e.g. "Y = X" instead of "Y = !".
-        # Only do this for non-numeric atoms (numbers are primitive values that
-        # should remain separate; ChoicePoint values in '!' terms are OK to merge).
-        from wild_life.data_structures import ChoicePoint as _CP_merge, NON_STRICT_TERM as _NST_merge
-        _u_prim = (_u_had_value
-                   and isinstance(u.value, (int, float, str)))
-        _v_prim = (_v_had_value
-                   and isinstance(v.value, (int, float, str)))
+        # A number is a term like any other here: `merge2([box(Id,A)|…],
+        # [@|…[box(Id,B)|@]])` makes one box's number the other's, and boites
+        # reads that back as `box(_A: 3,1)` in one list and `box(_A,-1)` in
+        # the other.
+        from wild_life.data_structures import NON_STRICT_TERM as _NST_merge
         # Bind u → v so deref(u) returns v (the canonical psi-term).
         # This matches C Wild Life's convention: the second argument (v) is preferred
         # as the canonical representative. For example, when unifying A.c (T_c) with A,
         # we bind T_c → A so A remains canonical and A.c = A shows the circular reference.
-        if not _u_prim and not _v_prim and u.coref is None:
+        if u.coref is None:
             # Propagate NON_STRICT_TERM from u to v before binding: if u is a frozen
             # arithmetic term (e.g. `+(23) with NST) and v is the new canonical
             # representative, the freeze must survive on v too.
