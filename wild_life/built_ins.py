@@ -904,6 +904,18 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         result = s[start:start + length] if start < len(s) else ''
         return _make_string(eng, result)
 
+    elif sym == 'project' and len(t.attr_list) == 2:
+        # project(A, B) is the older way of writing B.A: the feature A holds
+        # on B.  built_ins.lf keeps it as `project(A,B) -> B.A.`
+        a1 = t.attr_list.get('1')
+        a2 = t.attr_list.get('2')
+        if a1 is None or a2 is None or eng is None:
+            return None
+        _dot_defn = eng.wl.update_symbol(eng.wl.syntax_module, '.')
+        _dot = PsiTerm(type_def=_dot_defn)
+        _dot.attr_list = {'1': a2, '2': a1}
+        return _resolve_dot_feat(_dot, eng, create=False)
+
     elif sym == 'root_sort' or sym == 'sort':
         # root_sort(T) -> the root sort of T.
         # For numeric/string atoms, the root sort is the value itself.
@@ -4686,7 +4698,8 @@ def _evaluate_result_for_display(t: PsiTerm, eng, _depth: int = 0) -> PsiTerm:
     return t
 
 
-def _resolve_dot_feat(dot_term: 'PsiTerm', eng) -> 'Optional[PsiTerm]':
+def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
+                      create: bool = True) -> 'Optional[PsiTerm]':
     """Get (or create) the attribute cell for a T.F dot-access term.
 
     Returns the PsiTerm stored at attr fkey of T's host (creating a fresh
@@ -4764,6 +4777,11 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng) -> 'Optional[PsiTerm]':
     existing = host.attr_list.get(fkey)
     if existing is not None:
         return existing  # caller will deref as needed
+    if not create:
+        # Asked only for what the term already holds.  A feature it may still
+        # be given — by the prototype of its sort, say — is not read as an
+        # empty one here: the call stands until the term has it.
+        return None
     # A call still waiting for arguments is a function, not a term with room
     # for another feature: `X.2 = 2` on the `f(1)` of `f(X,Y) -> [X,Y]` is
     # refused, and says which function it was.
