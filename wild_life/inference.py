@@ -2137,6 +2137,13 @@ class Engine:
             for key in list(td.attr_list.keys()):
                 child = td.attr_list[key].deref()
                 if _iuf_h(child) and self._head_call_is_settled(child):
+                    # A call is worked out from terms that carry what their
+                    # sorts promise: `const(X2:tree(nom,[]), …)` reads the
+                    # third feature `::tree(@,list,list)` gives every tree,
+                    # and would otherwise ask for one the term has not been
+                    # given yet.
+                    for _ca in list(child.attr_list.values()):
+                        self.unifier.apply_prototypes_deep(_ca)
                     evaled = _teaf_h(child, self)
                     if evaled is not None and evaled.deref() is not child:
                         td.attr_list[key] = evaled
