@@ -84,9 +84,17 @@ def _filter_stderr(text: str) -> str:
 # works 150! out four times over in list-of-digits arithmetic to watch what
 # the collector recovers, so the limit that keeps the rest of the suite brisk
 # is not the right one for either.
+#
+# pyth and z_pyth_gc are a third case: what they answer is right to the
+# byte, and only the clock is against them.  Working the Pythagorean
+# triples out takes the C interpreter a moment and takes this port about
+# 27 seconds, so the limit that keeps the rest of the suite brisk fails
+# them over speed rather than over anything they say.
 LONG_TESTS: dict = {
     "z_power_4": 180,
     "fact": 90,
+    "pyth": 60,
+    "z_pyth_gc": 60,
 }
 
 
