@@ -150,6 +150,14 @@ class Keyword:
 
 # ==================== Definition (型/述語/関数の定義) ====================
 
+_HIERARCHY_GEN = [0]
+
+
+def bump_hierarchy_generation() -> None:
+    """Say that the sort hierarchy has changed, so cached answers are stale."""
+    _HIERARCHY_GEN[0] += 1
+
+
 class Definition:
     """シンボル定義 - 型定義、述語定義、関数定義を含む
     C版の struct wl_definition に対応
@@ -183,6 +191,7 @@ class Definition:
         # :: Sort(attrs). で登録されるソートレベルのプロトタイプ属性
         # key → PsiTerm のdict。ソートの「典型的な」属性値を保存する。
         self.prototype_attrs: Optional[dict] = None  # {attr_name: PsiTerm}
+        self._subtype_cache = None   # (generation, {id(other): bool})
 
         # 型エンコード (推移閉包による高速な型チェック)
         self._type_code: Optional[set] = None
@@ -205,20 +214,34 @@ class Definition:
     def is_subtype_of(self, other: 'Definition') -> bool:
         """selfがotherのサブタイプかどうかを判定
         型階層を上に向かって探索する。
+
+        The answer is kept until a new sort link makes it out of date: the
+        question is asked millions of times over a run, and the hierarchy
+        changes only when a program declares another sort.
         """
         if self is other:
             return True
+        cache = self._subtype_cache
+        if cache is None or cache[0] != _HIERARCHY_GEN[0]:
+            cache = (_HIERARCHY_GEN[0], {})
+            self._subtype_cache = cache
+        known = cache[1].get(id(other))
+        if known is not None:
+            return known
         # BFS/DFS で parents を辿る
+        found = False
         visited = set()
         stack = list(self.parents)
         while stack:
             d = stack.pop()
             if d is other:
-                return True
+                found = True
+                break
             if d not in visited:
                 visited.add(d)
                 stack.extend(d.parents)
-        return False
+        cache[1][id(other)] = found
+        return found
 
     def __repr__(self):
         return f"Def({self.symbol!r})"

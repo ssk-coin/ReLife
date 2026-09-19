@@ -298,9 +298,11 @@ class WildLifeRuntime:
             child.parents.append(parent)
         if child not in parent.children:
             parent.children.append(child)
-        # The order delay rules run in is read off the hierarchy, so a new
-        # link makes the reading that was taken of it out of date.
+        # The order delay rules run in is read off the hierarchy, and so are
+        # the sub-sort answers, so a new link makes both out of date.
         self.hierarchy_version = getattr(self, 'hierarchy_version', 0) + 1
+        from wild_life.data_structures import bump_hierarchy_generation
+        bump_hierarchy_generation()
 
     # ==================== 組み込み型の初期化 ====================
 

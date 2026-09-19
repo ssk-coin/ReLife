@@ -2351,7 +2351,8 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     _t_val = t.value
     _t_type = t.type
     if (_t_val is not None and _t_type is not None
-            and _t_type.is_subtype_of(wl.real)):
+            and (_t_type is wl.integer or _t_type is wl.real
+                 or _t_type.is_subtype_of(wl.real))):
         # Fire int/real delay rule for parsed literal integers (not computed by _make_number).
         # In C Wild Life, literal integers in expressions act like narrowed sort-vars
         # and fire the :: I:int | ... delay when they are "evaluated".
@@ -2433,6 +2434,26 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
                 t_pre.attr_list[_k] = _evaled_arg if _evaled_arg is not None else _vd
         _cp_save = eng.choice_stack  # Save choice stack before user-func unification
         for _ri, (h0, b0) in enumerate(active):
+            # A head that asks for a number the call does not carry cannot
+            # fit, and saying so costs a comparison where copying the rule
+            # out to find the same thing costs two terms: `gcd(I,0)` is
+            # asked of `gcd(48,18)` once per step of every division.
+            _h0_d = h0.deref()
+            _mismatch = False
+            for _hk, _hv in _h0_d.attr_list.items():
+                _hv_d = _hv.deref()
+                if _hv_d.value is None or _hv_d.attr_list:
+                    continue
+                _cv = t_pre.attr_list.get(_hk)
+                if _cv is None:
+                    continue
+                _cv_d = _cv.deref()
+                if (_cv_d.value is not None and not _cv_d.attr_list
+                        and _cv_d.value != _hv_d.value):
+                    _mismatch = True
+                    break
+            if _mismatch:
+                continue
             _vm: dict = {}
             head = copy_term(h0, _vm)
             body = copy_term(b0, _vm)

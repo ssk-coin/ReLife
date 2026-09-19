@@ -760,6 +760,22 @@ def _rule_match_status(head: 'PsiTerm', call: 'PsiTerm', eng):
     if not keys:
         return 'ready'
 
+    # A head that asks for one number where the call passes another can
+    # never fit, and no narrowing will change that.  Saying so here costs a
+    # comparison; asking the question in full below costs a copy of both
+    # terms, and gcd's `gcd(I,0)` is asked it once per step of every
+    # division.  Only numbers are read this way: other values — a choice
+    # point standing in for a term — compare unequal without meaning it.
+    for k in keys:
+        hd = head.attr_list[k].deref()
+        cd = call.attr_list[k].deref()
+        if (hd.value is not None and cd.value is not None
+                and not hd.attr_list and not cd.attr_list
+                and isinstance(hd.value, (int, float))
+                and isinstance(cd.value, (int, float))
+                and hd.value != cd.value):
+            return 'never'
+
     # A quick look before the question is asked in full: a head of plain
     # variables, each named once and each meeting a different term, fits
     # whatever the call passes.  That is the answer the question below would
@@ -1491,6 +1507,9 @@ class Engine:
                         if super_def.type == DefType.UNDEF:
                             super_def.type = DefType.TYPE
                         if parent_def not in super_def.parents:
+                            from wild_life.data_structures import (
+                                bump_hierarchy_generation as _bhg1)
+                            _bhg1()
                             super_def.parents.append(parent_def)
                         if super_def not in parent_def.children:
                             parent_def.children.append(super_def)
@@ -1518,6 +1537,9 @@ class Engine:
             if parent.type == DefType.UNDEF:
                 parent.type = DefType.TYPE
             if parent not in child.parents:
+                from wild_life.data_structures import (
+                    bump_hierarchy_generation as _bhg2)
+                _bhg2()
                 child.parents.append(parent)
             if child not in parent.children:
                 parent.children.append(child)
