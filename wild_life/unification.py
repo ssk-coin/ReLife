@@ -327,6 +327,69 @@ def types_compatible(d1: Definition, d2: Definition) -> bool:
 
 # ==================== 単一化エンジン ====================
 
+def _delay_rules_by_specificity(wl) -> list:
+    """The delay rules, most specific sort first.
+
+    A term that becomes a d owes `:: X:d`, then what the sorts above d say
+    about it, and lazyinherit shows the order: D, C, B, E, A.  That is the
+    hierarchy read from the top — a, e, b, c, d — taken backwards, so a sort
+    comes before every sort it sits under.
+    """
+    _ver = getattr(wl, 'hierarchy_version', 0)
+    _cached = getattr(wl, '_delay_rule_order', None)
+    if (_cached is not None and _cached[0] == _ver
+            and _cached[1] == len(wl.delay_rules)):
+        return _cached[2]
+
+    top = getattr(wl, 'top', None)
+    # The sorts the rules speak of, and every sort above them.
+    involved: dict = {}
+    stack = []
+    for rule in wl.delay_rules:
+        _ps = rule.attr_list.get('1')
+        _pt = _ps.deref().type if _ps is not None else None
+        if _pt is not None and _pt is not top:
+            stack.append(_pt)
+    while stack:
+        node = stack.pop()
+        if id(node) in involved:
+            continue
+        involved[id(node)] = node
+        for parent in (getattr(node, 'parents', None) or ()):
+            if id(parent) not in involved:
+                stack.append(parent)
+    # Read them from the top down: the sorts nothing sits above come first,
+    # in the order they were declared, and each sort follows the ones it
+    # sits under.
+    roots = [d for d in involved.values()
+             if not [p for p in (getattr(d, 'parents', None) or ())
+                     if id(p) in involved]]
+    roots.sort(key=lambda d: getattr(d, 'creation_id', 0))
+    order: dict = {}
+    queue = list(roots)
+    seen = {id(d) for d in roots}
+    while queue:
+        node = queue.pop(0)
+        order[id(node)] = len(order)
+        for child in (getattr(node, 'children', None) or ()):
+            if id(child) in involved and id(child) not in seen:
+                seen.add(id(child))
+                queue.append(child)
+
+    def key(item):
+        _i, rule = item
+        pattern_side = rule.attr_list.get('1')
+        pat = pattern_side.deref().type if pattern_side is not None else None
+        if pat is None or pat is top:
+            return (-1, -_i)
+        return (order.get(id(pat), -1), -_i)
+
+    ranked = sorted(enumerate(wl.delay_rules), key=key, reverse=True)
+    result = [r for _i, r in ranked]
+    wl._delay_rule_order = (_ver, len(wl.delay_rules), result)
+    return result
+
+
 class Unifier:
     """LIFE言語の単一化エンジン
     C版の global_unify(), global_unify_attr() などに対応 (login.c)
@@ -1844,7 +1907,7 @@ class Unifier:
         """_fire_delay_rules の実処理 (再入禁止ガード外側から呼ぶ)。"""
         wl = WL
         fired_set = _fired_rules_of(u)
-        for rule_inner in wl.delay_rules:
+        for rule_inner in _delay_rules_by_specificity(wl):
             if use_fired_set and id(rule_inner) in fired_set:
                 # This term has already run this rule for an earlier, wider
                 # sort of its own: narrowing b1 to a1 owes A1, not B1 again.
