@@ -632,9 +632,14 @@ def _match_one(c: 'PsiTerm', h: 'PsiTerm', out: list, eng, seen: set,
     for k, hv in h.attr_list.items():
         cv = c.attr_list.get(k)
         if cv is None:
-            if not _is_open_call_term(c, wl):
+            # A head that asks for a sort as well asks the call to become
+            # something it is not: `g(t2)` is a t2 and `g(t1(l => t3))` wants
+            # a t1, so the rule is ruled out.  One that asks only for features
+            # — project3's `X:@(set => true)` — is waiting for what the term
+            # will be given, and any term can be given a feature.
+            if (not _is_open_call_term(c, wl)
+                    and h.type is not None and h.type is not wl.top):
                 return 'never'
-            # The call can still gain the feature.
             _add_blocker(out, c)
             return True
         below = _match_one(cv, hv, out, eng, seen, bindings, stuck, depth + 1)
