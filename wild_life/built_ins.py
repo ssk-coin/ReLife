@@ -1149,7 +1149,13 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         a1 = t.attr_list.get('1')
         if a1 is None:
             return None
-        _elems_len = _proper_list_elems(a1.deref(), eng)
+        # What the argument stands for is what is measured: `length(
+        # factors(I))` counts the factors, not the call that finds them.
+        _a1_len = a1.deref()
+        _ev_len = _try_eval_any_func(_a1_len, eng)
+        if _ev_len is not None:
+            _a1_len = _ev_len.deref()
+        _elems_len = _proper_list_elems(_a1_len, eng)
         if _elems_len is None:
             return None
         return eng.wl.make_integer(len(_elems_len))
@@ -1162,7 +1168,11 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         a2 = t.attr_list.get('2')
         if a1 is None or a2 is None:
             return None
-        _elems_app = _proper_list_elems(a1.deref(), eng)
+        _a1_app = a1.deref()
+        _ev_app = _try_eval_any_func(_a1_app, eng)
+        if _ev_app is not None:
+            _a1_app = _ev_app.deref()
+        _elems_app = _proper_list_elems(_a1_app, eng)
         if _elems_app is None:
             return None
         result = a2.deref()
