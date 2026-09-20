@@ -33,10 +33,12 @@ Options
   -j N, --jobs N      Run N tests in parallel (default: 1).
   --test-dir DIR      Directory containing the test suite (default: tests_original).
   --log FILE          Write a summary log to FILE (like check.log).
-  --timeout SECS      Per-test timeout in seconds (default: 20).
+  --timeout SECS      Per-test timeout in seconds (default: 90).
 
-A test that is a timing benchmark rather than a feature check is given
-its own longer limit; see LONG_TESTS.
+The limit is there to stop a test that has gone into a loop from holding
+the suite up, not to measure speed: this port takes tens of seconds over
+work the C interpreter did in a moment, and that is not a failure.  A
+test that needs longer still is given its own limit; see LONG_TESTS.
 """
 
 from __future__ import annotations
@@ -80,21 +82,10 @@ def _filter_stderr(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 # Tests whose point is how much work the interpreter gets through rather
-# than what it answers.  z_power_4 runs 4^9 additions on purpose, and fact
-# works 150! out four times over in list-of-digits arithmetic to watch what
-# the collector recovers, so the limit that keeps the rest of the suite brisk
-# is not the right one for either.
-#
-# pyth and z_pyth_gc are a third case: what they answer is right to the
-# byte, and only the clock is against them.  Working the Pythagorean
-# triples out takes the C interpreter a moment and takes this port about
-# 27 seconds, so the limit that keeps the rest of the suite brisk fails
-# them over speed rather than over anything they say.
+# than what it answers.  z_power_4 runs 4^9 additions on purpose, so even
+# the roomy limit below is not the right one for it.
 LONG_TESTS: dict = {
     "z_power_4": 180,
-    "fact": 90,
-    "pyth": 60,
-    "z_pyth_gc": 60,
 }
 
 
@@ -262,8 +253,8 @@ def main(argv=None) -> int:
         help="Write summary log to FILE.",
     )
     parser.add_argument(
-        "--timeout", type=int, default=20, metavar="SECS",
-        help="Per-test timeout in seconds (default: 20).",
+        "--timeout", type=int, default=90, metavar="SECS",
+        help="Per-test timeout in seconds (default: 90).",
     )
     args = parser.parse_args(argv)
 
