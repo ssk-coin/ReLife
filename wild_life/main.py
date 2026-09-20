@@ -176,6 +176,42 @@ def run_repl(
     # ---- Print banner -------------------------------------------------------
     title(quiet)
 
+    # ---- Boot-load the term-expansion layer ---------------------------------
+    # C Wild Life links term_expansion.lf into its boot image, so the names the
+    # file declares public — associate_expanders and the rest — answer from
+    # every module.  Library files such as accumulators.lf call them while they
+    # load and abort without them.  The file sits next to built_ins.lf at the
+    # top of the source tree, which is where we look for it rather than in the
+    # working directory.
+    #
+    # C keeps the file's helpers to the built-in module, where the public
+    # declaration is what lets a name out of it.  Here every name in the
+    # built-in module answers from everywhere, declared public or not, so the
+    # file is given a module of its own and only the names it declares public
+    # are put where the rest of the interpreter sees them.  Several of the
+    # helpers — prefix, warn, line — are words a program is free to use for
+    # something else of its own.
+    term_expansion_file = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "term_expansion.lf")
+    if os.path.isfile(term_expansion_file):
+        expansion_module = WL.create_module("term_expansion")
+        expansion_module.open_modules = [WL.bi_module, WL.syntax_module]
+        saved_module = WL.current_module
+        WL.set_current_module(expansion_module)
+        try:
+            engine.load_file(term_expansion_file)
+        except HaltException:
+            return 0
+        except Exception as exc:
+            sys.stderr.write(
+                f"Warning: could not load {term_expansion_file}: {exc}\n")
+        finally:
+            WL.set_current_module(saved_module)
+        for name, defn in expansion_module.symbol_table.items():
+            if defn.keyword is not None and defn.keyword.public:
+                WL.bi_module.symbol_table.setdefault(name, defn)
+
     # ---- Load system initialisation file (.set_up) --------------------------
     # Note: built_ins.lf uses complex module syntax not yet supported by the
     # parser. All Python built-ins are registered via built_ins.py, so we only

@@ -895,6 +895,23 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     cell = _global_cell(t, eng)
     if cell is not None:
         return cell
+    # An argument written as a global name is there for what its cell holds:
+    # std_expander asks `root_sort(traverse_method)` for the sort of the
+    # method it was handed, not for the sort of the name.  The reading is done
+    # through a stand-in so that the term the caller holds is left as it is.
+    if t.attr_list and eng is not None and eng.wl.global_defs:
+        _sub = None
+        for _gk, _gv in t.attr_list.items():
+            _gc = _global_cell(_gv.deref(), eng)
+            if _gc is None:
+                continue
+            if _sub is None:
+                _sub = PsiTerm(type_def=t.type, value=t.value)
+                _sub.flags = t.flags
+                _sub.attr_list = dict(t.attr_list)
+            _sub.attr_list[_gk] = _gc
+        if _sub is not None:
+            t = _sub
     sym = _get_sym(t)
 
     if sym == 'psi2str':
@@ -3564,8 +3581,13 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
 
     Returns the result PsiTerm, or None if evaluation can't proceed.
     The engine trail is NOT rolled back — bindings persist on the trail.
+
+    How deep this may go is a guard against a call that reduces for ever, not
+    a limit on what a program may ask for: factorize looks for a factor of
+    44449 by trying every number up to 211, which is a chain of some six
+    hundred reductions and a perfectly ordinary thing to ask.
     """
-    if _depth > 40:
+    if _depth > 2000:
         return None
     if t is None:
         return None
@@ -3593,6 +3615,10 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
     _cs_sync = eng.choice_stack
     try:
         return _eval_user_func_sync_inner(t, eng, _depth)
+    except RecursionError:
+        # A chain of reductions longer than the Python stack holds is one
+        # this cannot work out here; the call is left as it stands.
+        return None
     finally:
         _active_sync.discard(id(t))
         eng.choice_stack = _cs_sync
@@ -4503,7 +4529,7 @@ def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
     and compound terms with embedded user-function sub-terms.
     Returns the evaluated PsiTerm or None if evaluation cannot proceed.
     """
-    if _depth > 40:
+    if _depth > 2000:
         return None
 
     # Arithmetic expression?
@@ -5411,6 +5437,17 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
 
     a_d = a.deref()
     b_d = b.deref()
+
+    # A name declared with `global` stands for the cell every reference to it
+    # reads, on either side of the equation: `traverse_method =
+    # str2psi(strcon(psi2str(Name),"_traverse"), current_module)` writes what
+    # the call answers into the cell rather than asking the name to be it.
+    _a_cell = _global_cell(a_d, eng)
+    if _a_cell is not None:
+        a_d = _a_cell.deref()
+    _b_cell = _global_cell(b_d, eng)
+    if _b_cell is not None:
+        b_d = _b_cell.deref()
 
     # Handle T.F = V and V = T.F (dot feature access / creation).
     # When T.F does not yet exist as an attribute, a fresh variable is

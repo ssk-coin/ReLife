@@ -331,6 +331,77 @@ def _term_has_callable_sub(t: PsiTerm, seen=None, top: bool = True) -> bool:
                for v in t.attr_list.values())
 
 
+def _term_has_global(t: PsiTerm, seen=None) -> bool:
+    """Whether a stored head names a global variable anywhere under it."""
+    if t is None:
+        return False
+    if seen is None:
+        seen = set()
+    oid = id(t)
+    if oid in seen:
+        return False
+    seen.add(oid)
+    while t.coref is not None:
+        t = t.coref
+    if (not t.attr_list and t.value is None
+            and t.type is not None and t.type.type is DefType.GLOBAL):
+        return True
+    return any(_term_has_global(v, seen) for v in t.attr_list.values())
+
+
+def _link_globals(t: PsiTerm, eng, seen=None) -> None:
+    """Make the global names in a copied head reach the globals' cells.
+
+    A name declared with `global` stands for one psi-term wherever it is
+    written, so copying a clause must not copy it: the position it holds in
+    the head has to be that very cell, and matching the call then binds the
+    global.  That is how std_expander's make_expander takes each method out
+    of the call its head matches and reads it back through the global in its
+    body.
+    """
+    from wild_life.built_ins import _note_global_used
+    if t is None:
+        return
+    if seen is None:
+        seen = set()
+    t = t.deref()
+    oid = id(t)
+    if oid in seen:
+        return
+    seen.add(oid)
+    if not t.attr_list:
+        defn = t.type
+        if (t.value is None and defn is not None
+                and defn.type is DefType.GLOBAL
+                and defn.global_value is not None
+                and defn.global_value is not t):
+            _note_global_used(eng, defn)
+            t.coref = defn.global_value
+        return
+    for v in t.attr_list.values():
+        _link_globals(v, eng, seen)
+
+
+def _link_head_globals(head: PsiTerm, head_orig: PsiTerm, eng) -> None:
+    """Link a fresh head copy to the cells of the globals the rule names.
+
+    Whether a stored head names a global at all is asked afresh at every
+    match, so the answer is kept on the head; a `global` declaration that
+    comes after the rule can make a name one, so what is kept alongside it is
+    how many globals had been declared when the answer was given.
+    """
+    _defs = eng.wl.global_defs
+    if not _defs:
+        return
+    _epoch = len(_defs)
+    _hg = head_orig.__dict__.get('_wl_has_global')
+    if _hg is None or _hg[0] != _epoch:
+        _hg = (_epoch, _term_has_global(head_orig))
+        head_orig._wl_has_global = _hg
+    if _hg[1]:
+        _link_globals(head, eng)
+
+
 def _body_has_cut(term: PsiTerm, wl, seen=None) -> bool:
     """Whether a stored clause body holds a cut anywhere under it.
 
@@ -2142,6 +2213,7 @@ class Engine:
         _vm: dict = {}
         head = copy_term(head_orig, _vm)
         body = copy_term(body_orig, _vm)
+        _link_head_globals(head, head_orig, self)
         # A call written into a clause head's argument is there for its value:
         # `p_a(pair(foo_a(Y:titi_a), …))` matches against pair(t(Y), …), which
         # is what foo_a answers, not against the call itself.  Only a call a
@@ -2752,6 +2824,7 @@ class Engine:
         _vm: dict = {}
         head = copy_term(head_orig, _vm)
         body = copy_term(body_orig, _vm)
+        _link_head_globals(head, head_orig, self)
 
         # Handle conditional functional rule: body = (value | condition)
         # where '|' is the such-that / function-guard operator.
@@ -2793,6 +2866,7 @@ class Engine:
                             _vm_st: dict = {}
                             head = copy_term(head_orig, _vm_st)
                             body = copy_term(body_orig, _vm_st)
+                            _link_head_globals(head, head_orig, self)
                             body_d = body.deref()
                             val_part  = body_d.attr_list.get('1')
                             cond_part = body_d.attr_list.get('2')
