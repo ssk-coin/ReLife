@@ -1466,6 +1466,12 @@ def _eval_and_conjunction(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if s.type is not None and s.type is wl.and_sym:
             return _eval_and_conjunction(s, eng)
         s = _strip_bq(s)
+        # A name declared with `global` stands for its cell, and it is the
+        # cell the meet narrows: eratosthenes reads its limit with
+        # `read_token(limit & int)`.
+        _g_side = _global_cell(s, eng)
+        if _g_side is not None:
+            return _g_side.deref()
         # Evaluate user-defined function calls (e.g. posint_stream_to(5))
         if _is_user_function(s):
             _mark = eng.trail.mark()
@@ -5016,6 +5022,11 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
         return None
     host = a1.deref()
     feat = a2.deref()
+    # A name declared with `global` stands for a cell, and the feature
+    # belongs to the cell: `sieve.M` reads and writes what sieve holds.
+    _host_cell = _global_cell(host, eng)
+    if _host_cell is not None:
+        host = _host_cell.deref()
     # If the host is itself a dot-access expression (nested chain like A.a.b.c.d),
     # resolve it recursively to get the actual psi-term that holds the feature.
     if (host.type is not None and host.type.keyword is not None
@@ -7347,10 +7358,13 @@ def bi_call_once(goal: PsiTerm, eng) -> bool:
 
 
 def _all_builtin_goals(t: 'PsiTerm', eng, _depth: int = 0) -> bool:
-    """Whether t is a goal made only of built-in predicates.
+    """Whether t is a goal that can be proven rather than worked out.
 
-    cond/2 calls no definition of the user's own, but `(write(X),nl)` is not
-    one — it is the printing cond/2 is there to do.
+    cond/2 reads its branch as a function where it can, but `(write(X),nl)`
+    has no value to read — it is the printing cond/2 is there to do — and
+    neither has eratosthenes's `(sieve.M <- multiple_of(P),
+    remove_multiples(P,M+P))`, which is the sieving.  A branch made of goals,
+    whether built in or the program's own, is proven.
     """
     if t is None or _depth > 20:
         return False
@@ -7364,7 +7378,8 @@ def _all_builtin_goals(t: 'PsiTerm', eng, _depth: int = 0) -> bool:
         return (a1 is not None and a2 is not None
                 and _all_builtin_goals(a1, eng, _depth + 1)
                 and _all_builtin_goals(a2, eng, _depth + 1))
-    return defn._builtin_func is not None
+    return (defn._builtin_func is not None
+            or defn.type == DefType.PREDICATE)
 
 
 def _eval_as_bool_func(t: 'PsiTerm', eng, _depth: int = 0) -> 'Optional[bool]':
@@ -7815,6 +7830,20 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
 
     # Deref LHS
     lhs = a1.deref()
+    # A name declared with `global` stands for a cell every reference reads,
+    # so writing to the name writes into that cell: eratosthenes's
+    # `limit <- 20` has to be visible to the `M < limit` that follows.
+    _g_cell = _global_cell(lhs, eng)
+    if _g_cell is not None:
+        lhs = _g_cell.deref()
+    elif (lhs.type is not None and lhs.type.keyword is not None
+            and lhs.type.keyword.symbol == '.'):
+        # `sieve.M <- multiple_of(P)` writes the feature, not the dot-term:
+        # the sieve keeps what was written under M.
+        _dot_cell = _resolve_dot_feat(lhs, eng)
+        if _dot_cell is None:
+            return False
+        lhs = _dot_cell.deref()
     defn = lhs.type
 
     # Mode 1: LHS is a named function/predicate symbol (global variable).
@@ -9902,22 +9931,43 @@ def bi_read_token(goal: PsiTerm, eng) -> bool:
       read_token(Y)                     →  Y = the quoted string "X"
     """
     arg = _get_one_arg(goal)
-    # Read all available content from stdin (which may be redirected to a file)
-    try:
-        content = sys.stdin.read()
-    except (EOFError, KeyboardInterrupt, AttributeError):
-        content = ''
-    if not content:
-        return False
-    # Tokenize and read the first token
+    # One token, and the rest of the line kept for the next call: what is
+    # left on the input after it belongs to whoever reads next, and
+    # eratosthenes has more queries waiting behind its `20`.
+    stream = sys.stdin
+    pending = getattr(eng, '_read_token_pending', None) or []
+    if getattr(eng, '_read_token_stream', None) is not stream:
+        # A different stream is a different queue: what was left over on the
+        # one before belongs to it, not to this one.
+        pending = []
+        eng._read_token_stream = stream
     from wild_life.tokenizer import tokenizer_from_string
-    ts = tokenizer_from_string(content)
-    try:
-        tok = ts.read_token_b()
-    except Exception:
+    while not pending:
+        try:
+            content = stream.readline()
+        except (EOFError, KeyboardInterrupt, AttributeError):
+            content = ''
+        if not content:
+            break
+        ts = tokenizer_from_string(content)
+        for _ in range(64):
+            try:
+                tok = ts.read_token_b()
+            except Exception:
+                break
+            if tok is None:
+                break
+            _sym = (tok.type.keyword.symbol
+                    if (tok.type is not None and tok.type.keyword) else '')
+            if tok.value is None and _sym in ('eof', 'end_of_file'):
+                break
+            pending.append(tok)
+            if ts.eof_flag:
+                break
+    eng._read_token_pending = pending
+    if not pending:
         return False
-    if tok is None:
-        return False
+    tok = pending.pop(0)
     if arg is None:
         return True
     return _unify(eng, arg.deref(), tok)
