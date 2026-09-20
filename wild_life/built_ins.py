@@ -1363,6 +1363,29 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             lst = pair
         return lst
 
+    elif sym == 'readf':
+        # readf(File) — the file's characters, as the codes a grammar reads.
+        _rf_a = t.attr_list.get('1')
+        if _rf_a is None or '2' in t.attr_list:
+            return None
+        _rf_d = _rf_a.deref()
+        if _rf_d.value is not None:
+            _rf_name = str(_rf_d.value)
+        elif _rf_d.type is not None and _rf_d.type.keyword is not None:
+            _rf_name = _rf_d.type.keyword.symbol
+        else:
+            return None
+        try:
+            with open(_rf_name, 'r') as _rf_f:
+                _rf_text = _rf_f.read()
+        except OSError:
+            import sys as _sys_rf
+            _sys_rf.stderr.write(
+                "*** Error: cannot open file %s\n" % _rf_name)
+            return None
+        return eng.wl.make_list([_make_number(eng, float(ord(_c)))
+                                 for _c in _rf_text])
+
     elif sym == '.':
         # T.F — feature access: get feature F of term T
         a1 = t.attr_list.get('1')  # T
@@ -10473,6 +10496,19 @@ def register_all(wl) -> None:
     _reg('put_err', bi_put_err)
     # File stream I/O
     _reg('open_in', bi_open_in)
+
+    def _bi_readf(goal, eng):
+        """readf(File[, L]) — L is the file's characters, as their codes."""
+        _call = PsiTerm(type_def=goal.type)
+        _call.attr_list = {'1': goal.attr_list['1']} if '1' in goal.attr_list else {}
+        _val = _try_eval_string_func(_call, eng)
+        if _val is None:
+            return False
+        _out = goal.attr_list.get('2')
+        if _out is None:
+            return True
+        return _unify(eng, _out.deref(), _val)
+    _reg('readf', _bi_readf, def_type=DefType.FUNCTION)
     _reg('open_out', bi_open_out)
     _reg('close', bi_close)
     _reg('set_output', bi_set_output)
