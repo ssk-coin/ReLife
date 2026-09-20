@@ -380,17 +380,32 @@ def _is_settled_value(t: 'PsiTerm', origin) -> bool:
 
 def _term_reaches_itself(t: 'PsiTerm', _seen: frozenset = frozenset(),
                         _depth: int = 0) -> bool:
-    """Whether following t's features leads back to t."""
-    if t is None or _depth > 60:
+    """Whether following t's features leads back to t itself.
+
+    A cycle somewhere below t is not one: matrix builds a grid of squares
+    that point at each other in all four directions, and `term_size(C)` is
+    still a call to work out rather than one that would call itself.
+    """
+    if t is None:
         return False
-    t = t.deref()
-    if id(t) in _seen:
-        return True
-    _seen = _seen | {id(t)}
-    for ref in t.attr_list.values():
-        if _term_reaches_itself(ref, _seen, _depth + 1):
+    root = t.deref()
+    _walk_seen = {id(root)}
+
+    def _walk(x, depth):
+        if x is None or depth > 60:
+            return False
+        xd = x.deref()
+        if xd is root and depth > 0:
             return True
-    return False
+        if id(xd) in _walk_seen and depth > 0:
+            return False
+        _walk_seen.add(id(xd))
+        for ref in xd.attr_list.values():
+            if _walk(ref, depth + 1):
+                return True
+        return False
+
+    return _walk(root, 0)
 
 
 # The comparisons whose value is a boolean.
@@ -3431,8 +3446,14 @@ def _collect_disjunction(t: PsiTerm, eng) -> list:
     return elems
 
 
-def _term_contains_disjunction(t: PsiTerm, eng, depth: int = 0) -> bool:
-    """Return True if t (or any subterm up to depth 10) is a disjunction."""
+def _term_contains_disjunction(t: PsiTerm, eng, depth: int = 0,
+                               visited: set = None) -> bool:
+    """Return True if t (or any subterm up to depth 10) is a disjunction.
+
+    A term whose parts point at one another is walked once: matrix builds a
+    grid of squares that reach each other by many paths, and asking each of
+    them the same question again for every path is what made it slow.
+    """
     if depth > 10:
         return False
     t = t.deref()
@@ -3440,8 +3461,15 @@ def _term_contains_disjunction(t: PsiTerm, eng, depth: int = 0) -> bool:
         return False
     if t.type is eng.wl.disjunction:
         return True
+    if not t.attr_list:
+        return False
+    if visited is None:
+        visited = set()
+    elif id(t) in visited:
+        return False
+    visited.add(id(t))
     for v in t.attr_list.values():
-        if _term_contains_disjunction(v, eng, depth + 1):
+        if _term_contains_disjunction(v, eng, depth + 1, visited):
             return True
     return False
 
@@ -5311,7 +5339,8 @@ def _expand_disjunctions_in_place(lhs: PsiTerm, rhs: PsiTerm, eng):
     return True
 
 
-def _inline_disjunctive_funcs(t: PsiTerm, eng, depth: int = 0) -> bool:
+def _inline_disjunctive_funcs(t: PsiTerm, eng, depth: int = 0,
+                             visited: set = None) -> bool:
     """Replace sub-terms of t that are functions reducing to a disjunction.
 
     `3 * sgn` with `sgn -> {1;-1}.` has to read as `3 * {1;-1}` before the
@@ -5321,6 +5350,13 @@ def _inline_disjunctive_funcs(t: PsiTerm, eng, depth: int = 0) -> bool:
     """
     if depth > 20 or not t.attr_list:
         return False
+    # A term whose parts point at one another — matrix's grid of squares —
+    # is walked once, not once per path that reaches each square.
+    if visited is None:
+        visited = set()
+    if id(t) in visited:
+        return False
+    visited.add(id(t))
     wl = eng.wl
     changed = False
     for key in list(t.attr_list.keys()):
@@ -5340,7 +5376,7 @@ def _inline_disjunctive_funcs(t: PsiTerm, eng, depth: int = 0) -> bool:
                 t.attr_list[key] = evaled
                 changed = True
                 continue
-        if _inline_disjunctive_funcs(sub, eng, depth + 1):
+        if _inline_disjunctive_funcs(sub, eng, depth + 1, visited):
             changed = True
     return changed
 
