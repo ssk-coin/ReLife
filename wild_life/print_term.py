@@ -436,6 +436,25 @@ class PrintState:
                 if coref is not None and id(coref) in var_id_set:
                     aliased_to.add(id(coref))
 
+        # Two names for one term where one of them reaches it through
+        # something else: `A = X:f(X)` leaves X pointing at the cell f's value
+        # went into and A pointing at the value, so the two are one term and
+        # the first of them names it.  Two names bound to the same value each
+        # in their own right — `A = B*A, A = 1` — are not that, and each is
+        # written as the value.
+        _by_node: dict = {}
+        for _n_fv in sorted(var_tree.keys()):
+            _p_fv = var_tree.get(_n_fv)
+            if _p_fv is None:
+                continue
+            _by_node.setdefault(id(_p_fv.deref()), []).append(_p_fv)
+        for _nid_fv, _ps_fv in _by_node.items():
+            if len(_ps_fv) < 2:
+                continue
+            if any(id(getattr(_p_fv, 'coref', None)) != _nid_fv
+                   for _p_fv in _ps_fv):
+                aliased_to.add(id(_ps_fv[0]))
+
         for name in sorted(var_tree.keys()):
             pterm = var_tree.get(name)
             if pterm is None:

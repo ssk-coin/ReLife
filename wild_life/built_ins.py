@@ -5168,6 +5168,16 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
                 if eng.unifier.unify(host, _hv_d):
                     host = host.deref()
                 else:
+                    # The name and the term its rules make of it are sorts
+                    # that have no meet, so there is nothing to unify — but
+                    # the name is still worth that term, and a second reading
+                    # of it has to find the same one: `Z:a1.1/Z.2` reads both
+                    # features off the one t the rules made.
+                    _hd_nm = host.deref()
+                    if (_hd_nm is not _hv_d and _hd_nm.coref is None
+                            and not _hd_nm.attr_list and _hd_nm.value is None):
+                        eng.trail.trail_psi(_hd_nm, 'coref')
+                        _hd_nm.coref = _hv_d
                     host = _hv_d
             except Exception:
                 host = _hv_d

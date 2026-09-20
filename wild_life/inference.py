@@ -3005,6 +3005,18 @@ class Engine:
             self.drop_choice_point(_rule_cp)
             _rule_cp = None
 
+        # The call is worth what the rule answers, from here on and wherever
+        # else the call is written: `A = X:f(X)` leaves X the 1 that f
+        # answered rather than the call that answered it, and
+        # `A = g(X:f(X))` leaves X the 1 too.
+        _body_red = body.deref()
+        if (_body_red.value is not None and not _body_red.attr_list
+                and not _occurs_by_identity(head_orig, body_orig)):
+            _fd_red = funct.deref()
+            if _fd_red is not _body_red and _fd_red.coref is None:
+                self.trail.trail_psi(_fd_red, 'coref')
+                _fd_red.coref = _body_red
+
         # Sort-constrained computation rule fix:
         # Rule form: X:sort -> body_expr(X, ...)
         # The parser stores head_orig as one SORT_VAR and body's X occurrences
