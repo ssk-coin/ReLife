@@ -1704,6 +1704,8 @@ class Engine:
             # writes 1 and comes back for 2 and 3, with X worth what was
             # written each time.
             if _bi_sym in _WRITE_BUILTINS and thegoal.attr_list:
+                from wild_life.built_ins import (
+                    _eval_sort_comparison as _esc_w)
                 for _w_k in list(thegoal.attr_list.keys()):
                     _w_a = thegoal.attr_list[_w_k].deref()
                     if _w_a.type is wl.disjunction and _w_a.attr_list:
@@ -1711,6 +1713,11 @@ class Engine:
                             self.goal_stack = aim.next
                             self.goal_count += 1
                             return False
+                    # A sort comparison is written as the answer it gives:
+                    # isatest writes `1 :=< 1.1` and reads false.
+                    _w_cmp = _esc_w(_w_a, self)
+                    if _w_cmp is not None:
+                        self.unifier.set_attr(thegoal, _w_k, _w_cmp)
             if _bi_sym in _WRITE_BUILTINS and thegoal.attr_list:
                 from wild_life.built_ins import (
                     _is_user_function as _iuf_w,

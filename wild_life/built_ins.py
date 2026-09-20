@@ -6771,6 +6771,13 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
                 and not _is_user_function(_eq_side)):
             _reduce_embedded_calls(_eq_side, eng, 0, set())
 
+    # A sort comparison standing where a value belongs answers true or false:
+    # `A = (1 :=< 1.1)` is false, not the comparison written out again.
+    for _sc_side, _sc_other in ((b_d, a_d), (a_d, b_d)):
+        _sc_val = _eval_sort_comparison(_sc_side, eng)
+        if _sc_val is not None:
+            return _unify(eng, _sc_other, _sc_val)
+
     # Non-delaying string functions (psi2str, root_sort, children, chr evaluated already above)
     b_str = _try_eval_string_func(b_d, eng)
     if b_str is not None:
@@ -6824,8 +6831,17 @@ def _sort_compare_args(goal, eng):
         if _d.type is None:
             return None
         # A number or string is a sort of its own, so 3 and 4 are no more the
-        # same sort than a and b are, though both are integers.
-        sorts.append((_d.type, _d.value))
+        # same sort than a and b are, though both are integers.  What a
+        # number is is read from the number: `1.0` is the integer 1, and is
+        # the same sort as `1` and under int, which is what isatest asks.
+        _ty = _d.type
+        if (_d.value is not None and not _d.attr_list
+                and isinstance(_d.value, (int, float))
+                and eng.wl.real is not None
+                and _ty is not None and _ty.is_subtype_of(eng.wl.real)):
+            _ty = (eng.wl.integer if float(_d.value).is_integer()
+                   else eng.wl.real)
+        sorts.append((_ty, _d.value))
     return sorts[0], sorts[1]
 
 
@@ -6917,6 +6933,39 @@ def bi_sort_incomparable(goal: PsiTerm, eng) -> bool:
     return (sorts is not None
             and not sorts[0].is_subtype_of(sorts[1])
             and not sorts[1].is_subtype_of(sorts[0]))
+
+
+# A sort comparison answers true or false, so it stands where a value is
+# wanted as well as where a goal is: isatest writes `1 :=< 1.1` and expects
+# to read false.
+_SORT_CMP_FUNCS = {
+    ':==': bi_sort_eq, ':\\==': bi_sort_ne,
+    ':=<': bi_sort_le, ':<': bi_sort_lt,
+    ':>=': bi_sort_ge, ':>': bi_sort_gt,
+    ':\\=<': bi_sort_not_le, ':\\<': bi_sort_not_lt,
+    ':\\>=': bi_sort_not_ge, ':\\>': bi_sort_not_gt,
+    ':><': bi_sort_comparable, ':\\><': bi_sort_incomparable,
+}
+
+
+def _eval_sort_comparison(t: PsiTerm, eng) -> Optional[PsiTerm]:
+    """What a sort comparison comes to, where a value rather than a goal is
+    wanted: isatest writes `1 :=< 1.1` and expects to read false.
+
+    Asked only where the answer is to be written or assigned, not of every
+    term walked past: `cond(T :== xfx, …)` is a question a goal asks, and
+    settling it early would answer it before T is what it will be.
+    """
+    if t is None:
+        return None
+    t = t.deref()
+    sym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+    fn = _SORT_CMP_FUNCS.get(sym)
+    if fn is None or '1' not in t.attr_list or '2' not in t.attr_list:
+        return None
+    if _sort_compare_args(t, eng) is None:
+        return None
+    return _make_atom(eng, 'true' if fn(t, eng) else 'false')
 
 
 def bi_identical(goal: PsiTerm, eng) -> bool:
