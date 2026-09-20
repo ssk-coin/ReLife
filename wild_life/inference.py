@@ -98,8 +98,17 @@ def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
         return
     visited.add(id(t))
     if t.type in non_strict:
+        from wild_life.data_structures import QUOTED_TRUE as _QT_ns
         for arg in t.attr_list.values():
             _mark_arith_non_strict(arg)
+            # A call handed to a non-strict predicate is the call, not what
+            # it answers: comp_struct's `test(tata +>= toto)` is given the
+            # comparison to write out, and asks for its value separately
+            # with `evalin`.
+            _ad_ns = arg.deref()
+            from wild_life.built_ins import _is_user_function as _iuf_ns
+            if _iuf_ns(_ad_ns):
+                _ad_ns.flags |= _QT_ns
     for sub in t.attr_list.values():
         _mark_non_strict_args(sub, eng, visited)
 
@@ -1645,6 +1654,33 @@ class Engine:
             if _call_pg is not None:
                 thegoal = _call_pg
                 defn = thegoal.type
+
+        # A meet standing where a goal belongs is the goal the two sides meet
+        # at: io.lf writes `C:writeln :- write&strip(C), nl.`, and what is
+        # proven is the `write(…)` that `write` and the stripped call come to.
+        # A meet the two sides do not make a goal of is read as a pair, which
+        # is what the conjunction below does with it.
+        if defn is wl.and_sym and '1' in thegoal.attr_list \
+                and '2' in thegoal.attr_list:
+            from wild_life.built_ins import (
+                _eval_and_conjunction as _eac_pg)
+            _mark_pg = self.trail.mark()
+            try:
+                _met_pg = _eac_pg(thegoal, self)
+            except UnificationFailure:
+                _met_pg = None
+            if _met_pg is not None:
+                _met_pg = _met_pg.deref()
+                _met_defn = _met_pg.type
+                if (_met_defn is not None and _met_defn is not wl.and_sym
+                        and (_met_defn._builtin_func is not None
+                             or (_met_defn.rule and not callable(_met_defn.rule)))):
+                    thegoal = _met_pg
+                    defn = _met_defn
+                else:
+                    self.trail.undo_to(_mark_pg)
+            else:
+                self.trail.undo_to(_mark_pg)
 
         # ── AND (conjunction) ──
         # commasym (',') is the standard Prolog-style conjunction;
@@ -3364,6 +3400,9 @@ class Engine:
                 # dropped, so they do not turn the prompt that follows the load
                 # into a '--1>' continuation of the file's last query.
                 _cs_before = self.choice_stack
+                # A query written in a file is given to a non-strict call as
+                # it is written, the same as one typed at the prompt.
+                _mark_non_strict_args(t, self)
                 self.push_goal(GoalType.PROVE, t, _DEFRULES, None)
                 self.run(cs_barrier=_cs_before)
                 self.choice_stack = _cs_before

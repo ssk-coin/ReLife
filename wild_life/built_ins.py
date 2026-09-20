@@ -1079,13 +1079,20 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         eng.trail.undo_to(_mark_co)
         return _make_atom(eng, 'false')
 
-    elif sym == 'eval':
+    elif sym in ('eval', 'evalin'):
         # eval(T) is T's value, and a term with no value of its own is that
         # value: `A = eval(X:a(X))` answers the very term X stands for.
+        # evalin asks the same of a term a non-strict call was given, so it
+        # reads through the quote that kept the call from being worked out.
         a1 = t.attr_list.get('1')
         if a1 is None or eng is None:
             return None
         arg = _strip_backtick(a1.deref())
+        if sym == 'evalin' and (arg.flags & QUOTED_TRUE):
+            _unq = PsiTerm(type_def=arg.type, value=arg.value,
+                           attr_list=dict(arg.attr_list))
+            _unq.flags = arg.flags & ~QUOTED_TRUE
+            arg = _unq
         _ok_ev, _v_ev = _eval_arith(arg, eng)
         if _ok_ev:
             return _make_number(eng, _v_ev)
@@ -11146,7 +11153,7 @@ def register_all(wl) -> None:
         return _unify(eng, goal.attr_list[_out_key].deref(), _val)
     _reg('feature_values', _bi_feature_values, def_type=DefType.FUNCTION)
 
-    def _make_strip_result(src, use_src_type):
+    def _make_strip_result(src, use_src_type, eng):
         """Core of strip / copy_pointer.
 
         For each *positional* attribute of *src* (keys '1', '2', ...):
@@ -11222,7 +11229,7 @@ def register_all(wl) -> None:
         if a1 is None:
             return False
         src = a1.deref()
-        res = _make_strip_result(src, False)
+        res = _make_strip_result(src, False, eng)
         if a2 is None:
             return True
         return _unify(eng, a2.deref(), res)
@@ -11238,7 +11245,7 @@ def register_all(wl) -> None:
         if a1 is None:
             return False
         src = a1.deref()
-        res = _make_strip_result(src, True)
+        res = _make_strip_result(src, True, eng)
         if a2 is None:
             return True
         return _unify(eng, a2.deref(), res)
@@ -11785,6 +11792,34 @@ def register_all(wl) -> None:
         wl.display_modules_mode = True
         return True
     _reg('display_modules', _bi_display_modules)
+
+    def _bi_add_man(goal, eng):
+        """add_man(Name, Text) — file a manual entry for Name.
+
+        The library files each describe themselves this way as they load.
+        Nothing reads the entries back here, so they are filed and left.
+        """
+        _a1 = goal.attr_list.get('1')
+        _a2 = goal.attr_list.get('2')
+        if _a1 is None or _a2 is None:
+            return True
+        _table = getattr(wl, 'manual_table', None)
+        if _table is None:
+            _table = {}
+            wl.manual_table = _table
+        _names = _proper_list_elems(_a1.deref(), eng)
+        if _names is None:
+            _names = [_a1.deref()]
+        for _n in _names:
+            _nd = _n.deref()
+            _key = (_nd.type.keyword.symbol
+                    if (_nd.type is not None and _nd.type.keyword) else None)
+            if _key is None and _nd.value is not None:
+                _key = str(_nd.value)
+            if _key is not None:
+                _table[_key] = _a2.deref()
+        return True
+    _reg('add_man', _bi_add_man)
 
     def _bi_import_clauses(goal, eng):
         """import_clauses(for => Module#Pred, replacing => [(Module#Old, New), ...])
