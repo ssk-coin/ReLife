@@ -640,6 +640,31 @@ class Unifier:
         self.set_attr(t, key, var)
         return self._proto_arith_eq(var, cell)
 
+    @staticmethod
+    def _cond_asks_a_call(t: PsiTerm, _seen: set = None) -> bool:
+        """Whether a sort's membership condition asks a call about the term.
+
+        `zero := I | I = 0` says what the term must be, and says it now.
+        `prime := I:int | length(factors(I))=1` asks factors what the term
+        comes to, which is a question with no answer while the term is still
+        a variable.
+        """
+        from wild_life.data_structures import DefType as _DT_ca
+        if t is None:
+            return False
+        if _seen is None:
+            _seen = set()
+        t = t.deref()
+        if id(t) in _seen:
+            return False
+        _seen.add(id(t))
+        _defn = t.type
+        if (_defn is not None and _defn.type == _DT_ca.FUNCTION
+                and _defn.rule and _defn._builtin_func is None):
+            return True
+        return any(Unifier._cond_asks_a_call(_v, _seen)
+                   for _v in t.attr_list.values())
+
     def _prove_sort_condition(self, t: PsiTerm) -> bool:
         """Prove the membership condition a conditional sort carries.
 
@@ -687,7 +712,21 @@ class Unifier:
                 eng.main_loop_ok = old_ok
                 eng.choice_stack, eng.goal_stack = cp_save, gs_save
                 if not ok:
+                    # A term that is still a variable has nothing for the
+                    # condition to have been about: `P = prime` says what P
+                    # will have to satisfy, and factorize asks it of P once P
+                    # is 29.  What a condition can settle by itself it still
+                    # settles now, which is how `A = zero` answers 0.
+                    _td_sc = t.deref()
                     self.trail.undo_to(mark)
+                    if (_td_sc.value is None and not _td_sc.attr_list
+                            and self._cond_asks_a_call(cond_copy)):
+                        from wild_life.data_structures import (
+                            Residuation as _R_sc)
+                        if not _td_sc.resid:
+                            self.trail.trail_psi(_td_sc, 'resid')
+                            _td_sc.resid = [_R_sc(goal=None, pending=True)]
+                        continue
                     return False
             return True
         finally:
