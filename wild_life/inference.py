@@ -1769,6 +1769,36 @@ class Engine:
                 self.push_goal(GoalType.PROVE, arg1, _DEFRULES, None)
             return True
 
+        # ── A backquoted term standing where a goal belongs ──
+        # The quote keeps the term as it is written while the clause holding
+        # it is built; proving the clause is where it is read again.
+        # std_expander writes the test that tells a conjunction apart as
+        # `` `(S1 :== ,) ``, and it is the comparison that is proved.
+        if (defn is not None and defn.keyword is not None
+                and defn.keyword.symbol == '`'
+                and len(thegoal.attr_list) == 1
+                and '1' in thegoal.attr_list):
+            self.goal_stack = aim.next
+            self.goal_count += 1
+            self.push_goal(GoalType.PROVE, thegoal.attr_list['1'],
+                           _DEFRULES, None)
+            return True
+
+        # ── SUCH-THAT as a goal ──
+        # `Val | Guard` standing where a goal belongs is the guard proved and
+        # then the value: std_expander builds each generated clause out of
+        # `succeed | A = B, C = D` runs, which bind the clause together and
+        # then hold.
+        if (defn is not None and defn is wl.such_that
+                and '1' in thegoal.attr_list and '2' in thegoal.attr_list):
+            self.goal_stack = aim.next
+            self.goal_count += 1
+            self.push_goal(GoalType.PROVE, thegoal.attr_list['1'],
+                           _DEFRULES, None)
+            self.push_goal(GoalType.PROVE, thegoal.attr_list['2'],
+                           _DEFRULES, None)
+            return True
+
         # ── CUT ──
         if defn is wl.cut:
             self.goal_stack = aim.next
