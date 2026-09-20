@@ -302,9 +302,24 @@ def compute_all_glbs(d1: Definition, d2: Definition) -> List[Definition]:
         if not any(other is not d and d.is_subtype_of(other) for other in common):
             maximal.append(d)
 
-    # C版 Wild Life の実装に合わせ、GLB を型の生成順 (creation_id) でソートする。
-    # 型は最初に参照された宣言の順に生成されるため、宣言順に基づく安定した順序が得られる。
-    maximal.sort(key=lambda d: getattr(d, 'creation_id', 0))
+    # The order the alternatives are offered in.  C Wild Life encodes the sort
+    # hierarchy before it runs, and a sort's code is built from the sorts
+    # under it, so a sort with fewer of them comes first: `four_wheels &
+    # vehicle` offers truck, which nothing is under, before car, which
+    # rolls_royce is under.  Sorts that are alike in that are offered in the
+    # order they were declared: `glb(k,l)` offers a before b.
+    def _n_subs(d: Definition) -> int:
+        seen: set = set()
+        stack = list(d.children)
+        while stack:
+            c = stack.pop()
+            if id(c) in seen:
+                continue
+            seen.add(id(c))
+            stack.extend(c.children)
+        return len(seen)
+
+    maximal.sort(key=lambda d: (_n_subs(d), getattr(d, 'creation_id', 0)))
     return maximal
 
 
