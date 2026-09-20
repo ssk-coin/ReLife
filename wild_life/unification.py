@@ -678,6 +678,64 @@ class Unifier:
         finally:
             self._proving_sort.clear()
 
+    def _suspend_meet(self, x: PsiTerm):
+        """Make a meet wait on the call it names, and stand for its value.
+
+        Returns the variable the meet will fill in, or None when there is
+        nothing to wait for — a meet of two settled terms that simply do
+        not meet has failed, and must go on failing.
+        """
+        if self.engine is None:
+            return None
+        from wild_life.built_ins import (
+            _is_user_function as _iuf_sm, _term_is_unbound as _tiu_sm)
+        waiting: list = []
+        seen: set = set()
+        stack = [x]
+        while stack:
+            node = stack.pop().deref()
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            if _iuf_sm(node) and node.attr_list:
+                for _a in node.attr_list.values():
+                    _ad = _a.deref()
+                    if _tiu_sm(_ad, self.engine) and _ad not in waiting:
+                        waiting.append(_ad)
+            for _v in node.attr_list.values():
+                stack.append(_v)
+        if not waiting:
+            return None
+        held = PsiTerm(type_def=WL.top)
+        copy = PsiTerm(type_def=x.type)
+        copy.attr_list = dict(x.attr_list)
+        copy.flags = x.flags
+        eq_defn = (getattr(WL, 'eqsym', None)
+                   or WL.syntax_module.symbol_table.get('='))
+        if eq_defn is None:
+            return None
+        eq = PsiTerm(type_def=eq_defn)
+        eq.attr_list = {'1': held, '2': copy}
+        eq._resid_marker = True
+        pending = Goal(GoalType.PROVE, eq, None, None, pending=True)
+        from wild_life.data_structures import (
+            Residuation as _R_sm, SORT_VAR as _SV_sm)
+        for _w in waiting:
+            if _w.resid is None:
+                self.trail.trail_psi(_w, 'resid')
+                _w.resid = [_R_sm(goal=pending)]
+            elif not any(r.goal is pending for r in _w.resid):
+                self.trail.trail_copy(_w, 'resid')
+                _w.resid = list(_w.resid) + [_R_sm(goal=pending)]
+            _w_plain = (not _w.attr_list and _w.value is None
+                        and (_w.type is None or _w.type is WL.top))
+            if _w_plain and not (_w.flags & _SV_sm):
+                self.trail.trail_psi(_w, 'flags')
+                _w.flags |= _SV_sm
+        if x.coref is None:
+            self.bind(x, held)
+        return held
+
     def _reduce_conjunctions(self, t: PsiTerm) -> bool:
         """Replace `A & B` features of t by the sort they meet at."""
         if self.engine is None or WL.and_sym is None:
@@ -833,6 +891,14 @@ class Unifier:
                         if m is not x and x.coref is None:
                             self.bind(x, m)
                         return m
+                    # A meet that names a call nothing can work out yet is
+                    # not a meet that fails: nl's `{food;information} &
+                    # eaten_by(EH)` is whatever the eater eats, and says so
+                    # once the eater is known.  The term becomes the value
+                    # it will meet at, and waits on what would settle it.
+                    _held = self._suspend_meet(x)
+                    if _held is not None:
+                        return _held
                 return x
 
             u2, v2 = _meet_conj(u), _meet_conj(v)
