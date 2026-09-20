@@ -106,8 +106,10 @@ def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
             # comparison to write out, and asks for its value separately
             # with `evalin`.
             _ad_ns = arg.deref()
-            from wild_life.built_ins import _is_user_function as _iuf_ns
-            if _iuf_ns(_ad_ns):
+            from wild_life.built_ins import (_is_user_function as _iuf_ns,
+                                             _SORT_COMPARISONS as _SC_ns)
+            from wild_life.built_ins import _get_sym as _gs_ns
+            if _iuf_ns(_ad_ns) or _gs_ns(_ad_ns) in _SC_ns:
                 _ad_ns.flags |= _QT_ns
     for sub in t.attr_list.values():
         _mark_non_strict_args(sub, eng, visited)
@@ -1742,6 +1744,9 @@ class Engine:
             if _bi_sym in _WRITE_BUILTINS and thegoal.attr_list:
                 from wild_life.built_ins import (
                     _eval_sort_comparison as _esc_w)
+                from wild_life.data_structures import (
+                    QUOTED_TRUE as _QUOTED_TRUE,
+                    NON_STRICT_TERM as _NON_STRICT_TERM)
                 for _w_k in list(thegoal.attr_list.keys()):
                     _w_a = thegoal.attr_list[_w_k].deref()
                     if _w_a.type is wl.disjunction and _w_a.attr_list:
@@ -1750,7 +1755,11 @@ class Engine:
                             self.goal_count += 1
                             return False
                     # A sort comparison is written as the answer it gives:
-                    # isatest writes `1 :=< 1.1` and reads false.
+                    # isatest writes `1 :=< 1.1` and reads false.  A term a
+                    # non-strict call was handed is written as it stands,
+                    # though — that is what kept it from being worked out.
+                    if _w_a.flags & (_QUOTED_TRUE | _NON_STRICT_TERM):
+                        continue
                     _w_cmp = _esc_w(_w_a, self)
                     if _w_cmp is not None:
                         self.unifier.set_attr(thegoal, _w_k, _w_cmp)
@@ -3243,8 +3252,26 @@ class Engine:
             else:
                 self.push_goal(GoalType.UNIFY, body_d2, result, None)
         else:
-            # Push UNIFY first (runs LAST — body_d2 has fresh vars for embedded calls)
-            self.push_goal(GoalType.UNIFY, body_d2, result, None)
+            # A boolean operator whose operands are calls still answers a
+            # boolean once they have been worked out: structures.lf's
+            # `X \== Y -> not(X == Y)` hands back false, not `not true`.
+            # `=` is what reads it, the same as for a body that is a boolean
+            # from the start.
+            if (_body_sym in ('and', 'or', 'not', 'xor')
+                    and body_d2.attr_list):
+                _eq_defn_bo = (getattr(wl, 'eqsym', None)
+                               or wl.syntax_module.symbol_table.get('='))
+                if _eq_defn_bo is not None:
+                    _eq_term_bo = PsiTerm(type_def=_eq_defn_bo)
+                    _eq_term_bo.attr_list['1'] = result
+                    _eq_term_bo.attr_list['2'] = body_d2
+                    self.push_goal(GoalType.PROVE, _eq_term_bo, None, None)
+                else:
+                    self.push_goal(GoalType.UNIFY, body_d2, result, None)
+            else:
+                # Push UNIFY first (runs LAST — body_d2 has fresh vars for
+                # embedded calls)
+                self.push_goal(GoalType.UNIFY, body_d2, result, None)
 
             # Push each EVAL goal (runs FIRST — binds the fresh vars before UNIFY).
             # Also lift any embedded user-function calls from each EVAL goal's compound

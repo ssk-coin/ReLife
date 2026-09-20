@@ -58,6 +58,32 @@ def title(quiet: bool = False) -> None:
 Frame = namedtuple('Frame', ['pre_mark', 'bindings_str', 'cs_before', 'var_tree', 'saved_pd'])
 
 
+def _without_line_comment(text: str) -> str:
+    """The line with any `%` comment taken off the end.
+
+    A query may be followed by a note — libstruct writes `test(...)?  %%
+    simple matching` — and what ends the line is the `?` before it, not the
+    last character of the note.  A `%` inside a string or a quoted name is
+    part of it, not the start of a comment.
+    """
+    quote = None
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if quote is not None:
+            if c == '\\':
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+        elif c in ('"', "'"):
+            quote = c
+        elif c == '%':
+            return text[:i]
+        i += 1
+    return text
+
+
 def _prompt(depth: int, module_name: str = "") -> str:
     """Return the prompt string for the given depth level.
 
@@ -346,11 +372,11 @@ def run_repl(
             # of a multi-line fact/rule/query.  Read continuation lines,
             # showing '|    ' for each one, until the buffer ends with '.'
             # or '?', or until EOF / a blank line terminates the input.
-            _stripped_r = line_stripped.rstrip()
+            _stripped_r = _without_line_comment(line_stripped).rstrip()
             if _stripped_r and not (_stripped_r.endswith('.') or _stripped_r.endswith('?')):
                 _buf = line_stripped
                 while True:
-                    _stripped_r = _buf.rstrip()
+                    _stripped_r = _without_line_comment(_buf).rstrip()
                     if not _stripped_r or _stripped_r.endswith('.') or _stripped_r.endswith('?'):
                         break
                     sys.stdout.write('|    ')

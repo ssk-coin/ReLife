@@ -394,6 +394,13 @@ def _term_reaches_itself(t: 'PsiTerm', _seen: frozenset = frozenset(),
 
 
 # The comparisons whose value is a boolean.
+# Built-ins whose value is true or false, whatever they are given.
+_BOOL_VALUED_BUILTINS = frozenset((
+    'has_feature', 'var', 'nonvar', 'is_function', 'is_predicate',
+    'is_sort', 'is_number', 'is_value', 'not', 'is_persistent',
+))
+
+
 _BOOL_VALUED_COMPARISONS = frozenset((
     '>', '<', '>=', '=<', '=:=', '=\\=',
     ':=<', ':>=', ':<', ':>', ':==', ':\\==',
@@ -418,6 +425,10 @@ def _bool_operand_ok(t: 'PsiTerm', wl, _depth: int = 0) -> bool:
     # A comparison answers a boolean, so it stands where one is wanted:
     # `not A :== residuation` is a question about A, not a complaint.
     if _get_sym(t) in _BOOL_VALUED_COMPARISONS and len(t.attr_list) == 2:
+        return True
+    # A built-in that answers true or false stands where a boolean is wanted
+    # too: structures.lf asks `Ra :> Rb or has_feature(visited,B) or …`.
+    if _get_sym(t) in _BOOL_VALUED_BUILTINS:
         return True
     if t.value is not None:
         return False        # a number or a string is not a boolean
@@ -619,9 +630,9 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
             return None
         # Recursively evaluate args
         a1 = (_try_eval_bool(a1, eng) or _eval_arith_comparison(a1, eng)
-              or a1.deref())
+              or _eval_sort_comparison(a1, eng) or a1.deref())
         a2 = (_try_eval_bool(a2, eng) or _eval_arith_comparison(a2, eng)
-              or a2.deref())
+              or _eval_sort_comparison(a2, eng) or a2.deref())
         s1, s2 = _get_sym(a1), _get_sym(a2)
         if s1 == 'false' or s2 == 'false':
             return _make_atom(eng, 'false')
@@ -642,9 +653,9 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None or a2 is None:
             return None
         a1 = (_try_eval_bool(a1, eng) or _eval_arith_comparison(a1, eng)
-              or a1.deref())
+              or _eval_sort_comparison(a1, eng) or a1.deref())
         a2 = (_try_eval_bool(a2, eng) or _eval_arith_comparison(a2, eng)
-              or a2.deref())
+              or _eval_sort_comparison(a2, eng) or a2.deref())
         s1, s2 = _get_sym(a1), _get_sym(a2)
         if s1 == 'true' or s2 == 'true':
             return _make_atom(eng, 'true')
@@ -665,7 +676,8 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None:
             return None
         a1 = (_try_eval_bool(a1.deref(), eng)
-              or _eval_arith_comparison(a1, eng) or a1.deref())
+              or _eval_arith_comparison(a1, eng)
+              or _eval_sort_comparison(a1, eng) or a1.deref())
         s1 = _get_sym(a1)
         if s1 == 'true':
             return _make_atom(eng, 'false')
@@ -678,9 +690,9 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None or a2 is None:
             return None
         a1 = (_try_eval_bool(a1, eng) or _eval_arith_comparison(a1, eng)
-              or a1.deref())
+              or _eval_sort_comparison(a1, eng) or a1.deref())
         a2 = (_try_eval_bool(a2, eng) or _eval_arith_comparison(a2, eng)
-              or a2.deref())
+              or _eval_sort_comparison(a2, eng) or a2.deref())
         s1, s2 = _get_sym(a1), _get_sym(a2)
         if s1 in ('true', 'false') and s2 in ('true', 'false'):
             result = (s1 == 'true') ^ (s2 == 'true')
@@ -1089,13 +1101,22 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             return None
         arg = _strip_backtick(a1.deref())
         if sym == 'evalin' and (arg.flags & QUOTED_TRUE):
-            _unq = PsiTerm(type_def=arg.type, value=arg.value,
-                           attr_list=dict(arg.attr_list))
-            _unq.flags = arg.flags & ~QUOTED_TRUE
-            arg = _unq
+            # Asking for the value spends the quote: a term a non-strict call
+            # was handed is written as it stands once, and is worth its value
+            # from then on.  comp_struct writes the same `X == Y` three times
+            # over — once as the comparison, then twice as what it comes to —
+            # so the quote goes for good rather than coming back on
+            # backtracking.
+            arg.flags &= ~QUOTED_TRUE
         _ok_ev, _v_ev = _eval_arith(arg, eng)
         if _ok_ev:
             return _make_number(eng, _v_ev)
+        # A sort comparison asked for its value answers true or false:
+        # libstruct hands `a :== c` to a non-strict call and reads it with
+        # evalin.
+        _sc_ev = _eval_sort_comparison(arg, eng)
+        if _sc_ev is not None:
+            return _sc_ev
         if _is_user_function(arg):
             # Asked for the value, not for the term to become it: eval reduces
             # a copy, so `A = eval(X:f(X))` answers 1 and leaves X the call.
@@ -1107,7 +1128,17 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
                     # itself: `eval(f(1))` of `f(X,Y) -> [X,Y]` is f(1), and
                     # a copy of it, so asking twice gives two of them.
                     return copy_term(arg, {})
-                return copy_term(_red_ev.deref(), {})
+                _red_d_ev = _red_ev.deref()
+                # A boolean operator the rule handed back is still a question
+                # to answer: `X \== Y -> not(X == Y)` is false once the `==`
+                # inside it has said true.
+                if (_get_sym(_red_d_ev) in ('and', 'or', 'not', 'xor')
+                        and _red_d_ev.attr_list):
+                    _eval_embedded_user_funcs(_red_d_ev, eng, 0, set())
+                    _post_ev = _try_eval_any_func(_red_d_ev, eng)
+                    if _post_ev is not None:
+                        _red_d_ev = _post_ev.deref()
+                return copy_term(_red_d_ev, {})
             finally:
                 eng.trail.undo_to(_mark_ev)
         _inner_ev = _try_eval_string_func(arg, eng)
@@ -4651,6 +4682,15 @@ def _try_eval_any_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             return None
         return _make_number(eng, v)
 
+    # A boolean operator asked for its value answers true or false:
+    # structures.lf writes `X \\== Y -> not(X == Y)`, and what that hands
+    # back is false, not `not true`.  Only a value that is settled counts
+    # here; a partly-known expression is left as it stands.
+    if _get_sym(td) in ('and', 'or', 'not', 'xor'):
+        _r_bool = _try_eval_bool(td, eng)
+        if _r_bool is not None and _get_sym(_r_bool.deref()) in ('true', 'false'):
+            return _r_bool
+
     return None
 
 
@@ -4663,6 +4703,10 @@ def _try_eval_any_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
 _NON_STRICT_ARG1_BUILTINS: frozenset = frozenset({
     'setq', 'dynamic', 'static', 'assert', 'asserta', 'retract',
     'clause', 'abolish', 'listing',
+    # `X <- V` and `X <<- V` write to the place X names, so X is where the
+    # value goes rather than a value itself: `res <<- false` must not read
+    # res first and write to what it was.
+    '<-', '<<-',
     # `call_once(G)` is handed a goal to prove, not a value to work out.
     'call_once',
     # Dot feature-access `T.F`: arg '1' is the HOST subject of feature access
@@ -4743,6 +4787,12 @@ def _eval_embedded_user_funcs(
             # arguments have gone back to being variables.
             eng.unifier.set_attr(td, key, evaled)
             _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited)
+            # What the call handed back can itself be worked out once the
+            # calls inside it have been: `X \== Y` answers `not(X == Y)`,
+            # and that is false once the `==` has said true.
+            _re_ev1 = _try_eval_any_func(evaled, eng)
+            if _re_ev1 is not None and _re_ev1.deref() is not evaled.deref():
+                eng.unifier.set_attr(td, key, _re_ev1)
         elif child.attr_list:
             # If child is a sort-conjunction `A & B`, evaluate it via
             # _eval_body_sync to get the sort intersection (e.g.
@@ -4809,6 +4859,17 @@ def _reduce_embedded_calls(t: PsiTerm, eng, _depth: int, visited: set) -> None:
             if evaled is not None and evaled.deref() is not child:
                 eng.unifier.set_attr(td, key, evaled)
                 _reduce_embedded_calls(evaled, eng, _depth + 1, visited)
+                continue
+        # `&` written inside a term is the meet of its two sides, and the
+        # term holds what they meet at: structures.lf marks where it has
+        # been with `A = @(visited => B&@(visited => A))`, which is a mark
+        # on B as much as on A.
+        if (eng.wl.and_sym is not None and child.type is eng.wl.and_sym
+                and '1' in child.attr_list and '2' in child.attr_list):
+            _met = _eval_and_conjunction(child, eng)
+            if _met is not None and _met.deref() is not child:
+                eng.unifier.set_attr(td, key, _met)
+                _reduce_embedded_calls(_met, eng, _depth + 1, visited)
                 continue
         _reduce_embedded_calls(child, eng, _depth + 1, visited)
 
@@ -6809,13 +6870,15 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
             return _unify(eng, _sc_other, _sc_val)
 
     # Non-delaying string functions (psi2str, root_sort, children, chr evaluated already above)
+    # Both sides, not just one: `features(A) = features(B)` compares the two
+    # feature lists, which is how structures.lf asks whether two terms carry
+    # the same features.
     b_str = _try_eval_string_func(b_d, eng)
+    a_str = _try_eval_string_func(a_d, eng)
     if b_str is not None:
         b_d = b_str
-    else:
-        a_str = _try_eval_string_func(a_d, eng)
-        if a_str is not None:
-            a_d = a_str
+    if a_str is not None:
+        a_d = a_str
 
     return _unify(eng, a_d, b_d)
 
@@ -7502,8 +7565,14 @@ def _eval_as_bool_func(t: 'PsiTerm', eng, _depth: int = 0) -> 'Optional[bool]':
         r2 = _eval_as_bool_func(a2.deref() if a2 else None, eng, _depth + 1)
         return r2
 
-    # ── Disjunction (;) ──
-    if defn is wl.life_or or defn is wl.disjunction:
+    # ── Negation (not) ──
+    if sym == 'not':
+        a1 = t.attr_list.get('1') if t.attr_list else None
+        r1 = _eval_as_bool_func(a1.deref() if a1 else None, eng, _depth + 1)
+        return None if r1 is None else (not r1)
+
+    # ── Disjunction (; or 'or') ──
+    if defn is wl.life_or or defn is wl.disjunction or sym == 'or':
         a1 = t.attr_list.get('1')
         a2 = t.attr_list.get('2')
         r1 = _eval_as_bool_func(a1.deref() if a1 else None, eng, _depth + 1)
@@ -7549,6 +7618,43 @@ def _eval_as_bool_func(t: 'PsiTerm', eng, _depth: int = 0) -> 'Optional[bool]':
             _r_sc = None
         eng.trail.undo_to(_m_sc)
         return _r_sc
+
+    # ── A feature read for its value ──
+    # `project(1,Bool)` is the condition structures.lf asks it as, because
+    # the feature it reads holds true or false.
+    if sym == 'project':
+        _m_pj = eng.trail.mark()
+        _s_pj = ''
+        try:
+            _r_pj = _try_eval_any_func(t, eng)
+            if _r_pj is not None:
+                _s_pj = _get_sym(_r_pj.deref())
+        except Exception:
+            pass
+        eng.trail.undo_to(_m_pj)
+        if _s_pj == 'true':
+            return True
+        if _s_pj in ('false', 'fail'):
+            return False
+        return None
+
+    # ── Built-in FUNCTION whose value is a boolean ──
+    # `has_feature(visited,B)` answers true or false, so it reads as the
+    # condition structures.lf writes it as.
+    if sym in _BOOL_VALUED_BUILTINS:
+        _m_bv = eng.trail.mark()
+        try:
+            _r_bv = _try_eval_string_func(t, eng)
+        except Exception:
+            _r_bv = None
+        eng.trail.undo_to(_m_bv)
+        if _r_bv is not None:
+            _s_bv = _get_sym(_r_bv.deref())
+            if _s_bv == 'true':
+                return True
+            if _s_bv in ('false', 'fail'):
+                return False
+        return None
 
     # ── Built-in FUNCTION ──
     if defn._builtin_func is not None and defn.type == DefType.FUNCTION:
@@ -7952,6 +8058,13 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
             new_val.type = eng.wl.real
             new_val.value = val
             rhs_d = new_val
+        elif rhs_d.attr_list:
+            # What is written in is a value, so a comparison written on the
+            # right is the answer it gives: structures.lf's
+            # `res <<- (S :== true)` stores true or false, not the question.
+            _rhs_sc = _eval_sort_comparison(rhs_d, eng)
+            if _rhs_sc is not None and _rhs_sc.deref() is not rhs_d:
+                rhs_d = _rhs_sc.deref()
         defn.rule = []          # clear existing rules
         defn.type = DefType.FUNCTION
         _vm: dict = {}
@@ -7972,7 +8085,8 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         # answers: `V <<- term_explore(X, Seen)` stores the count, not the
         # call.  A call nothing can work out yet is stored as it stands.
         if rhs_term.attr_list:
-            _rhs_ev = _try_eval_any_func(rhs_term, eng)
+            _rhs_ev = (_eval_sort_comparison(rhs_term, eng)
+                       or _try_eval_any_func(rhs_term, eng))
             if _rhs_ev is not None and _rhs_ev.deref() is not rhs_term:
                 rhs_term = _rhs_ev.deref()
         if not _backtrackable:
@@ -10589,6 +10703,29 @@ def register_all(wl) -> None:
     # Higher-order
     _reg('map', bi_map)
     _reg('reduce', bi_reduce)
+
+    def _bi_maprel(goal, eng):
+        """maprel(P, List) — prove P of each element, left to right.
+
+        built_ins.lf says it in LIFE: `maprel(P,[H|T]) :- !, root_sort(P) &
+        @(H), maprel(P,T).`
+        """
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None or a2 is None:
+            return False
+        elems = _proper_list_elems(a2.deref(), eng)
+        if elems is None:
+            return False
+        _p = a1.deref()
+        # Pushed last first, so the list is gone through in order.
+        for _e in reversed(elems):
+            _call = _apply_func(_p, _e.deref(), eng)
+            if _call is None:
+                return False
+            eng.push_goal(GoalType.PROVE, _call, _DEFRULES_SENTINEL, None)
+        return True
+    _reg('maprel', _bi_maprel)
 
     def _bi_mresiduate(goal, eng):
         """mresiduate(List, Goal) — wait on every term in List at once.
