@@ -2463,6 +2463,15 @@ class Engine:
         _prev_no_arith = getattr(self, 'no_arith_eval', False)
         if _non_strict:
             self.no_arith_eval = True
+        # A feature the head asks for that the call never brought becomes
+        # the call's own, and a disjunction written there is a choice like
+        # any other: `magic?` meeting `magic(S:{size;int})` leaves S free
+        # to be a size, with int to come back to.  login.c carries such a
+        # head sort as a disjunctive sort code and decodes it to one sort
+        # with the rest as a choice point; nothing unifies the feature
+        # here, so the node is settled once the head has matched.
+        _lone_hk = ([k for k in head.attr_list if k not in thegoal.attr_list]
+                    if head.attr_list else [])
         mark = self.trail.mark()
         ok = self.unifier.unify(thegoal, head)
         if _non_strict:
@@ -2481,6 +2490,12 @@ class Engine:
         # of a feature of the term it was given, and the answer is the feature
         # rather than the reading of it.  The term and the label are known
         # once the head has been matched, so that is where it is read.
+        for _k_lh in _lone_hk:
+            _v_lh = thegoal.attr_list.get(_k_lh)
+            if _v_lh is not None and _v_lh.deref().type is wl.disjunction:
+                if not self.unifier._settle_disjunction(_v_lh):
+                    self.trail.undo_to(mark)
+                    return False
         _hd = head_orig.__dict__.get('_wl_has_dot')
         if _hd is None:
             _hd = _term_has_dot(head_orig)
