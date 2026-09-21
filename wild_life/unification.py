@@ -1044,9 +1044,12 @@ class Unifier:
                 # there is nothing to check: the call becomes its value.
                 self.bind(u, v)
                 self._wakeup_resid(u, v)
-            elif u_is_sort_var and u_is_fn_sort and not v_is_var:
+            elif (u_is_sort_var and u_is_fn_sort and not v_is_var
+                    and v.type is not WL.disjunction):
                 # Sort-constrained variable (X:sort) vs ground/non-variable term.
                 # Enforce the sort constraint: v's type must be a sub-sort of u's sort.
+                # A disjunction is not a sort to meet — it is a choice, and
+                # the branch below takes it one alternative at a time.
                 if not self._unify_types(u, v):
                     return False
                 self.bind(u, v)
@@ -1076,6 +1079,23 @@ class Unifier:
                     _elems = _cdisj(v, self.engine)
                     if not _elems:
                         return False
+                    # A variable that already says something takes only the
+                    # alternatives that fit it: `M:int` meeting `{a;1}` is
+                    # the 1.
+                    if u.type is not None and u.type is not WL.top:
+                        _fits_u = []
+                        for _e_u in _elems:
+                            _m_u = self.trail.mark()
+                            try:
+                                _ok_u = self.unify(u, _e_u)
+                            except UnificationFailure:
+                                _ok_u = False
+                            self.trail.undo_to(_m_u)
+                            if _ok_u:
+                                _fits_u.append(_e_u)
+                        if not _fits_u:
+                            return False
+                        _elems = _fits_u
                     # Bind u (X) to v FIRST so that choice-point trail marks are
                     # saved AFTER X.coref=v is set.  Backtracking then preserves
                     # X→v while undoing only v.coref (the inner binding).

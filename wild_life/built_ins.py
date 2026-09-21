@@ -1844,6 +1844,17 @@ def _has_concrete_non_numeric_arg(t: PsiTerm, eng) -> bool:
         if (a.value is not None and a.type and wl.real is not None
                 and a.type.is_subtype_of(wl.real)):
             return False
+        # A term narrowed no further than a number sort is a number nobody
+        # has said yet: the `int` a grid square holds is one of these, and
+        # the sum of a row waits on it rather than refusing it.
+        if _may_yet_be_a_number(a, eng):
+            return False
+        # A sum written inside a sum is not an argument of its own: what is
+        # wrong with `int + (int + (int + 0))`, if anything, is in there.
+        if a.attr_list and sym_a in _ARITH_OPS_SET:
+            return any(_is_concrete_non_numeric(_sub)
+                       for _k, _sub in a.attr_list.items()
+                       if _k in ('1', '2'))
         # Everything else: a concrete atom / compound that is not numeric
         return True
 
@@ -5523,21 +5534,45 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
     return fresh
 
 
-def _has_disjunctive_body(t: PsiTerm, wl) -> bool:
+def _has_disjunctive_body(t: PsiTerm, wl, _seen: set = None,
+                          _depth: int = 0) -> bool:
     """True when t is a function whose rule reduces to a disjunction.
 
     `sgn -> {1;-1}.` is 0-arity, so the synchronous path that normally
     evaluates such functions would have to pick one alternative and keep it;
-    only an EVAL goal gives each alternative its own choice point.
+    only an EVAL goal gives each alternative its own choice point.  What a
+    body hands the question on to counts as the body's own answer: magic's
+    `number -> number_to(size*size)` is nine numbers by way of number_to.
     """
     rules = t.type.rule if t.type is not None else None
-    if not rules:
+    if not rules or _depth > 6:
         return False
+    if _seen is None:
+        _seen = set()
+    if id(t.type) in _seen:
+        return False
+    _seen.add(id(t.type))
+
+    def _reaches_disj(_b, _d):
+        if _b is None or _d > 6:
+            return False
+        _b = _b.deref()
+        if _b.type is None:
+            return False
+        if _b.type in (wl.disjunction, wl.life_or):
+            return True
+        _sym_b = _b.type.keyword.symbol if _b.type.keyword else ''
+        if _sym_b == 'cond' and _b.attr_list:
+            return any(_reaches_disj(_v, _d + 1)
+                       for _k, _v in _b.attr_list.items() if _k in ('2', '3'))
+        if _is_user_function(_b):
+            return _has_disjunctive_body(_b, wl, _seen, _depth + 1)
+        return False
+
     for _head, body in rules:
         if body is None:
             continue
-        body_d = body.deref()
-        if body_d.type is not None and body_d.type in (wl.disjunction, wl.life_or):
+        if _reaches_disj(body, 0):
             return True
     return False
 
@@ -6759,7 +6794,11 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
                 if _b_arith2 is not None:
                     b_d = _b_arith2
                     _b_is_user_fn = False
-                elif _is_settled_value(_b_evaled_d, b_d.type):
+                elif (_is_settled_value(_b_evaled_d, b_d.type)
+                      or _b_evaled_d.type is eng.wl.disjunction):
+                    # A name that answers a disjunction has answered: what
+                    # `number` is worth is one of nine numbers, and the
+                    # equation takes them one at a time.
                     b_d = _b_evaled_d
                     _b_is_user_fn = False
                 # else: keep original b_d (the 0-arity function atom) so that
