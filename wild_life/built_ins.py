@@ -10741,6 +10741,24 @@ def bi_system(goal: PsiTerm, eng) -> bool:
 # map(F, List) → ResultList  (functional built-in)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _keep_call_value(call: PsiTerm, value: PsiTerm, eng) -> PsiTerm:
+    """Let a call stand for what it answered, so every reader sees the one term.
+
+    `entries(Square:grid)` reads the grid to run its rows together, and the
+    squares it hands back are the ones Square holds: reading grid a second
+    time would make a fresh square, and assigning a number to one of those
+    would leave the first untouched.
+    """
+    if call is None or value is None or eng is None:
+        return value
+    _vd = value.deref()
+    if _vd is call or call.coref is not None or not _is_user_function(call):
+        return _vd
+    eng.trail.trail_psi(call, 'coref')
+    call.coref = _vd
+    return _vd
+
+
 def _eval_map_or_reduce(t: PsiTerm, eng) -> Optional[PsiTerm]:
     """What a map or reduce written where a value belongs comes to."""
     if t is None or eng is None or t.type is None or t.type.keyword is None:
@@ -10776,7 +10794,7 @@ def _eval_map_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     # Evaluate the list argument if it's a function call (e.g. features(X))
     _list_ev = _try_eval_any_func(list_term, eng)
     if _list_ev is not None and _list_ev is not list_term:
-        list_term = _list_ev
+        list_term = _keep_call_value(list_term, _list_ev, eng)
 
     results = []
     node = list_term
@@ -10868,7 +10886,7 @@ def _eval_reduce_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     lst = a3.deref()
     _lst_ev = _try_eval_any_func(lst, eng)
     if _lst_ev is not None and _lst_ev.deref() is not lst:
-        lst = _lst_ev.deref()
+        lst = _keep_call_value(lst, _lst_ev, eng)
     elems = _proper_list_elems(lst, eng)
     if elems is None:
         return None

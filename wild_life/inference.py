@@ -2759,6 +2759,14 @@ class Engine:
             if _is_user_function(_attr):
                 _evaled = _eval_user_func_sync(_attr, self)
                 if _evaled is not None and _evaled is not _attr:
+                    # The call stands for what it answered, so a name
+                    # written on it reads the same term the caller got:
+                    # `entries(Square:grid)` hands back the very squares
+                    # Square holds, and a number assigned to one of them
+                    # is the square's.
+                    from wild_life.built_ins import (
+                        _keep_call_value as _kcv_pf)
+                    _kcv_pf(_attr, _evaled, self)
                     self.unifier.set_attr(funct, _key, _evaled)
             elif _is_cond_builtin(_attr):
                 # `sift(cond(P =< Max, filter(Ns,P), Ns), Max)` passes on
