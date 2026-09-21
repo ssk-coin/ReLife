@@ -80,6 +80,26 @@ def _occurs_by_identity(target: PsiTerm, t: PsiTerm, visited: set = None) -> boo
                for v in td.attr_list.values())
 
 
+def _freeze_calls_deep(t: PsiTerm, quoted_flag: int,
+                       visited: set = None) -> None:
+    """Mark every call inside a non-strict argument as the call it is."""
+    if t is None:
+        return
+    if visited is None:
+        visited = set()
+    t = t.deref()
+    if id(t) in visited:
+        return
+    visited.add(id(t))
+    from wild_life.built_ins import (_is_user_function as _iuf_ns,
+                                     _SORT_COMPARISONS as _SC_ns,
+                                     _get_sym as _gs_ns)
+    if _iuf_ns(t) or _gs_ns(t) in _SC_ns:
+        t.flags |= quoted_flag
+    for sub in t.attr_list.values():
+        _freeze_calls_deep(sub, quoted_flag, visited)
+
+
 def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
     """Freeze the arithmetic that a non-strict call's arguments stand for.
 
@@ -105,12 +125,11 @@ def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
             # it answers: comp_struct's `test(tata +>= toto)` is given the
             # comparison to write out, and asks for its value separately
             # with `evalin`.
-            _ad_ns = arg.deref()
-            from wild_life.built_ins import (_is_user_function as _iuf_ns,
-                                             _SORT_COMPARISONS as _SC_ns)
-            from wild_life.built_ins import _get_sym as _gs_ns
-            if _iuf_ns(_ad_ns) or _gs_ns(_ad_ns) in _SC_ns:
-                _ad_ns.flags |= _QT_ns
+            # What is frozen is the whole argument, not only its top: the
+            # grammar rule handed to `transregle` carries `P = person(N)`
+            # inside the constraints it is to make a clause out of, and
+            # `person(N)` is no more evaluated there than at the top.
+            _freeze_calls_deep(arg, _QT_ns)
     for sub in t.attr_list.values():
         _mark_non_strict_args(sub, eng, visited)
 

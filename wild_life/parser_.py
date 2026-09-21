@@ -444,7 +444,22 @@ class Parser:
                     # 位置引数
                     if f2:
                         self.ts.put_back_token(t2)
-                        if self.equ_tokch(t2, ',') or (
+                        _comma_atom = False
+                        if self.equ_tokch(t2, ','):
+                            _c1 = self.ts.read_token()
+                            _c2 = self.ts.read_token()
+                            self.ts.put_back_token(_c2)
+                            self.ts.put_back_token(_c1)
+                            # A comma with nothing after it is the name
+                            # itself: `op(990,xfy,,)` gives the conjunction
+                            # its precedence.  A slot left empty has an
+                            # argument behind it.
+                            _comma_atom = self.equ_tokch(_c2, ')')
+                        if _comma_atom:
+                            t2 = self.ts.read_token()
+                            count += 1
+                            self._feature_insert(str(count), t.attr_list, t2)
+                        elif self.equ_tokch(t2, ',') or (
                                 count > 0 and self.equ_tokch(t2, ')')):
                             # An empty slot names nothing and takes up no
                             # position: `cond(T :== fy,, Then, Else)` is the
