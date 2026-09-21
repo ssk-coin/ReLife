@@ -3653,6 +3653,29 @@ def _term_contains_disjunction(t: PsiTerm, eng, depth: int = 0,
     return False
 
 
+def _disjunction_nodes(t: PsiTerm, eng, _seen: set = None,
+                       _depth: int = 0) -> list:
+    """The disjunction nodes written inside a term, in the order they read."""
+    out: list = []
+    if t is None or _depth > 40:
+        return out
+    if _seen is None:
+        _seen = set()
+    t = t.deref()
+    if id(t) in _seen:
+        return out
+    _seen.add(id(t))
+    for _k in sorted(t.attr_list.keys()):
+        _sub = t.attr_list[_k].deref()
+        if (_sub.type is eng.wl.disjunction and _sub.attr_list
+                and id(_sub) not in _seen):
+            _seen.add(id(_sub))
+            out.append(_sub)
+            continue
+        out.extend(_disjunction_nodes(_sub, eng, _seen, _depth + 1))
+    return out
+
+
 def _expand_term_disjunctions(t: PsiTerm, eng) -> list:
     """Return a list of all alternative terms obtained by expanding embedded disjunctions.
 
@@ -5577,7 +5600,8 @@ def _has_disjunctive_body(t: PsiTerm, wl, _seen: set = None,
     return False
 
 
-def _expand_disjunctions_in_place(lhs: PsiTerm, rhs: PsiTerm, eng):
+def _expand_disjunctions_in_place(lhs: PsiTerm, rhs: PsiTerm, eng,
+                                  bind_nodes: bool = False):
     """Prove `lhs = rhs` once per combination of the disjunctions inside them.
 
     Each disjunction node is swapped (trailed) for a fresh variable, so an
@@ -5602,7 +5626,13 @@ def _expand_disjunctions_in_place(lhs: PsiTerm, rhs: PsiTerm, eng):
                 elems = _collect_disjunction(sub, eng)
                 if len(elems) > 1:
                     fresh = PsiTerm(type_def=wl.top)
-                    eng.unifier.set_attr(t, key, fresh)
+                    if bind_nodes:
+                        # The node itself stands for the choice, so a name
+                        # written on it — the Y of `Y:{a;Z}` — reads the
+                        # alternative rather than the whole disjunction.
+                        eng.unifier.bind(sub, fresh)
+                    else:
+                        eng.unifier.set_attr(t, key, fresh)
                     slots.append((fresh, elems))
                     continue
             collect(sub, depth + 1)
@@ -6324,6 +6354,17 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
     else:
         _expr, _var = (b_d, a_d) if a_is_var else (a_d, b_d)
         if _expr.type is not None and _term_contains_disjunction(_expr, eng):
+            # A disjunction written inside a term is the term's own: `X =
+            # f(Y:{a;Z},Z:{b;Y})` leaves Y worth a and comes back for Z,
+            # where a rebuilt copy would leave Y the whole disjunction it
+            # was.  Arithmetic is a different matter — `1 + {1;2}` is
+            # `{2;3}` — and is left to the distribution below.
+            if _get_sym(_expr) not in _ARITH_OPS_SET:
+                _nodes_dj = _disjunction_nodes(_expr, eng)
+                if _nodes_dj:
+                    if _expand_disjunctions_in_place(_var, _expr, eng,
+                                                     bind_nodes=True):
+                        return True
             alts = _expand_term_disjunctions(_expr, eng)
             if len(alts) > 1:
                 # Evaluate embedded user function calls in each alternative
