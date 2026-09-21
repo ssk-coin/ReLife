@@ -82,30 +82,38 @@ def _occurs_by_identity(target: PsiTerm, t: PsiTerm, visited: set = None) -> boo
 
 def _freeze_calls_deep(t: PsiTerm, quoted_flag: int,
                        visited: set = None) -> None:
-    """Mark every call inside a non-strict argument as the call it is."""
+    """Mark every call inside a non-strict argument as the call it is.
+
+    Walked with a stack rather than by recursion: a term here can be a list
+    of every character in a file, and its spine is as long as the file.
+    """
     if t is None:
         return
     if visited is None:
         visited = set()
-    t = t.deref()
-    if id(t) in visited:
-        return
-    visited.add(id(t))
     from wild_life.built_ins import (_is_user_function as _iuf_ns,
                                      _SORT_COMPARISONS as _SC_ns,
                                      _get_sym as _gs_ns)
     from wild_life.runtime import WL as _WL_ns
-    _is_disj = (getattr(_WL_ns, 'disjunction', None) is not None
-                and t.type is _WL_ns.disjunction)
-    if _iuf_ns(t) or _is_disj or _gs_ns(t) in _SC_ns:
-        if not (t.flags & quoted_flag):
-            # Remembered, so that filing the term as a clause can let its
-            # calls go again: what a non-strict call may not work out is
-            # still a goal once the clause it belongs to is run.
-            t._wl_ns_frozen = True
-        t.flags |= quoted_flag
-    for sub in t.attr_list.values():
-        _freeze_calls_deep(sub, quoted_flag, visited)
+    _disj_def = getattr(_WL_ns, 'disjunction', None)
+    stack = [t]
+    while stack:
+        node = stack.pop()
+        if node is None:
+            continue
+        node = node.deref()
+        if id(node) in visited:
+            continue
+        visited.add(id(node))
+        _is_disj = _disj_def is not None and node.type is _disj_def
+        if _iuf_ns(node) or _is_disj or _gs_ns(node) in _SC_ns:
+            if not (node.flags & quoted_flag):
+                # Remembered, so that filing the term as a clause can let
+                # its calls go again: what a non-strict call may not work
+                # out is still a goal once the clause it belongs to is run.
+                node._wl_ns_frozen = True
+            node.flags |= quoted_flag
+        stack.extend(node.attr_list.values())
 
 
 def _thaw_non_strict_freeze(t: PsiTerm, visited: set = None) -> None:
@@ -115,14 +123,18 @@ def _thaw_non_strict_freeze(t: PsiTerm, visited: set = None) -> None:
         return
     if visited is None:
         visited = set()
-    t = t.deref()
-    if id(t) in visited:
-        return
-    visited.add(id(t))
-    if t.__dict__.pop('_wl_ns_frozen', False):
-        t.flags &= ~_QT_th
-    for sub in t.attr_list.values():
-        _thaw_non_strict_freeze(sub, visited)
+    stack = [t]
+    while stack:
+        node = stack.pop()
+        if node is None:
+            continue
+        node = node.deref()
+        if id(node) in visited:
+            continue
+        visited.add(id(node))
+        if node.__dict__.pop('_wl_ns_frozen', False):
+            node.flags &= ~_QT_th
+        stack.extend(node.attr_list.values())
 
 
 def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
