@@ -860,7 +860,7 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
         cur = start
         list_depth = 0
         while True:
-            if ps.print_depth > 0 and depth + list_depth >= ps.print_depth:
+            if ps.print_depth > 0 and list_depth + 1 >= ps.print_depth:
                 yield None, None, True   # sentinel for "..."
                 return
             arg1, arg2 = _get_two_args(cur.attr_list)
@@ -910,7 +910,7 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
     done_f = False
     t_walk = t
     while not done_f:
-        if ps.print_depth > 0 and depth + list_depth_f >= ps.print_depth:
+        if ps.print_depth > 0 and list_depth_f + 1 >= ps.print_depth:
             if not first_f:
                 flat_ps.write(sep)   # comma before "..."
             flat_ps.write("...")
@@ -971,7 +971,7 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
     first2 = True
     done2 = False
     while not done2:
-        if ps.print_depth > 0 and depth + list_depth2 >= ps.print_depth:
+        if ps.print_depth > 0 and list_depth2 + 1 >= ps.print_depth:
             if not first2:
                 ps.write(sep)   # comma before "..."
             ps.write("...")
