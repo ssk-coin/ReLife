@@ -4894,6 +4894,17 @@ def _try_eval_any_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if _r_bool is not None and _get_sym(_r_bool.deref()) in ('true', 'false'):
             return _r_bool
 
+    # So does a comparison between two numbers: bruno_disj's
+    # `cond_funct(X =:= 9, nl, …)` picks its branch by the answer, and the
+    # rule head it is matched against is written `true` or `false`.
+    from wild_life.data_structures import (QUOTED_TRUE as _QT_ceq,
+                                           NON_STRICT_TERM as _NST_ceq)
+    if (_get_sym(td) in _ARITH_COMPARISONS
+            and not (td.flags & (_QT_ceq | _NST_ceq))):
+        _r_cmp = _eval_arith_comparison(td, eng)
+        if _r_cmp is not None:
+            return _r_cmp
+
     return None
 
 
