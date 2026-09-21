@@ -119,6 +119,8 @@ class WildLifeRuntime:
         self.noisy: bool = True         # プロンプト・メッセージ出力フラグ
         self.verbose: bool = False      # 詳細出力フラグ
         self.display_modules_mode: bool = False  # display_modules? で有効化: モジュール修飾名表示
+        # display_persistent? で有効化: 永続項を ' $' 付きで表示
+        self.display_persistent_mode: bool = False
         self.trace: bool = False        # トレースフラグ
         self.types_done: bool = False   # 型エンコード完了フラグ
         self.types_modified: bool = False

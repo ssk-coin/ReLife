@@ -1059,6 +1059,11 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
         return
     t = t.deref()
 
+    # `display_persistent` asks to be shown what lives in persistent store.
+    if (getattr(wl, 'display_persistent_mode', False)
+            and t.__dict__.get('_wl_persistent_written', False)):
+        ps.write(' $')
+
     _psym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
 
     # Evaluate ground arithmetic expressions during display when both operands

@@ -547,6 +547,7 @@ def run_repl(
                 engine._frame_var_trees = [f.var_tree for f in frame_stack
                                            if f.var_tree]
                 engine.used_existing_global = _names_a_persistent(term, engine)
+                engine.persistent_store_touched = False
 
                 saved_noisy = engine.noisy
                 engine.noisy = False
@@ -574,6 +575,9 @@ def run_repl(
                     engine.goal_stack = None
                     engine.trail.undo_to(pre_mark)
                     engine.choice_stack = cs_before
+                    # An abort gives up the levels the session had open as
+                    # well as the query: what it leaves is the top level.
+                    _pop_all()
                     # When the aborthook ran it already wrote its output (ending
                     # with a newline), so we skip the leading '\n' to keep the
                     # next prompt on its own line without an extra blank line.
@@ -662,6 +666,14 @@ def run_repl(
                         # not be reliable across undo). The stored string was correct
                         # when the parent query succeeded.
                         parent_bindings = frame_stack[-1].bindings_str
+                        # Unless the query wrote into persistent store, which
+                        # the undo does not take back: `A.4 = e` opens the
+                        # feature for good and only then fails to fill it.
+                        if getattr(engine, 'persistent_store_touched', False):
+                            _pv_trees = [f.var_tree for f in frame_stack
+                                         if f.var_tree]
+                            parent_bindings = _format_bindings(
+                                {}, engine, extra_var_trees=_pv_trees)
                         if parent_bindings:
                             sys.stdout.write(parent_bindings + "\n")
                     # Do NOT pop the frame on fresh-query failure at depth > 0:

@@ -5465,6 +5465,11 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
     _host_keeps = host.__dict__.get('_wl_persistent_cell', False)
     if _host_keeps:
         fresh._wl_persistent_cell = True
+        # A feature opened on a term that lives in persistent store lives
+        # there too, so it is read rather than narrowed.
+        if host.__dict__.get('_wl_persistent_written', False):
+            fresh._wl_persistent_written = True
+        eng.persistent_store_touched = True
     else:
         eng.trail.trail_psi(host, 'attr_list')
     new_attrs = dict(host.attr_list)
@@ -8333,6 +8338,20 @@ def bi_retract(goal: PsiTerm, eng) -> bool:
     return True
 
 
+def _mark_persistent_deep(t, seen: set) -> None:
+    """Note every node of a term that a persistent write puts away."""
+    if t is None:
+        return
+    t = t.deref()
+    if id(t) in seen:
+        return
+    seen.add(id(t))
+    t._wl_persistent_cell = True
+    t._wl_persistent_written = True
+    for _sub in t.attr_list.values():
+        _mark_persistent_deep(_sub, seen)
+
+
 def bi_store_arrow(goal: PsiTerm, eng) -> bool:
     """X <- V / X <<- V — assignment operators.
 
@@ -8372,6 +8391,19 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         if _dot_cell is None:
             return False
         lhs = _dot_cell.deref()
+
+    # `<-` writes something the query may take back, and what is in
+    # persistent store is not the query's to take back.
+    if _backtrackable and lhs.__dict__.get('_wl_persistent_written', False):
+        from wild_life.print_term import term_to_string as _t2s_arrow
+        from wild_life.unification import AbortException as _Abort_arrow
+        _lhs_str = _t2s_arrow(lhs, quoted=True, wl=eng.wl)
+        _rhs_str = _t2s_arrow(a2.deref(), quoted=True, wl=eng.wl)
+        sys.stderr.write(
+            f"*** Error: cannot use '<-' on persistent value in"
+            f" {_lhs_str} <- {_rhs_str}\n\n*** Abort\n")
+        raise _Abort_arrow(hook_called=True)
+
     defn = lhs.type
 
     # Mode 1: LHS is a named function/predicate symbol (global variable).
@@ -8466,10 +8498,14 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
                         or (lhs.value is None and not lhs.attr_list
                             and (lhs.type is None or lhs.type is eng.wl.top))))
     if _persistent:
+        eng.persistent_store_touched = True
         lhs._wl_persistent_cell = True
         # What is written here stays written, so an equation may read it
-        # but not narrow it.
+        # but not narrow it.  The whole of it: `A <<- p(a,b,c)` puts the p
+        # and its three arguments away together, and display_persistent
+        # writes a ` $` in front of each of them.
         lhs._wl_persistent_written = True
+        _mark_persistent_deep(rhs_term, set())
     else:
         eng.trail.trail_psi(lhs, 'value')
         eng.trail.trail_psi(lhs, 'coref')
@@ -12334,6 +12370,12 @@ def register_all(wl) -> None:
         wl.display_modules_mode = True
         return True
     _reg('display_modules', _bi_display_modules)
+
+    def _bi_display_persistent(goal, eng):
+        """display_persistent — write a ` $` in front of every persistent term."""
+        wl.display_persistent_mode = True
+        return True
+    _reg('display_persistent', _bi_display_persistent)
 
     def _bi_add_man(goal, eng):
         """add_man(Name, Text) — file a manual entry for Name.
