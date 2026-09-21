@@ -1422,8 +1422,22 @@ class Engine:
         return True
 
     def cut_to(self, cut_point) -> None:
-        """Remove choice points up to (not including) cut_point."""
-        while self.choice_stack and self.choice_stack is not cut_point:
+        """Remove choice points up to (not including) cut_point.
+
+        A cut reaches back to where its clause was entered, and no
+        further.  login.c says so by address -- it drops choice points
+        while the top one is newer than the barrier -- so a barrier that
+        an earlier cut already took away stops the walk at once instead
+        of emptying the stack.  Comparing the order they were made in
+        says the same thing without the addresses.
+        """
+        _limit = getattr(cut_point, 'serial', None)
+        if _limit is None:
+            while self.choice_stack and self.choice_stack is not cut_point:
+                self.choice_stack = self.choice_stack.next
+            return
+        while (self.choice_stack is not None
+               and self.choice_stack.serial > _limit):
             self.choice_stack = self.choice_stack.next
 
     # ─── assertion helpers ───────────────────────────────────────────────────

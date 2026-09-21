@@ -495,8 +495,16 @@ class ChoicePoint:
     """バックトラック用選択点
     C版の struct wl_choice_point に対応
     """
+    # Choice points are numbered in the order they are made, standing in
+    # for the stack address login.c compares them by: cut_to(C) there
+    # walks down while the top is *newer* than C, so a barrier that has
+    # already been cut away takes nothing else with it.
+    _serial_counter = 0
+
     def __init__(self, undo_point, goal_stack: Optional[Goal],
                  next: Optional['ChoicePoint'] = None):
+        ChoicePoint._serial_counter += 1
+        self.serial = ChoicePoint._serial_counter
         self.undo_point = undo_point   # アンドゥスタックの保存位置
         self.goal_stack = goal_stack   # ゴールスタックの保存
         self.next = next               # 次の選択点
