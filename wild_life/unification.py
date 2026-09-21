@@ -1110,12 +1110,16 @@ class Unifier:
                     # it — which is how a square of magic took a number one
                     # of its neighbours already had.
                     self._carry_resids(u, v)
-                    # Now push BIND_DIRECT choice points (trail mark AFTER u→v).
-                    for _alt in reversed(_elems[1:]):
-                        self.engine.push_choice_point(GoalType.BIND_DIRECT, v, _alt, None)
                     # Bind v (the disjunction node) to the first element.
                     self.bind(v, _elems[0])
-                    self._wakeup_resid(u, v)
+                    # What waited on this term goes back on the goal stack
+                    # BEFORE the alternatives are put by, so that each of
+                    # them carries the waiting goals in its continuation and
+                    # is judged by them — login.c releases the residuations
+                    # and only then pushes the type-disjunction choice point.
+                    self._wakeup_resid(u, v, defer=False)
+                    for _alt in reversed(_elems[1:]):
+                        self.engine.push_choice_point(GoalType.BIND_DIRECT, v, _alt, None)
                     # Fire sort delay rules for the first element (same as
                     # BIND_DIRECT does for subsequent elements). This ensures
                     # :: SortName | goal fires even for the first alternative.
@@ -1322,10 +1326,11 @@ class Unifier:
                     return False
                 # Bind v to u FIRST so choice-point marks are saved after v→u.
                 self.bind(v, u)
+                self._carry_resids(v, u)
+                self.bind(u, _elems[0])
+                self._wakeup_resid(v, u, defer=False)
                 for _alt in reversed(_elems[1:]):
                     self.engine.push_choice_point(GoalType.BIND_DIRECT, u, _alt, None)
-                self.bind(u, _elems[0])
-                self._wakeup_resid(v, u)
                 # Fire delay rules for the first element (mirrors BIND_DIRECT)
                 _uelems0_d = _elems[0].deref() if _elems else None
                 if (_uelems0_d is not None and WL.delay_rules and self.engine is not None
@@ -1447,11 +1452,11 @@ class Unifier:
                     _elems_b = _fits_b
                 self.bind(u, v)
                 self._carry_resids(u, v)
+                self.bind(v, _elems_b[0])
+                self._wakeup_resid(u, v, defer=False)
                 for _alt_b in reversed(_elems_b[1:]):
                     self.engine.push_choice_point(
                         GoalType.BIND_DIRECT, v, _alt_b, None)
-                self.bind(v, _elems_b[0])
-                self._wakeup_resid(u, v)
                 _e0_b = _elems_b[0].deref()
                 if (WL.delay_rules and _e0_b.type is not None
                         and _e0_b.type is not WL.top
@@ -1924,6 +1929,38 @@ class Unifier:
 
         return True  # 両方 None
 
+    def _carry_rest_into_alternatives(self, cp_before, rest_keys,
+                                      u_attrs, v_attrs) -> None:
+        """Put the feature unifications still to come into new alternatives.
+
+        login.c merges two terms' features by pushing one `unify` goal per
+        feature onto the goal stack, so a choice point made while the first
+        feature is unified still carries the rest in its continuation and
+        does them again when it is taken.  Here the features are unified in
+        place, so the ones still to come are put into each new alternative
+        by hand — without them, coming back for another alternative of the
+        first feature would leave the rest of the term unmatched.
+        """
+        eng = self.engine
+        if eng is None:
+            return
+        pairs = [(u_attrs[k], v_attrs[k]) for k in rest_keys
+                 if u_attrs.get(k) is not None and v_attrs.get(k) is not None]
+        if not pairs:
+            return
+        from wild_life.data_structures import Goal as _G_ua
+        cp = eng.choice_stack
+        while cp is not None and cp is not cp_before:
+            alt = cp.goal_stack
+            if alt is not None:
+                tail = alt.next
+                for (_uv, _vv) in reversed(pairs):
+                    g = _G_ua(GoalType.UNIFY, _uv, _vv, None)
+                    g.next = tail
+                    tail = g
+                alt.next = tail
+            cp = cp.next
+
     def _unify_attrs(self, u: PsiTerm, v: PsiTerm) -> bool:
         """特性を単一化する
         C版の global_unify_attr() に対応
@@ -1954,8 +1991,13 @@ class Unifier:
 
             if u_val is not None and v_val is not None:
                 # 両方に特性がある -> 再帰的に単一化
+                _cp_ua = self.engine.choice_stack if self.engine else None
                 if not self.unify(u_val, v_val):
                     return False
+                if self.engine is not None and self.engine.choice_stack is not _cp_ua:
+                    self._carry_rest_into_alternatives(
+                        _cp_ua, all_keys[all_keys.index(key) + 1:],
+                        u_attrs, v_attrs)
                 # u と v の特性を統一
                 unified = u_val.deref()
                 if key not in u.attr_list or u.attr_list[key] is not unified:
@@ -2374,7 +2416,7 @@ class Unifier:
             self.trail.trail_copy(dst, 'resid')
             dst.resid = list(dst.resid) + _new
 
-    def _wakeup_resid(self, var: PsiTerm, val: PsiTerm):
+    def _wakeup_resid(self, var: PsiTerm, val: PsiTerm, defer: bool = True):
         """残留ゴールを覚醒させる
         変数が束縛されたときに呼ばれる
         C版の wakeup() に対応
@@ -2411,7 +2453,7 @@ class Unifier:
         for g in goals_to_wake:
             self.trail.trail_psi(g, 'pending')  # restore pending=True on backtrack
             g.pending = False
-            if self._unify_nesting > 0 and self.engine is not None:
+            if defer and self._unify_nesting > 0 and self.engine is not None:
                 self._deferred_wakeups.append((g.type, g.a, g.b, g.c))
             else:
                 self.engine.push_goal(g.type, g.a, g.b, g.c)
