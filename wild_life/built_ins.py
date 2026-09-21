@@ -2121,6 +2121,20 @@ def _global_cell(t: PsiTerm, eng) -> Optional[PsiTerm]:
     return t.type.global_value
 
 
+def _stored_side(t: PsiTerm, eng) -> PsiTerm:
+    """The term a name stands for when something has been stored in it."""
+    if t is None or eng is None:
+        return t
+    _d = t.deref()
+    _defn = _d.type
+    if (_defn is not None and getattr(_defn, 'is_persistent', False)
+            and _defn.rule):
+        _cell = _persistent_cell(_d, eng)
+        if _cell is not None:
+            return _cell.deref()
+    return _d
+
+
 def _persistent_cell(t: PsiTerm, eng) -> Optional[PsiTerm]:
     """The one term a `persistent` name stands for, or None for anything else.
 
@@ -5588,7 +5602,53 @@ def _unify_through_eq(eng, a: PsiTerm, b: PsiTerm) -> bool:
 
 
 def bi_unify(goal: PsiTerm, eng) -> bool:
-    """X = Y — LIFE sort unification (with functional evaluation)."""
+    """X = Y — LIFE sort unification (with functional evaluation).
+
+    What `<<-` has written stays written, so an equation may read it but
+    not narrow it: pers2 asks each of its terms against a persistent X and
+    counts the ones X already is, not the ones X could be made into.
+    """
+    _prot = _protected_snapshot(goal, eng)
+    if _prot is None:
+        return _bi_unify_inner(goal, eng)
+    _prot_mark = eng.trail.mark()
+    _prot_cs = eng.choice_stack
+    _ok_prot = _bi_unify_inner(goal, eng)
+    if _ok_prot and _snapshot_moved(_prot):
+        # The alternatives the equation opened go with it: a narrowing it
+        # is not allowed to make is not one to come back to either.
+        eng.trail.undo_to(_prot_mark)
+        eng.choice_stack = _prot_cs
+        return False
+    return _ok_prot
+
+
+def _protected_snapshot(goal: PsiTerm, eng):
+    """What the equation may not change, as it stands before it runs."""
+    _shot = None
+    for _k in ("1", "2"):
+        _s = goal.attr_list.get(_k)
+        if _s is None:
+            continue
+        _s = _s.deref()
+        if not _s.__dict__.get("_wl_persistent_written", False):
+            continue
+        if _shot is None:
+            _shot = []
+        _shot.append((_s, _s.type, _s.value, frozenset(_s.attr_list)))
+    return _shot
+
+
+def _snapshot_moved(shot) -> bool:
+    for _s, _ty, _v, _keys in shot:
+        _now = _s.deref()
+        if (_now.type is not _ty or _now.value != _v
+                or frozenset(_now.attr_list) != _keys):
+            return True
+    return False
+
+
+def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
     a, b = _get_two_args(goal)
     if a is None or b is None:
         return a is b
@@ -5811,10 +5871,10 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     # Handle copy_term(X) functional use: Y = copy_term(X) → Y = fresh copy of X
     if _is_copy_term_func(b_d):
         c = _eval_copy_term_func(b_d)
-        return _unify(eng, a_d, c)
+        return _unify(eng, _stored_side(a_d, eng), c)
     if _is_copy_term_func(a_d):
         c = _eval_copy_term_func(a_d)
-        return _unify(eng, b_d, c)
+        return _unify(eng, _stored_side(b_d, eng), c)
 
     # Handle glb(X,Y) functional use: B = glb(X,Y) → B = GLB of X and Y
     # Uses _apply_glb_to_var to create choice points for multiple GLBs.
@@ -8396,6 +8456,9 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
                             and (lhs.type is None or lhs.type is eng.wl.top))))
     if _persistent:
         lhs._wl_persistent_cell = True
+        # What is written here stays written, so an equation may read it
+        # but not narrow it.
+        lhs._wl_persistent_written = True
     else:
         eng.trail.trail_psi(lhs, 'value')
         eng.trail.trail_psi(lhs, 'coref')
@@ -8406,8 +8469,9 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         lhs.value = val
         lhs.coref = None
         lhs.attr_list = {}
-        if lhs.type is None or lhs.type is eng.wl.top:
-            lhs.type = eng.wl.real
+        # A number written over a term is the number, sort and all: what
+        # `X <<- a` left behind is not what `X <<- 1234` now stands for.
+        lhs.type = _make_number(eng, float(val)).type
     else:
         rhs = rhs_term
         lhs.value = rhs.value
