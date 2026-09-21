@@ -804,10 +804,21 @@ def _free_vars_in(t: 'PsiTerm') -> list:
             continue
         seen.add(id(node))
         from wild_life.runtime import WL as _WL_fv
-        if (not node.attr_list and node.value is None
-                and (node.type is None or node.type is _WL_fv.top)):
-            out.append(node)
-            continue
+        if not node.attr_list and node.value is None:
+            # A term narrowed no further than a number sort is a number
+            # nobody has said yet, and a call that reads it waits on it the
+            # same as on a plain variable: `number_of_factors(P:posint)`
+            # has nothing to work out until P arrives.
+            _ty_fv = node.type
+            if _ty_fv is None or _ty_fv is _WL_fv.top:
+                out.append(node)
+                continue
+            _real_fv = getattr(_WL_fv, 'real', None)
+            if (_real_fv is not None
+                    and getattr(_ty_fv, 'is_subtype_of', None) is not None
+                    and _ty_fv.is_subtype_of(_real_fv)):
+                out.append(node)
+                continue
         queue.extend(node.attr_list.values())
     return out
 
@@ -1904,8 +1915,27 @@ class Engine:
                 from wild_life.data_structures import (
                     QUOTED_TRUE as _QUOTED_TRUE,
                     NON_STRICT_TERM as _NON_STRICT_TERM)
+                from wild_life.built_ins import (
+                    _eval_and_conjunction as _eac_w)
                 for _w_k in list(thegoal.attr_list.keys()):
                     _w_a = thegoal.attr_list[_w_k].deref()
+                    # A meet is worked out before it is written, so that a
+                    # disjunction it comes to is written one alternative at
+                    # a time: `write(posint_stream_to(N) & prime)` writes the
+                    # 2 and comes back for the 3.
+                    if (_w_a.type is wl.and_sym and '1' in _w_a.attr_list
+                            and '2' in _w_a.attr_list
+                            and not (_w_a.flags & (_QUOTED_TRUE
+                                                   | _NON_STRICT_TERM))):
+                        _w_ev = _eac_w(_w_a, self)
+                        if _w_ev is None:
+                            self.goal_stack = aim.next
+                            self.goal_count += 1
+                            return False
+                        _w_ev = _w_ev.deref()
+                        if _w_ev is not _w_a:
+                            self.unifier.set_attr(thegoal, _w_k, _w_ev)
+                            _w_a = _w_ev
                     if _w_a.type is wl.disjunction and _w_a.attr_list:
                         if not self.unifier._settle_disjunction(_w_a):
                             self.goal_stack = aim.next

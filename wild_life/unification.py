@@ -678,6 +678,20 @@ class Unifier:
         if (self.engine is None or defn is None or defn.type is not _DT_sc.TYPE
                 or not defn.rule):
             return True
+        # A sort that was defined out of another carries that one's
+        # condition too: `prime := P:posint | …` is a posint before it is a
+        # prime, so both conditions are asked of what narrows to it.
+        _conds_sc = []
+        _seen_sc = set()
+        _stack_sc = [defn]
+        while _stack_sc:
+            _d_sc = _stack_sc.pop(0)
+            if _d_sc is None or id(_d_sc) in _seen_sc:
+                continue
+            _seen_sc.add(id(_d_sc))
+            if _d_sc.type is _DT_sc.TYPE and _d_sc.rule:
+                _conds_sc.append(_d_sc)
+            _stack_sc.extend(getattr(_d_sc, 'parents', ()) or ())
         # The proof narrows sorts of its own, including the pattern it matches
         # against; without a guard it would ask the same question again on the
         # way, without end.
@@ -688,7 +702,8 @@ class Unifier:
             from wild_life.data_structures import GoalType as _GT_sc
             from wild_life.inference import _DEFRULES as _DR_sc, _INNER_RUN_BARRIER as _IRB_sc
             eng = self.engine
-            for pat, cond in defn.rule:
+            _rules_sc = [_r for _d in _conds_sc for _r in _d.rule]
+            for pat, cond in _rules_sc:
                 if pat is None or cond is None:
                     continue
                 var_map: dict = {}

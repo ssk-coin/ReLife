@@ -1768,8 +1768,22 @@ def _eval_and_conjunction(t: PsiTerm, eng) -> Optional[PsiTerm]:
         surviving = []
         for e in elems:
             e_d = e.deref()
-            if _check_sort_member(e_d, filter_side):
-                surviving.append(e_d)
+            if not _check_sort_member(e_d, filter_side):
+                continue
+            # What survives is the meet, not the element it was made from:
+            # `2 & prime` is the 2 that is a prime, written `2: prime`.
+            _m_meet = eng.trail.mark()
+            _fresh_meet = PsiTerm()
+            _fresh_meet.type = wl.top
+            try:
+                _ok_meet = (eng.unifier.unify(_fresh_meet, e_d)
+                            and eng.unifier.unify(_fresh_meet.deref(),
+                                                  filter_side))
+            except Exception:
+                _ok_meet = False
+            surviving.append(copy_term(_fresh_meet.deref(), {})
+                             if _ok_meet else e_d)
+            eng.trail.undo_to(_m_meet)
         if not surviving:
             return None  # empty disjunction = fail (No)
         return _make_disjunction_psi(surviving, wl)
@@ -3978,6 +3992,26 @@ _SORT_COMPARISONS = frozenset((
 ))
 
 
+def _may_yet_be_a_number(t: 'PsiTerm', eng) -> bool:
+    """Whether a term with nothing in it yet could still come out a number.
+
+    `P:posint` is a number nobody has said yet, so a comparison on it is an
+    open question; `a` is not a number at all, and asking is a mistake.
+    """
+    if t is None or eng is None:
+        return False
+    t = t.deref()
+    if t.value is not None or t.attr_list:
+        return False
+    _d = t.type
+    _real = eng.wl.real
+    if _d is None or _real is None:
+        return False
+    return (_d is _real or _d is eng.wl.top
+            or (getattr(_d, 'is_subtype_of', None) is not None
+                and (_d.is_subtype_of(_real) or _real.is_subtype_of(_d))))
+
+
 def _cond_is_undecided(c: 'PsiTerm', eng, _depth: int = 0) -> bool:
     """Whether a condition made of number comparisons cannot be decided yet.
 
@@ -4000,7 +4034,14 @@ def _cond_is_undecided(c: 'PsiTerm', eng, _depth: int = 0) -> bool:
             # variables is an open question.  One that will not come out
             # although everything in it is known — `3 / 0` — is a wrong
             # question, and the caller reports it rather than waiting.
-            if not _ok and not _is_ground_term(_v):
+            if _ok:
+                continue
+            if not _is_ground_term(_v):
+                return True
+            # A term narrowed no further than a number sort is a number
+            # nothing has said yet: `number_of_factors(P:posint)` asks
+            # `P < 2` of a P that has still to arrive.
+            if _may_yet_be_a_number(_v, eng):
                 return True
         return False
     if sym in _SORT_COMPARISONS and len(c.attr_list) == 2:
