@@ -84,6 +84,38 @@ def _without_line_comment(text: str) -> str:
     return text
 
 
+def _names_a_persistent(term, engine) -> bool:
+    """True when the query as written names a `persistent` global.
+
+    The cell such a name stands for is not the query's to undo, so a query
+    that reaches for one keeps what it did and answers at a level of its own.
+    A global a predicate reads on its way to an answer is not that: power_4
+    passes `result` around inside foo_4 and still answers at the top level,
+    which is why this asks the query text rather than the reading.
+    """
+    defs = getattr(engine.wl, 'global_defs', None)
+    if not defs:
+        return False
+    pre = getattr(engine, 'pre_query_globals', None) or set()
+    seen = set()
+    stack = [term]
+    while stack:
+        t = stack.pop()
+        if t is None:
+            continue
+        t = t.deref()
+        if id(t) in seen:
+            continue
+        seen.add(id(t))
+        d = t.type
+        if (d is not None and getattr(d, 'is_persistent', False)
+                and id(d) in pre):
+            return True
+        if t.attr_list:
+            stack.extend(t.attr_list.values())
+    return False
+
+
 def _prompt(depth: int, module_name: str = "") -> str:
     """Return the prompt string for the given depth level.
 
@@ -514,7 +546,7 @@ def run_repl(
                 # this query's own variables.
                 engine._frame_var_trees = [f.var_tree for f in frame_stack
                                            if f.var_tree]
-                engine.used_existing_global = False
+                engine.used_existing_global = _names_a_persistent(term, engine)
 
                 saved_noisy = engine.noisy
                 engine.noisy = False
