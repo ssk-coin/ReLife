@@ -1083,11 +1083,15 @@ class Unifier:
                     # alternatives that fit it: `M:int` meeting `{a;1}` is
                     # the 1.
                     if u.type is not None and u.type is not WL.top:
+                        # Only the sorts are asked here: what a goal waiting
+                        # on u would say about an alternative is said by
+                        # running it, which is what backtracking into the
+                        # alternatives is for.
                         _fits_u = []
                         for _e_u in _elems:
                             _m_u = self.trail.mark()
                             try:
-                                _ok_u = self.unify(u, _e_u)
+                                _ok_u = self._unify_types(u, _e_u.deref())
                             except UnificationFailure:
                                 _ok_u = False
                             self.trail.undo_to(_m_u)
@@ -1100,6 +1104,12 @@ class Unifier:
                     # saved AFTER X.coref=v is set.  Backtracking then preserves
                     # X→v while undoing only v.coref (the inner binding).
                     self.bind(u, v)
+                    # What u was waiting for, the node it has become waits for
+                    # too: coming back for the next alternative binds that
+                    # node, and a goal left behind on u would never hear of
+                    # it — which is how a square of magic took a number one
+                    # of its neighbours already had.
+                    self._carry_resids(u, v)
                     # Now push BIND_DIRECT choice points (trail mark AFTER u→v).
                     for _alt in reversed(_elems[1:]):
                         self.engine.push_choice_point(GoalType.BIND_DIRECT, v, _alt, None)
@@ -1410,6 +1420,45 @@ class Unifier:
             self._wakeup_resid(u, u)
             return True
         if v.type is WL.disjunction and self.engine is not None:
+            # A term with nothing in it yet follows the disjunction node, so
+            # that coming back for the next alternative moves it along and
+            # wakes what was waiting on it: magic's squares are bare `int`s,
+            # and each has to hear that its neighbour took the number first.
+            if (v.attr_list and u.value is None and not u.attr_list
+                    and u.coref is None):
+                from wild_life.built_ins import (
+                    _collect_disjunction as _cdisj_b)
+                _elems_b = _cdisj_b(v, self.engine)
+                if not _elems_b:
+                    return False
+                if u.type is not None and u.type is not WL.top:
+                    _fits_b = []
+                    for _e_b in _elems_b:
+                        _m_b = self.trail.mark()
+                        try:
+                            _ok_b = self._unify_types(u, _e_b.deref())
+                        except UnificationFailure:
+                            _ok_b = False
+                        self.trail.undo_to(_m_b)
+                        if _ok_b:
+                            _fits_b.append(_e_b)
+                    if not _fits_b:
+                        return False
+                    _elems_b = _fits_b
+                self.bind(u, v)
+                self._carry_resids(u, v)
+                for _alt_b in reversed(_elems_b[1:]):
+                    self.engine.push_choice_point(
+                        GoalType.BIND_DIRECT, v, _alt_b, None)
+                self.bind(v, _elems_b[0])
+                self._wakeup_resid(u, v)
+                _e0_b = _elems_b[0].deref()
+                if (WL.delay_rules and _e0_b.type is not None
+                        and _e0_b.type is not WL.top
+                        and not getattr(_e0_b, '_delay_fired', False)):
+                    _e0_b._delay_fired = True
+                    self._fire_delay_rules(_e0_b, _e0_b.type)
+                return True
             # A term meeting a disjunction takes one of its alternatives, and
             # only one it fits: `pick_name(ursule)` against the head
             # `pick_name({alfred;…;gertrude})` has no alternative to take and
