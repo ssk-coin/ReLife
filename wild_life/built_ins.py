@@ -7800,7 +7800,16 @@ def bi_once(goal: PsiTerm, eng) -> bool:
     result = eng.run(cs_barrier=_barrier)
     if not result:
         eng.trail.undo_to(mark)
-    eng.choice_stack = cp_save
+        eng.choice_stack = cp_save
+        return result
+    # What the goal cut reaches past this call: `call_once(B)` with B the
+    # cut atom takes the query's own alternatives with it.  Only the
+    # alternatives the goal itself left behind are the ones dropped here.
+    _cp_seen = eng.choice_stack
+    while _cp_seen is not None and _cp_seen is not cp_save:
+        _cp_seen = _cp_seen.next
+    if cp_save is None or _cp_seen is cp_save:
+        eng.choice_stack = cp_save
     return result
 
 
