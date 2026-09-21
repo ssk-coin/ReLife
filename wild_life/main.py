@@ -212,6 +212,21 @@ def run_repl(
             if defn.keyword is not None and defn.keyword.public:
                 WL.bi_module.symbol_table.setdefault(name, defn)
 
+    # ---- The built-ins that are written in LIFE -----------------------------
+    # C Wild Life compiles part of built_ins.lf in, so `clause(X:(append(A,B)
+    # -> C))` reads back the two rules append is made of.  The interpreter
+    # answers the calls itself; these give a program the text of them.
+    prelude_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "prelude.lf")
+    if os.path.isfile(prelude_file):
+        try:
+            engine.load_file(prelude_file)
+        except HaltException:
+            return 0
+        except Exception as exc:
+            sys.stderr.write(
+                f"Warning: could not load {prelude_file}: {exc}\n")
+
     # ---- Load system initialisation file (.set_up) --------------------------
     # Note: built_ins.lf uses complex module syntax not yet supported by the
     # parser. All Python built-ins are registered via built_ins.py, so we only
