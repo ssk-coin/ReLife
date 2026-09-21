@@ -8137,6 +8137,9 @@ def _normalize_clause_for_assert(arg: PsiTerm, eng) -> PsiTerm:
         # `assert(f2 -> X)` the X of `X:(1+2)` reads as 1 + 2 everywhere.
         from wild_life.inference import _mark_arith_non_strict as _mans_asrt
         _mans_asrt(arg, None, eng)
+        from wild_life.inference import (
+            _thaw_non_strict_freeze as _thaw_asrt)
+        _thaw_asrt(arg)
         return arg
     return _normalize_arith_in_term(arg, eng)
 

@@ -94,10 +94,35 @@ def _freeze_calls_deep(t: PsiTerm, quoted_flag: int,
     from wild_life.built_ins import (_is_user_function as _iuf_ns,
                                      _SORT_COMPARISONS as _SC_ns,
                                      _get_sym as _gs_ns)
-    if _iuf_ns(t) or _gs_ns(t) in _SC_ns:
+    from wild_life.runtime import WL as _WL_ns
+    _is_disj = (getattr(_WL_ns, 'disjunction', None) is not None
+                and t.type is _WL_ns.disjunction)
+    if _iuf_ns(t) or _is_disj or _gs_ns(t) in _SC_ns:
+        if not (t.flags & quoted_flag):
+            # Remembered, so that filing the term as a clause can let its
+            # calls go again: what a non-strict call may not work out is
+            # still a goal once the clause it belongs to is run.
+            t._wl_ns_frozen = True
         t.flags |= quoted_flag
     for sub in t.attr_list.values():
         _freeze_calls_deep(sub, quoted_flag, visited)
+
+
+def _thaw_non_strict_freeze(t: PsiTerm, visited: set = None) -> None:
+    """Let go of the calls a non-strict argument was frozen for."""
+    from wild_life.data_structures import QUOTED_TRUE as _QT_th
+    if t is None:
+        return
+    if visited is None:
+        visited = set()
+    t = t.deref()
+    if id(t) in visited:
+        return
+    visited.add(id(t))
+    if t.__dict__.pop('_wl_ns_frozen', False):
+        t.flags &= ~_QT_th
+    for sub in t.attr_list.values():
+        _thaw_non_strict_freeze(sub, visited)
 
 
 def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
