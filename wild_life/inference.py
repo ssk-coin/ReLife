@@ -3543,13 +3543,23 @@ class Engine:
         self.trail.trail_psi(v, 'coref')
         v.coref = u
 
-        # Match attributes
-        for key, vpsi in v.attr_list.items():
-            upsi = u.attr_list.get(key)
-            if upsi is None:
+        # Match attributes.  login.c walks the feature tree right-node-left
+        # and pushes one `match` goal at each node, so the smallest feature
+        # ends on top of the stack and is matched first: the goals are
+        # pushed here in the reverse of the order they are to run in.
+        def _mk(k):
+            try:
+                return (0, int(k))
+            except (ValueError, TypeError):
+                return (1, k)
+        _keys_m = sorted(v.attr_list.keys(), key=_mk)
+        for key in _keys_m:
+            if u.attr_list.get(key) is None:
                 self.trail.undo_to(mark)
                 return False
-            self.push_goal(GoalType.MATCH, upsi, vpsi, None)
+        for key in reversed(_keys_m):
+            self.push_goal(GoalType.MATCH, u.attr_list[key],
+                           v.attr_list[key], None)
         return True
 
     def clause_aim(self, retract: bool) -> bool:
