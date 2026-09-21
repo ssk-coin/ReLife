@@ -1484,6 +1484,35 @@ class Unifier:
                         return True
             except Exception:
                 pass
+            # A number meeting a sum that is still waiting on its terms is a
+            # constraint, not a shape to match: magic's `all_equal(RowSums,
+            # 15)` says what each row has to come to and waits for the
+            # squares.  `=` knows how to say that, so it is asked.
+            _expr_eq = v if u_is_num else u
+            if (self.engine is not None and _expr_eq.attr_list
+                    and not getattr(self, '_in_arith_eq', False)):
+                from wild_life.built_ins import (
+                    _ARITH_OPS_SET as _AOS_eq, _get_sym as _gs_eq,
+                    _collect_arith_vars as _cav_eq)
+                _vars_eq: list = []
+                if _gs_eq(_expr_eq) in _AOS_eq:
+                    _cav_eq(_expr_eq, WL, _vars_eq, set())
+                # Only where something is still unknown: `*(10)` is a
+                # multiplication waiting for its second argument, not an
+                # equation, and 50 is not what it comes to.
+                if _gs_eq(_expr_eq) in _AOS_eq and _vars_eq:
+                    _num_eq = u if u_is_num else v
+                    _eq_def = (getattr(WL, 'eqsym', None)
+                               or WL.syntax_module.symbol_table.get('='))
+                    if _eq_def is not None:
+                        from wild_life.built_ins import bi_unify as _bu_eq
+                        _eq_t = PsiTerm(type_def=_eq_def)
+                        _eq_t.attr_list = {'1': _num_eq, '2': _expr_eq}
+                        self._in_arith_eq = True
+                        try:
+                            return bool(_bu_eq(_eq_t, self.engine))
+                        finally:
+                            self._in_arith_eq = False
 
         # Two arithmetic expressions meet where a shared variable reaches both
         # slots of a clause head — `r3(X, 1+1, 2*1)` called as `r3(a,C,C)`.

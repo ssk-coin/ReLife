@@ -2308,6 +2308,16 @@ class Engine:
                 # predicate the number the list is long and the category the
                 # word has, not the calls that stand for them.  A call that
                 # cannot be worked out yet is left as it is.
+                # `map(F,L)` and `reduce(F,E,L)` are among those calls:
+                # magic's `all_equal(map(sum_up,Square),Total)` hands the
+                # predicate the row sums, not the call that makes them.
+                if _a_pa_d.attr_list:
+                    from wild_life.built_ins import (
+                        _eval_map_or_reduce as _emor_pa)
+                    _mr_pa = _emor_pa(_a_pa_d, self)
+                    if _mr_pa is not None and _mr_pa.deref() is not _a_pa_d:
+                        self.unifier.set_attr(thegoal, _k_pa, _mr_pa)
+                        continue
                 if _a_pa_d.attr_list and not _iuf_pa(_a_pa_d):
                     _eeuf_pa(_a_pa_d, self, 0, set())
 

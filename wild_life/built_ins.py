@@ -7274,6 +7274,16 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
     # Both sides, not just one: `features(A) = features(B)` compares the two
     # feature lists, which is how structures.lf asks whether two terms carry
     # the same features.
+    # `map(F,L)` and `reduce(F,E,L)` standing where a value belongs are
+    # asked for one: magic compares the row sums `map(sum_up,Square)` makes,
+    # not the call that would make them.
+    _b_mr = _eval_map_or_reduce(b_d, eng)
+    if _b_mr is not None:
+        b_d = _b_mr.deref()
+    _a_mr = _eval_map_or_reduce(a_d, eng)
+    if _a_mr is not None:
+        a_d = _a_mr.deref()
+
     b_str = _try_eval_string_func(b_d, eng)
     a_str = _try_eval_string_func(a_d, eng)
     if b_str is not None:
@@ -10689,6 +10699,23 @@ def bi_system(goal: PsiTerm, eng) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 # map(F, List) → ResultList  (functional built-in)
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _eval_map_or_reduce(t: PsiTerm, eng) -> Optional[PsiTerm]:
+    """What a map or reduce written where a value belongs comes to."""
+    if t is None or eng is None or t.type is None or t.type.keyword is None:
+        return None
+    _sym_mr = t.type.keyword.symbol
+    if _sym_mr == 'map':
+        if ('1' in t.attr_list and '2' in t.attr_list
+                and '3' not in t.attr_list):
+            return _eval_map_func(t, eng)
+        return None
+    if _sym_mr == 'reduce':
+        if ('1' in t.attr_list and '2' in t.attr_list
+                and '3' in t.attr_list and '4' not in t.attr_list):
+            return _eval_reduce_func(t, eng)
+    return None
+
 
 def _eval_map_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     """Evaluate map(F, List) functionally, returning the mapped list as a PsiTerm.
