@@ -5610,8 +5610,12 @@ def bi_unify(goal: PsiTerm, eng) -> bool:
     # Handle T.F = V and V = T.F (dot feature access / creation).
     # When T.F does not yet exist as an attribute, a fresh variable is
     # inserted into T's attr_list (trailed) and unified with V.
+    # `.` names a feature only when it is written with a term and a label:
+    # the operator table holds `.` itself as a functor, and that atom is a
+    # value like any other.
     _dot_sym_check = (lambda td: td.type is not None and td.type.keyword is not None
-                      and td.type.keyword.symbol == '.')
+                      and td.type.keyword.symbol == '.'
+                      and '1' in td.attr_list and '2' in td.attr_list)
     if _dot_sym_check(a_d):
         _attr_cell = _resolve_dot_feat(a_d, eng)
         if _attr_cell is None:
@@ -8032,7 +8036,15 @@ def _collect_solutions(template: PsiTerm, g: PsiTerm, eng) -> list:
             # because built_ins.lf collects `evalin(A)` rather than A.
             _elem = template_copy.deref()
             _mark_ev = eng.trail.mark()
-            if getattr(wl, 'apply', None) is not None and _elem.type is wl.apply:
+            # A template that names a feature of what the goal bound — the
+            # `X.functor` of `bagof(X.functor,X:op)` — is read out the same
+            # way, once the solution has given X something to read it from.
+            _ev_wanted = (
+                (getattr(wl, 'apply', None) is not None
+                 and _elem.type is wl.apply)
+                or (_elem.type is not None and _elem.type.keyword is not None
+                    and _elem.type.keyword.symbol == '.'))
+            if _ev_wanted:
                 _gs_ev, _cs_ev = eng.goal_stack, eng.choice_stack
                 _ok_ev = eng.main_loop_ok
                 try:
@@ -9200,6 +9212,20 @@ def bi_op(goal: PsiTerm, eng) -> bool:
     a3 = goal.attr_list.get('3')
     if not (a1 and a2 and a3):
         return False
+    # An operator answers to its positions by name as well: the three are
+    # precedence, kind and functor, and `bagof(X.functor,X:op)` reads the
+    # last of them out of every operator there is.
+    def _sym(_d, _fallback):
+        return (_d.symbol if (_d is not None and getattr(_d, 'keyword', None))
+                else _fallback)
+    for _feat, _pos in (('precedence', '1'), ('kind', '2'), ('functor', '3')):
+        _key = _sym(getattr(wl, _feat, None), _feat)
+        _have = goal.attr_list.get(_key)
+        if _have is None:
+            eng.unifier.set_attr(goal, _key, goal.attr_list[_pos])
+        elif _have.deref() is not goal.attr_list[_pos].deref():
+            if not _unify(eng, _have, goal.attr_list[_pos]):
+                return False
     prec = a1.deref()
     typ  = a2.deref()
     name = a3.deref()
