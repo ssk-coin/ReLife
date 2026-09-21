@@ -1093,6 +1093,20 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         a1 = t.attr_list.get('1')
         if a1 is None:
             return None
+        # A call written where the term goes is asked for the term it makes:
+        # accumulators.lf builds a context out of `strip(A) & @(AIn,Out.A)`,
+        # and what that is a root sort of is the `@` strip answers.
+        if (a1.deref() is a1 and a1.attr_list and eng is not None
+                and a1.type is not None
+                and a1.type._builtin_func is not None):
+            if _is_strip_func(a1):
+                _rs_ev = _eval_strip_or_copy_func(a1, eng, False)
+            elif _is_copy_pointer_func(a1):
+                _rs_ev = _eval_strip_or_copy_func(a1, eng, True)
+            else:
+                _rs_ev = _try_eval_string_func(a1, eng)
+            if _rs_ev is not None and _rs_ev.deref() is not a1:
+                a1 = _rs_ev
         a1 = a1.deref()
         defn = a1.type
         if defn is None or defn.keyword is None:
@@ -4745,6 +4759,18 @@ def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
         # For `(CX,NT) & memo_copy(...)`: unify((CX,NT), pair) → binds CX, NT
         _unify(eng, _lhs_ev, _rhs_ev)
         return _lhs_ev.deref()
+
+    # `strip(S)` and `copy_pointer(S)` answer a term, and a rule body is
+    # where accumulators.lf asks them for one: `strip(A) & @(AIn,Out.A)` is
+    # the `@` strip makes with two features on it.
+    if _is_strip_func(body_d):
+        _st_v = _eval_strip_or_copy_func(body_d, eng, False)
+        if _st_v is not None:
+            return _st_v
+    if _is_copy_pointer_func(body_d):
+        _st_v = _eval_strip_or_copy_func(body_d, eng, True)
+        if _st_v is not None:
+            return _st_v
 
     # Try evaluating the whole body as a pure built-in (root_sort, features, etc.)
     _sv = _try_eval_string_func(body_d, eng)
