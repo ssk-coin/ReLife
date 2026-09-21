@@ -423,6 +423,24 @@ _BOOL_VALUED_COMPARISONS = frozenset((
 ))
 
 
+def _eval_bool_builtin(t, eng):
+    """What a built-in that answers true or false comes to, or None.
+
+    `has_feature(B,In,InB)` written as one side of an `and` is a question
+    with an answer, and asking it binds InB: accumulators.lf reads an
+    accumulator out of the context that way.
+    """
+    if t is None or eng is None:
+        return None
+    t = t.deref()
+    if _get_sym(t) not in _BOOL_VALUED_BUILTINS or not t.attr_list:
+        return None
+    _r = _try_eval_string_func(t, eng)
+    if _r is not None and _get_sym(_r.deref()) in ('true', 'false'):
+        return _r
+    return None
+
+
 def _bool_operand_ok(t: 'PsiTerm', wl, _depth: int = 0) -> bool:
     """Whether a term can stand where a boolean is wanted.
 
@@ -645,9 +663,11 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
             return None
         # Recursively evaluate args
         a1 = (_try_eval_bool(a1, eng) or _eval_arith_comparison(a1, eng)
-              or _eval_sort_comparison(a1, eng) or a1.deref())
+              or _eval_sort_comparison(a1, eng)
+              or _eval_bool_builtin(a1, eng) or a1.deref())
         a2 = (_try_eval_bool(a2, eng) or _eval_arith_comparison(a2, eng)
-              or _eval_sort_comparison(a2, eng) or a2.deref())
+              or _eval_sort_comparison(a2, eng)
+              or _eval_bool_builtin(a2, eng) or a2.deref())
         s1, s2 = _get_sym(a1), _get_sym(a2)
         if s1 == 'false' or s2 == 'false':
             return _make_atom(eng, 'false')
@@ -668,9 +688,11 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None or a2 is None:
             return None
         a1 = (_try_eval_bool(a1, eng) or _eval_arith_comparison(a1, eng)
-              or _eval_sort_comparison(a1, eng) or a1.deref())
+              or _eval_sort_comparison(a1, eng)
+              or _eval_bool_builtin(a1, eng) or a1.deref())
         a2 = (_try_eval_bool(a2, eng) or _eval_arith_comparison(a2, eng)
-              or _eval_sort_comparison(a2, eng) or a2.deref())
+              or _eval_sort_comparison(a2, eng)
+              or _eval_bool_builtin(a2, eng) or a2.deref())
         s1, s2 = _get_sym(a1), _get_sym(a2)
         if s1 == 'true' or s2 == 'true':
             return _make_atom(eng, 'true')
@@ -692,7 +714,8 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
             return None
         a1 = (_try_eval_bool(a1.deref(), eng)
               or _eval_arith_comparison(a1, eng)
-              or _eval_sort_comparison(a1, eng) or a1.deref())
+              or _eval_sort_comparison(a1, eng)
+              or _eval_bool_builtin(a1, eng) or a1.deref())
         s1 = _get_sym(a1)
         if s1 == 'true':
             return _make_atom(eng, 'false')
@@ -705,9 +728,11 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None or a2 is None:
             return None
         a1 = (_try_eval_bool(a1, eng) or _eval_arith_comparison(a1, eng)
-              or _eval_sort_comparison(a1, eng) or a1.deref())
+              or _eval_sort_comparison(a1, eng)
+              or _eval_bool_builtin(a1, eng) or a1.deref())
         a2 = (_try_eval_bool(a2, eng) or _eval_arith_comparison(a2, eng)
-              or _eval_sort_comparison(a2, eng) or a2.deref())
+              or _eval_sort_comparison(a2, eng)
+              or _eval_bool_builtin(a2, eng) or a2.deref())
         s1, s2 = _get_sym(a1), _get_sym(a2)
         if s1 in ('true', 'false') and s2 in ('true', 'false'):
             result = (s1 == 'true') ^ (s2 == 'true')
@@ -893,6 +918,8 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     t = t.deref()
     # A global variable name stands for its cell.
     cell = _global_cell(t, eng)
+    if cell is None:
+        cell = _persistent_cell(t, eng)
     if cell is not None:
         return cell
     # An argument written as a global name is there for what its cell holds:
@@ -1046,6 +1073,19 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         _dot.attr_list = {'1': a2, '2': a1}
         return _resolve_dot_feat(_dot, eng, create=False)
 
+    elif sym == 'combined_name':
+        # combined_name(T) -> the atom that names T's sort with the module it
+        # belongs to, `user#pp`.  The library files file a table under it, so
+        # that two modules' `pp` are two entries.
+        a1 = t.attr_list.get('1')
+        if a1 is None or eng is None:
+            return None
+        a1 = a1.deref()
+        defn = a1.type
+        if defn is None or defn.keyword is None:
+            return None
+        return eng.wl.make_atom(defn.keyword.combined_name, eng.wl.user_module)
+
     elif sym == 'root_sort' or sym == 'sort':
         # root_sort(T) -> the root sort of T.
         # For numeric/string atoms, the root sort is the value itself.
@@ -1196,9 +1236,16 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         a2 = t.attr_list.get('2')
         if a1 is None or a2 is None or eng is None:
             return None
-        fname = _feature_name_of(a1.deref(), eng.wl)
+        fname = _feature_name_of(_feature_arg_term(a1, eng), eng.wl)
         term = a2.deref()
+        _term_cell = _global_cell(term, eng) or _persistent_cell(term, eng)
+        if _term_cell is not None:
+            term = _term_cell.deref()
         holds = fname is not None and fname in term.attr_list
+        if holds and '3' in t.attr_list:
+            _v3 = t.attr_list['3'].deref()
+            if not _unify(eng, _v3, term.attr_list[fname].deref()):
+                holds = False
         return eng.wl.make_atom('true' if holds else 'false')
 
     elif sym == 'parents':
@@ -2058,6 +2105,41 @@ def _global_cell(t: PsiTerm, eng) -> Optional[PsiTerm]:
         return None
     _note_global_used(eng, t.type)
     return t.type.global_value
+
+
+def _persistent_cell(t: PsiTerm, eng) -> Optional[PsiTerm]:
+    """The one term a `persistent` name stands for, or None for anything else.
+
+    A persistent name keeps what is written into it, features and all:
+    acc_declarations.lf files what it knows about a predicate under
+    `predicates_info.combined_name(X).A <<- true`, and every later reading of
+    predicates_info has to find it there.  A name nothing has been written
+    into yet is given the term the writing will go into.
+    """
+    if t is None or eng is None:
+        return None
+    while t.coref is not None:
+        t = t.coref
+    defn = t.type
+    if (t.attr_list or t.value is not None or defn is None
+            or not getattr(defn, 'is_persistent', False)
+            or defn.type != DefType.FUNCTION):
+        return None
+    if defn.rule:
+        for _h, _b in defn.rule:
+            if _h is None or _b is None:
+                continue
+            if _h.deref().attr_list:
+                return None          # a function of the program's own
+            _bd = _b.deref()
+            _bd._wl_persistent_cell = True
+            return _bd
+        return None
+    from wild_life.unification import copy_term as _ct_pc
+    _cell = PsiTerm(type_def=eng.wl.top)
+    _cell._wl_persistent_cell = True
+    defn.rule = [(_ct_pc(t, {}), _cell)]
+    return _cell
 
 
 def _term_to_str(t: PsiTerm, eng, quoted=True) -> str:
@@ -3151,6 +3233,33 @@ def bi_is(goal: PsiTerm, eng) -> bool:
         return False
     result = _make_number(eng, val)
     return _unify(eng, arg1, result)
+
+
+def _feature_arg_term(feat: PsiTerm, eng):
+    """The term a feature-name argument names, calls worked out.
+
+    `has_feature(combined_name(X),predicates_info)` asks about the label
+    combined_name answers, not about one called combined_name.
+    """
+    if feat is None:
+        return feat
+    # Only a call written where the label goes is worked out.  A variable's
+    # value is the term it already is: `has_feature(Leaf,table,Pred)` asks
+    # about the sort of the leaf it was handed, `a + in`, and not about what
+    # adding a to in would come to.
+    _written = feat.deref() is feat
+    feat = feat.deref()
+    if (_written and feat.attr_list and eng is not None
+            and feat.value is None
+            and _get_sym(feat) not in _ARITH_OPS_SET):
+        _ev = _try_eval_string_func(feat, eng)
+        if _ev is not None:
+            _ev = _ev.deref()
+            if _ev is not feat and (_ev.value is not None
+                                    or (_ev.type is not None
+                                        and _ev.type.keyword is not None)):
+                return _ev
+    return feat
 
 
 def _feature_name_of(feat: PsiTerm, wl):
@@ -5170,6 +5279,8 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
     # A name declared with `global` stands for a cell, and the feature
     # belongs to the cell: `sieve.M` reads and writes what sieve holds.
     _host_cell = _global_cell(host, eng)
+    if _host_cell is None:
+        _host_cell = _persistent_cell(host, eng)
     if _host_cell is not None:
         host = _host_cell.deref()
     # If the host is itself a dot-access expression (nested chain like A.a.b.c.d),
@@ -5254,7 +5365,21 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
         if _ok:
             fkey = str(int(_v))
         else:
-            fkey = feat.type.keyword.symbol
+            # A call written as the label is there for the label it answers:
+            # acc_declarations.lf files what it knows under
+            # `predicates_info.combined_name(X)`, which is one entry per
+            # module's X rather than one called combined_name.
+            if feat.attr_list:
+                _feat_ev = _try_eval_string_func(feat, eng)
+                if _feat_ev is not None:
+                    _feat_ev = _feat_ev.deref()
+                    if (_feat_ev is not feat and _feat_ev.type is not None
+                            and _feat_ev.type.keyword is not None):
+                        feat = _feat_ev
+            if feat.value is not None:
+                fkey = str(feat.value)
+            else:
+                fkey = feat.type.keyword.symbol
     else:
         return None
     existing = host.attr_list.get(fkey)
@@ -5283,7 +5408,14 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
     wl_rd = eng.wl
     fresh = PsiTerm()
     fresh.type = wl_rd.top  # must be WL.top so unification recognises it as a free var
-    eng.trail.trail_psi(host, 'attr_list')
+    # What a `persistent` name holds is not the query's to undo: a table the
+    # library files write into has to still be there on the next query, and
+    # on the one after a failure.
+    _host_keeps = host.__dict__.get('_wl_persistent_cell', False)
+    if _host_keeps:
+        fresh._wl_persistent_cell = True
+    else:
+        eng.trail.trail_psi(host, 'attr_list')
     new_attrs = dict(host.attr_list)
     new_attrs[fkey] = fresh
     host.attr_list = new_attrs
@@ -7030,10 +7162,17 @@ def _strip_backtick(t: PsiTerm) -> PsiTerm:
 
 
 def _sort_key_under(lower, upper) -> bool:
-    """Whether the first sort key is the second or lies under it."""
+    """Whether the first sort key is the second or lies under it.
+
+    Every sort lies under `@`, whether or not the program ever said so:
+    accumulators.lf asks `AccPred :< @` of a term to mean that there is one.
+    """
     (ld, lv), (ud, uv) = lower, upper
     if uv is not None:
         return ld is ud and lv == uv
+    from wild_life.runtime import WL as _WL_sku
+    if ud is _WL_sku.top:
+        return True
     return ld.is_subtype_of(ud)
 
 
@@ -7943,6 +8082,15 @@ def _normalize_clause_for_assert(arg: PsiTerm, eng) -> PsiTerm:
     the clause under that number instead of under f1, losing the clause.
     """
     arg = arg.deref()
+    # A clause built under a backquote is the clause: the quote is what kept
+    # it from being worked out while it was being put together, and
+    # std_expander hands each clause it generates over as
+    # `` `(NewHead :- Code) ``.
+    while True:
+        _sym_bq = arg.type.keyword.symbol if (arg.type and arg.type.keyword) else ''
+        if _sym_bq != '`' or '1' not in arg.attr_list or len(arg.attr_list) != 1:
+            break
+        arg = arg.attr_list['1'].deref()
     sym = arg.type.keyword.symbol if (arg.type and arg.type.keyword) else ''
     if sym in (':-', '->') and '1' in arg.attr_list and '2' in arg.attr_list:
         # A rule is filed as written.  The expression in its body is part of
@@ -9353,7 +9501,8 @@ _BUILTIN_FUNCTION_SYMS = frozenset((
     'is_number', 'is_value', 'has_feature',
     'int2str', 'str2int', 'str2psi', 'psi2str', 'str2num', 'num2str',
     'strcon', 'strlen', 'substr', 'chr', 'asc', 'upper', 'lower',
-    'root_sort', 'sort', 'features', 'feature_values', 'parents', 'children',
+    'root_sort', 'sort', 'combined_name',
+    'features', 'feature_values', 'parents', 'children',
     'least_sorts', 'glb', 'lub', 'copy_term', 'eval',
     '+', '-', '*', '/', '//', 'mod', '^', 'min', 'max', 'abs',
     'sqrt', 'exp', 'log', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
@@ -11136,6 +11285,15 @@ def register_all(wl) -> None:
         return True
     _reg('persistent', _bi_persistent)
 
+    # ── quiet — whether the interpreter was asked to keep quiet ───────────
+    def _bi_quiet(goal, eng):
+        """quiet — succeeds when the interpreter is running quietly.
+
+        The library files ask it before each warning they would print.
+        """
+        return bool(getattr(wl, 'quietflag', False))
+    _reg('quiet', _bi_quiet)
+
     def _bi_print_variables(goal, eng):
         """print_variables — write out the variables the session holds."""
         from wild_life.print_term import print_variables as _pv_bi, \
@@ -11314,6 +11472,22 @@ def register_all(wl) -> None:
             return True
         return _unify(eng, a2.deref(), result)
     _reg('root_sort', _bi_root_sort)
+
+    # ── combined_name(T[, N]) — the sort's name with its module ───────────
+    def _bi_combined_name(goal, eng):
+        """combined_name(T[, N]) — N is T's sort named with its module."""
+        a1 = goal.attr_list.get('1')
+        a2 = goal.attr_list.get('2')
+        if a1 is None:
+            return False
+        defn = a1.deref().type
+        if defn is None or defn.keyword is None:
+            return False
+        result = wl.make_atom(defn.keyword.combined_name, wl.user_module)
+        if a2 is None:
+            return True
+        return _unify(eng, a2.deref(), result)
+    _reg('combined_name', _bi_combined_name, def_type=DefType.FUNCTION)
 
     def _bi_features(goal, eng):
         """features(T): return list of attribute labels of T."""
@@ -11617,15 +11791,33 @@ def register_all(wl) -> None:
 
     # ── has_feature(F, T) — true if term T has feature named F ───────────
     def _bi_has_feature(goal, eng):
-        """has_feature(F, T) — succeeds if T has a feature named F."""
+        """has_feature(F, T[, V]) — succeeds if T has a feature named F.
+
+        Given a third argument it is what the feature holds, which is how
+        acc_declarations.lf reads a table: `has_feature(Acc,accumulators,
+        AccInfo)` asks for the entry filed under Acc and gets it.
+        """
         a1 = goal.attr_list.get('1')  # feature name
         a2 = goal.attr_list.get('2')  # term
+        a3 = goal.attr_list.get('3')  # what the feature holds
         if a1 is None or a2 is None:
             return False
-        fname = _feature_name_of(a1.deref(), wl)
+        fname = _feature_name_of(_feature_arg_term(a1, eng), wl)
         if fname is None:
             return False
-        return fname in a2.deref().attr_list
+        _host = a2.deref()
+        # A name declared `global` or `persistent` stands for its cell, and
+        # the features belong to the cell: acc_declarations.lf asks
+        # `has_feature(Acc,accumulators,AccInfo)` of the table it files
+        # entries in.
+        _host_cell = _global_cell(_host, eng) or _persistent_cell(_host, eng)
+        if _host_cell is not None:
+            _host = _host_cell.deref()
+        if fname not in _host.attr_list:
+            return False
+        if a3 is not None:
+            return _unify(eng, a3.deref(), _host.attr_list[fname].deref())
+        return True
     _reg('has_feature', _bi_has_feature)
 
     # ── parents(X, L) — L is list of direct parent sorts of X ─────────────

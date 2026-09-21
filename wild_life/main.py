@@ -174,6 +174,9 @@ def run_repl(
     engine.noisy = False   # REPL handles all output itself
 
     # ---- Print banner -------------------------------------------------------
+    # The library files ask `quiet` before they warn about anything, so the
+    # flag the banner was suppressed by is the one they read.
+    WL.quietflag = quiet
     title(quiet)
 
     # ---- Boot-load the term-expansion layer ---------------------------------

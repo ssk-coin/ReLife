@@ -1479,7 +1479,36 @@ class Unifier:
                         and not (t.flags & _NST_AA)
                         and not _iuf_aa(t))
 
-            if _is_open_arith(u) and _is_open_arith(v):
+            def _is_plain_atom(x):
+                """A sort that is nothing but itself, and never a number."""
+                if x is None:
+                    return False
+                x = x.deref()
+                from wild_life.data_structures import SORT_VAR as _SV_pa
+                if (x.attr_list or x.value is not None or x.resid
+                        or (x.flags & _SV_pa)):
+                    return False
+                _ty = x.type
+                if _ty is None or _ty is WL.top:
+                    return False           # a variable: it may yet be one
+                if WL.real is not None and _ty.is_subtype_of(WL.real):
+                    return False
+                from wild_life.data_structures import DefType as _DT_pa
+                if _ty.type == _DT_pa.FUNCTION or _ty.type == _DT_pa.GLOBAL:
+                    return False           # a call or a cell: it may answer one
+                return True
+
+            def _is_arith_equation(t):
+                # An operator given sorts to work on is not an expression at
+                # all: accumulators.lf writes `a + in` to mean adding a to the
+                # accumulator in, and `xpand_acc(A+B)` is matched against it
+                # for the two of them rather than for what they come to.
+                if not _is_open_arith(t):
+                    return False
+                return not any(_is_plain_atom(_v)
+                               for _v in t.attr_list.values())
+
+            if _is_arith_equation(u) and _is_arith_equation(v):
                 _ok_u_aa, _val_u_aa = _ea_aa(u, self.engine)
                 _ok_v_aa, _val_v_aa = (_ea_aa(v, self.engine) if _ok_u_aa
                                        else (False, 0.0))
