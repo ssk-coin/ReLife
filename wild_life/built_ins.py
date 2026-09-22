@@ -6909,6 +6909,21 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
 
             # Try simplification first (before self-ref check).
             b_simplified = _simplify_arith(b_d, eng)
+            if b_simplified is not None and not a_d_cur_is_free:
+                # What is left of the expression once the other side is
+                # known is solved for its number, not made one term with
+                # the side that solved it.  `A = B*A` is a product while
+                # A is free; once A is worth 1 the product comes down to
+                # B, and B is worth 1 in its own right -- login.c reaches
+                # it by dividing, and never corefs the two.  An expression
+                # that came down to a name while the other side was still
+                # free -- `A = B+0` -- did make the two one term, and that
+                # stands.
+                _bs_d = b_simplified.deref()
+                _a_num = a_d.deref()
+                if (_a_num.value is not None and _bs_d.value is None
+                        and not _bs_d.attr_list and _bs_d.coref is None):
+                    return _unify(eng, _bs_d, _make_number(eng, _a_num.value))
             if b_simplified is not None:
                 # Simplification succeeded — start the equation again with the
                 # simpler form, so that everything an equation gets is applied

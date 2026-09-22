@@ -467,11 +467,6 @@ class PrintState:
             # If the node IS structural, it must be pre-registered so that
             # when it appears inside another term (e.g. A = W+E where W=34)
             # it prints as the variable name "W" rather than "W: 34".
-            if (coref is not None
-                    and coref.value is not None
-                    and pid not in aliased_to
-                    and id(pterm.deref()) not in self._structural_ids):
-                continue
             t = pterm.deref()
             tid = id(t)
             # Only register if not yet registered (sorted order ensures first
