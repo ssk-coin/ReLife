@@ -8159,6 +8159,47 @@ def _eval_as_bool_func(t: 'PsiTerm', eng, _depth: int = 0) -> 'Optional[bool]':
     return None
 
 
+def _settle_conds_in_branch(branch, eng, _depth: int = 0) -> None:
+    """Settle a cond written inside the branch another cond just chose.
+
+    c_cond hands the chosen branch back as the cond's value and checks it out
+    on the spot (built_ins.c, c_cond: push_goal(unify,result,arg2) followed by
+    i_check_out(arg2)), so a cond standing inside that branch is settled before
+    the branch is ever proved -- on what its condition says at that moment,
+    not on what it would say once the branch has run.  arnaud_bug turns on
+    this: its inner test reads a feature the branch has yet to fill in.
+    """
+    if branch is None or eng is None or _depth > 16:
+        return
+    b = branch.deref()
+    if b.type is None or b.type.keyword is None or not b.attr_list:
+        return
+    _sym_cb = b.type.keyword.symbol
+    if _sym_cb in (',', 'and'):
+        for _k_cb in ('1', '2'):
+            _a_cb = b.attr_list.get(_k_cb)
+            if _a_cb is not None:
+                _settle_conds_in_branch(_a_cb, eng, _depth + 1)
+        return
+    if _sym_cb != 'cond' or b.coref is not None:
+        return
+    _c_cb, _t_cb, _e_cb = _cond_args(b)
+    if _c_cb is None or (_t_cb is None and _e_cb is None):
+        return
+    from wild_life.inference import prove_cond as _pc_cb
+    _mark_cb = eng.trail.mark()
+    _ok_cb = _pc_cb(_c_cb, eng)
+    if not _ok_cb:
+        eng.trail.undo_to(_mark_cb)
+    _chosen_cb = _t_cb if _ok_cb else _e_cb
+    if _chosen_cb is None:
+        # A branch the call leaves out is a goal nothing constrains.
+        _chosen_cb = PsiTerm(type_def=eng.wl.succeed)
+    eng.trail.trail_psi(b, 'coref')
+    b.coref = _chosen_cb.deref()
+    _settle_conds_in_branch(_chosen_cb, eng, _depth + 1)
+
+
 def bi_cond(goal: PsiTerm, eng) -> bool:
     """cond(Cond, Then[, Else]) — Wild Life conditional.
 
@@ -8210,11 +8251,13 @@ def bi_cond(goal: PsiTerm, eng) -> bool:
         # Cond succeeded → push Then.  A branch the call leaves out is a goal
         # nothing constrains, and holds.
         if then_g is not None:
+            _settle_conds_in_branch(then_g, eng)
             eng.push_goal(GoalType.PROVE, then_g, _DEFRULES_SENTINEL, None)
         return True
     else:
         # Cond failed → undo its bindings, push Else
         eng.trail.undo_to(mark)
+        _settle_conds_in_branch(else_g, eng)
         eng.push_goal(GoalType.PROVE, else_g, _DEFRULES_SENTINEL, None)
         return True
 
