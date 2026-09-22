@@ -2108,8 +2108,21 @@ class Engine:
         # This mirrors the residuation check in eval_aim (lines ~1102-1150).
         if (defn is not None and defn.type == DefType.FUNCTION and
                 thegoal.attr_list and rules):
-            _h0, _b0 = rules[0]
-            _h0d = _h0.deref() if _h0 is not None else None
+            # The rule the call is waiting on is the first one it has not
+            # already ruled out: eval_aim works down the list, and a head
+            # that cannot match is passed over without anything waiting on
+            # it.  Once A is a list, `app4([],L,L)` is behind us and B is
+            # free of what that rule asked.
+            _h0 = _b0 = _h0d = None
+            for _hr_fn, _br_fn in rules:
+                _hrd_fn = _hr_fn.deref() if _hr_fn is not None else None
+                if _hrd_fn is None or not _hrd_fn.attr_list:
+                    _h0, _b0, _h0d = _hr_fn, _br_fn, _hrd_fn
+                    break
+                if _rule_match_status(_hrd_fn, thegoal, self) == 'never':
+                    continue
+                _h0, _b0, _h0d = _hr_fn, _br_fn, _hrd_fn
+                break
             if _h0d is not None and _h0d.attr_list:
                 _fn_free_args = []
                 for _fk_fn, _fv_psi_fn in thegoal.attr_list.items():
@@ -2127,10 +2140,61 @@ class Engine:
                             if (_h_arg_d_fn.type is not None and
                                     _h_arg_d_fn.type is not wl.top):
                                 _fn_free_args.append(_fv_fn)
+                # A head naming one variable in several positions asks the
+                # call's terms there to be one term.  Matching may not make
+                # them one -- it never touches the call -- so while they are
+                # apart the call is waiting on each of them: `app4([],L,L)`
+                # met by `app4(A,B,C)` waits on B and C as well as on A.
+                # match_aim reaches this through residuate_double, which
+                # marks both sides of a comparison it cannot settle.
+                _hv_pos_fn: dict = {}
+                for _fk_fn in thegoal.attr_list:
+                    _h_arg_fn = _h0d.attr_list.get(_fk_fn)
+                    if _h_arg_fn is None:
+                        continue
+                    _h_arg_d_fn = _h_arg_fn.deref()
+                    if (_h_arg_d_fn.attr_list or _h_arg_d_fn.value is not None
+                            or (_h_arg_d_fn.type is not None
+                                and _h_arg_d_fn.type is not wl.top)):
+                        continue
+                    _hv_pos_fn.setdefault(id(_h_arg_d_fn), []).append(_fk_fn)
+                for _ks_fn in _hv_pos_fn.values():
+                    if len(_ks_fn) < 2:
+                        continue
+                    _ts_fn = [thegoal.attr_list[_k].deref() for _k in _ks_fn]
+                    if all(_t_fn is _ts_fn[0] for _t_fn in _ts_fn):
+                        continue
+                    for _t_fn in _ts_fn:
+                        if ((_t_fn.type is None or _t_fn.type is wl.top)
+                                and not _t_fn.attr_list
+                                and _t_fn.value is None
+                                and _t_fn.coref is None
+                                and not any(_x_fn is _t_fn
+                                            for _x_fn in _fn_free_args)):
+                            _fn_free_args.append(_t_fn)
                 if _fn_free_args:
                     from wild_life.data_structures import Goal as _FnGoal, Residuation as _FnResid, SORT_VAR as _SV_FN
-                    _pending_prove_fn = _FnGoal(GoalType.PROVE, thegoal, _DEFRULES,
-                                                None, next=None, pending=True)
+                    # One pending goal for the call, reused each time it
+                    # suspends again, so a term does not collect a mark per
+                    # round.
+                    _pending_prove_fn = thegoal.__dict__.get('_resid_prove_goal')
+                    if _pending_prove_fn is None:
+                        _pending_prove_fn = _FnGoal(GoalType.PROVE, thegoal,
+                                                    _DEFRULES, None, next=None,
+                                                    pending=True)
+                        thegoal._resid_prove_goal = _pending_prove_fn
+                    _pending_prove_fn.pending = True
+                    # What the call waited on last time round may not be what
+                    # it waits on now: once A is a list, `app4([],L,L)` no
+                    # longer applies and B is free of it.  Take the old marks
+                    # off before laying down the new ones.
+                    for _old_fn in thegoal.__dict__.get('_resid_prove_marked') or ():
+                        if _old_fn.resid and any(rv.goal is _pending_prove_fn
+                                                 for rv in _old_fn.resid):
+                            self.trail.trail_copy(_old_fn, 'resid')
+                            _old_fn.resid = [rv for rv in _old_fn.resid
+                                             if rv.goal is not _pending_prove_fn]
+                    thegoal._resid_prove_marked = list(_fn_free_args)
                     for _fv_free_fn in _fn_free_args:
                         if _fv_free_fn.resid is None:
                             self.trail.trail_psi(_fv_free_fn, 'resid')
