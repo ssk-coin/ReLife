@@ -4897,6 +4897,22 @@ def _try_eval_any_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     if _td_type is eng.wl.alist or _td_type is eng.wl.nil:
         return None
 
+    # A call written through a functor variable is the call the functor
+    # names, once something has named it: `[F(E)|L]` in lrmap's value is
+    # transequ of E, and reading it as the apply term itself puts the
+    # unread call into the answer.
+    if (getattr(eng.wl, 'apply', None) is not None
+            and td.type is eng.wl.apply and td.coref is None):
+        _ap_t = _apply_to_call(td, eng)
+        if _ap_t is None:
+            return None
+        # Let the call stand where the apply term stood, so that whoever
+        # reads it next works it out the way any other call is worked out
+        # -- a body of alternatives among them.
+        eng.trail.trail_psi(td, 'coref')
+        td.coref = _ap_t
+        return _try_eval_any_func(_ap_t, eng)
+
     # User-defined function
     if _is_user_function(td):
         return _eval_user_func_sync(td, eng, 0)
@@ -10904,6 +10920,14 @@ def _eval_map_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
                     else:
                         results.append(applied)
             node = tail_ref if tail_ref is not None else wl.make_atom('nil', wl.bi_module)
+        elif (node.value is None and not node.attr_list
+              and (node.type is None or node.type is wl.top)):
+            # Nothing has said what the list is yet, so there is nothing to
+            # walk: `[X|map(F,L)] | g(L)` reaches the map before the guard
+            # has given L its list, and mapping over the variable itself
+            # would put an F of it into the answer.  Leave the call as it
+            # stands and it is worked out once L arrives.
+            return None
         else:
             # Not a proper cons cell — apply to the element directly
             applied = _apply_func(f_term, node, eng)
