@@ -91,6 +91,15 @@ class _DictSnapshot:
         self.target.update(saved)
 
 
+# Built-in functions that only read a term's shape.  A call to one of these
+# standing where a term is being unified is worth its value there, and
+# working it out costs nothing and changes nothing else.
+_SHAPE_FUNCS_UC = frozenset((
+    'root_sort', 'sort', 'features', 'parents', 'children', 'arity',
+    'length', 'combined_name',
+))
+
+
 class Trail:
     """バックトラック用トレイル
     C版の undo_stack に対応
@@ -916,6 +925,43 @@ class Unifier:
         # s(A.B, A.C) = s(A.D, A.E) where the dot-terms appear as sub-terms.
         # NOTE: a plain '.' atom (no args) must NOT be treated as a dot-access —
         # it is a legitimate operator name and must unify freely with variables.
+        # A call meeting a term that is already something is worth its value
+        # here: `aplat(T1,0,L,root_sort(T1),L)` asks the caller's fourth
+        # argument to be the sort T1 is built on, and the sort is what
+        # root_sort answers once T1 has arrived.  unify_aim in login.c
+        # dereferences both sides through the evaluating deref, so a call
+        # standing on either side is reduced before the two are compared.
+        # A variable on the other side is left alone: it takes the call
+        # itself, and reading it can wait until something needs the value.
+        if self.engine is not None and u is not v:
+            from wild_life.built_ins import _try_eval_any_func as _tef_uc
+            for _n_uc in range(2):
+                _call_uc = u if _n_uc == 0 else v
+                _other_uc = v if _n_uc == 0 else u
+                if _call_uc.coref is not None or not _call_uc.attr_list:
+                    continue
+                _kw_uc = (_call_uc.type.keyword
+                          if _call_uc.type is not None else None)
+                if _kw_uc is None or _kw_uc.symbol not in _SHAPE_FUNCS_UC:
+                    continue
+                if (_other_uc.value is None and not _other_uc.attr_list
+                        and (_other_uc.type is None or _other_uc.type is WL.top)):
+                    continue
+                _val_uc = _tef_uc(_call_uc, self.engine)
+                if _val_uc is None:
+                    continue
+                _val_uc = _val_uc.deref()
+                if _val_uc is _call_uc:
+                    continue
+                self.trail.trail_psi(_call_uc, 'coref')
+                _call_uc.coref = _val_uc
+                if _n_uc == 0:
+                    u = _val_uc
+                else:
+                    v = _val_uc
+                if u is v:
+                    return True
+
         _dot_check = _is_dot_access
         if _is_dot_access(u) or _is_dot_access(v):
             if self.engine is not None:
