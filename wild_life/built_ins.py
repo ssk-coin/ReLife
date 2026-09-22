@@ -5789,6 +5789,25 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
     if _b_cell is not None:
         b_d = _b_cell.deref()
 
+    # A cond standing where a value belongs is worked out here and now:
+    # built_ins.c registers it as a function, so `X = cond(C,T,E)` gives X
+    # the branch the condition picks, and a condition that reads an unbound
+    # variable simply picks the other branch rather than waiting.  The
+    # accumulator expander is built on this -- `X comma Y` joins two goals
+    # through a pair of conds, and left unread they end up in the clause.
+    for _n_cv in range(2):
+        _side_cv = a_d if _n_cv == 0 else b_d
+        if (_is_cond_builtin_local(_side_cv) and _side_cv.coref is None
+                and '1' in _side_cv.attr_list
+                and ('2' in _side_cv.attr_list or '3' in _side_cv.attr_list)):
+            _val_cv = _eval_body_sync(_side_cv, eng, 0)
+            if _val_cv is not None and _val_cv.deref() is not _side_cv:
+                _val_cv = _keep_call_value(_side_cv, _val_cv, eng)
+                if _n_cv == 0:
+                    a_d = _val_cv.deref()
+                else:
+                    b_d = _val_cv.deref()
+
     # Handle T.F = V and V = T.F (dot feature access / creation).
     # When T.F does not yet exist as an attribute, a fresh variable is
     # inserted into T's attr_list (trailed) and unified with V.
