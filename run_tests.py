@@ -86,6 +86,9 @@ def _filter_stderr(text: str) -> str:
 # the roomy limit below is not the right one for it.
 LONG_TESTS: dict = {
     "z_power_4": 180,
+    # matrix counts the nodes of a grid whose squares all point at one
+    # another, four times over for a 4x4 grid.
+    "matrix": 300,
 }
 
 

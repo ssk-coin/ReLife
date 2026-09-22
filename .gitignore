@@ -19,3 +19,4 @@ venv/
 .idea/
 .vscode/
 *.swp
+.claude/worktrees/

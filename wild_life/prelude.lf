@@ -1,0 +1,13 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+% The built-ins that are written in LIFE rather than in the interpreter.
+%
+% C Wild Life compiles these in from built_ins.lf, so a program can read them
+% back with clause/1 and listing/1 the same as any other rule.  The
+% interpreter answers the calls itself; what these rules add is the text of
+% them.
+%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+append([],L:list) -> L.
+append([H|T],L:list) -> [H|append(T,L)].

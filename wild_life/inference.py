@@ -80,6 +80,63 @@ def _occurs_by_identity(target: PsiTerm, t: PsiTerm, visited: set = None) -> boo
                for v in td.attr_list.values())
 
 
+def _freeze_calls_deep(t: PsiTerm, quoted_flag: int,
+                       visited: set = None) -> None:
+    """Mark every call inside a non-strict argument as the call it is.
+
+    Walked with a stack rather than by recursion: a term here can be a list
+    of every character in a file, and its spine is as long as the file.
+    """
+    if t is None:
+        return
+    if visited is None:
+        visited = set()
+    from wild_life.built_ins import (_is_user_function as _iuf_ns,
+                                     _SORT_COMPARISONS as _SC_ns,
+                                     _get_sym as _gs_ns)
+    from wild_life.runtime import WL as _WL_ns
+    _disj_def = getattr(_WL_ns, 'disjunction', None)
+    stack = [t]
+    while stack:
+        node = stack.pop()
+        if node is None:
+            continue
+        node = node.deref()
+        if id(node) in visited:
+            continue
+        visited.add(id(node))
+        _is_disj = _disj_def is not None and node.type is _disj_def
+        if _iuf_ns(node) or _is_disj or _gs_ns(node) in _SC_ns:
+            if not (node.flags & quoted_flag):
+                # Remembered, so that filing the term as a clause can let
+                # its calls go again: what a non-strict call may not work
+                # out is still a goal once the clause it belongs to is run.
+                node._wl_ns_frozen = True
+            node.flags |= quoted_flag
+        stack.extend(node.attr_list.values())
+
+
+def _thaw_non_strict_freeze(t: PsiTerm, visited: set = None) -> None:
+    """Let go of the calls a non-strict argument was frozen for."""
+    from wild_life.data_structures import QUOTED_TRUE as _QT_th
+    if t is None:
+        return
+    if visited is None:
+        visited = set()
+    stack = [t]
+    while stack:
+        node = stack.pop()
+        if node is None:
+            continue
+        node = node.deref()
+        if id(node) in visited:
+            continue
+        visited.add(id(node))
+        if node.__dict__.pop('_wl_ns_frozen', False):
+            node.flags &= ~_QT_th
+        stack.extend(node.attr_list.values())
+
+
 def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
     """Freeze the arithmetic that a non-strict call's arguments stand for.
 
@@ -105,10 +162,11 @@ def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
             # it answers: comp_struct's `test(tata +>= toto)` is given the
             # comparison to write out, and asks for its value separately
             # with `evalin`.
-            _ad_ns = arg.deref()
-            from wild_life.built_ins import _is_user_function as _iuf_ns
-            if _iuf_ns(_ad_ns):
-                _ad_ns.flags |= _QT_ns
+            # What is frozen is the whole argument, not only its top: the
+            # grammar rule handed to `transregle` carries `P = person(N)`
+            # inside the constraints it is to make a clause out of, and
+            # `person(N)` is no more evaluated there than at the top.
+            _freeze_calls_deep(arg, _QT_ns)
     for sub in t.attr_list.values():
         _mark_non_strict_args(sub, eng, visited)
 
@@ -327,6 +385,77 @@ def _term_has_callable_sub(t: PsiTerm, seen=None, top: bool = True) -> bool:
             return True
     return any(_term_has_callable_sub(v, seen, False)
                for v in t.attr_list.values())
+
+
+def _term_has_global(t: PsiTerm, seen=None) -> bool:
+    """Whether a stored head names a global variable anywhere under it."""
+    if t is None:
+        return False
+    if seen is None:
+        seen = set()
+    oid = id(t)
+    if oid in seen:
+        return False
+    seen.add(oid)
+    while t.coref is not None:
+        t = t.coref
+    if (not t.attr_list and t.value is None
+            and t.type is not None and t.type.type is DefType.GLOBAL):
+        return True
+    return any(_term_has_global(v, seen) for v in t.attr_list.values())
+
+
+def _link_globals(t: PsiTerm, eng, seen=None) -> None:
+    """Make the global names in a copied head reach the globals' cells.
+
+    A name declared with `global` stands for one psi-term wherever it is
+    written, so copying a clause must not copy it: the position it holds in
+    the head has to be that very cell, and matching the call then binds the
+    global.  That is how std_expander's make_expander takes each method out
+    of the call its head matches and reads it back through the global in its
+    body.
+    """
+    from wild_life.built_ins import _note_global_used
+    if t is None:
+        return
+    if seen is None:
+        seen = set()
+    t = t.deref()
+    oid = id(t)
+    if oid in seen:
+        return
+    seen.add(oid)
+    if not t.attr_list:
+        defn = t.type
+        if (t.value is None and defn is not None
+                and defn.type is DefType.GLOBAL
+                and defn.global_value is not None
+                and defn.global_value is not t):
+            _note_global_used(eng, defn)
+            t.coref = defn.global_value
+        return
+    for v in t.attr_list.values():
+        _link_globals(v, eng, seen)
+
+
+def _link_head_globals(head: PsiTerm, head_orig: PsiTerm, eng) -> None:
+    """Link a fresh head copy to the cells of the globals the rule names.
+
+    Whether a stored head names a global at all is asked afresh at every
+    match, so the answer is kept on the head; a `global` declaration that
+    comes after the rule can make a name one, so what is kept alongside it is
+    how many globals had been declared when the answer was given.
+    """
+    _defs = eng.wl.global_defs
+    if not _defs:
+        return
+    _epoch = len(_defs)
+    _hg = head_orig.__dict__.get('_wl_has_global')
+    if _hg is None or _hg[0] != _epoch:
+        _hg = (_epoch, _term_has_global(head_orig))
+        head_orig._wl_has_global = _hg
+    if _hg[1]:
+        _link_globals(head, eng)
 
 
 def _body_has_cut(term: PsiTerm, wl, seen=None) -> bool:
@@ -675,10 +804,21 @@ def _free_vars_in(t: 'PsiTerm') -> list:
             continue
         seen.add(id(node))
         from wild_life.runtime import WL as _WL_fv
-        if (not node.attr_list and node.value is None
-                and (node.type is None or node.type is _WL_fv.top)):
-            out.append(node)
-            continue
+        if not node.attr_list and node.value is None:
+            # A term narrowed no further than a number sort is a number
+            # nobody has said yet, and a call that reads it waits on it the
+            # same as on a plain variable: `number_of_factors(P:posint)`
+            # has nothing to work out until P arrives.
+            _ty_fv = node.type
+            if _ty_fv is None or _ty_fv is _WL_fv.top:
+                out.append(node)
+                continue
+            _real_fv = getattr(_WL_fv, 'real', None)
+            if (_real_fv is not None
+                    and getattr(_ty_fv, 'is_subtype_of', None) is not None
+                    and _ty_fv.is_subtype_of(_real_fv)):
+                out.append(node)
+                continue
         queue.extend(node.attr_list.values())
     return out
 
@@ -1282,8 +1422,22 @@ class Engine:
         return True
 
     def cut_to(self, cut_point) -> None:
-        """Remove choice points up to (not including) cut_point."""
-        while self.choice_stack and self.choice_stack is not cut_point:
+        """Remove choice points up to (not including) cut_point.
+
+        A cut reaches back to where its clause was entered, and no
+        further.  login.c says so by address -- it drops choice points
+        while the top one is newer than the barrier -- so a barrier that
+        an earlier cut already took away stops the walk at once instead
+        of emptying the stack.  Comparing the order they were made in
+        says the same thing without the addresses.
+        """
+        _limit = getattr(cut_point, 'serial', None)
+        if _limit is None:
+            while self.choice_stack and self.choice_stack is not cut_point:
+                self.choice_stack = self.choice_stack.next
+            return
+        while (self.choice_stack is not None
+               and self.choice_stack.serial > _limit):
             self.choice_stack = self.choice_stack.next
 
     # ─── assertion helpers ───────────────────────────────────────────────────
@@ -1696,6 +1850,36 @@ class Engine:
                 self.push_goal(GoalType.PROVE, arg1, _DEFRULES, None)
             return True
 
+        # ── A backquoted term standing where a goal belongs ──
+        # The quote keeps the term as it is written while the clause holding
+        # it is built; proving the clause is where it is read again.
+        # std_expander writes the test that tells a conjunction apart as
+        # `` `(S1 :== ,) ``, and it is the comparison that is proved.
+        if (defn is not None and defn.keyword is not None
+                and defn.keyword.symbol == '`'
+                and len(thegoal.attr_list) == 1
+                and '1' in thegoal.attr_list):
+            self.goal_stack = aim.next
+            self.goal_count += 1
+            self.push_goal(GoalType.PROVE, thegoal.attr_list['1'],
+                           _DEFRULES, None)
+            return True
+
+        # ── SUCH-THAT as a goal ──
+        # `Val | Guard` standing where a goal belongs is the guard proved and
+        # then the value: std_expander builds each generated clause out of
+        # `succeed | A = B, C = D` runs, which bind the clause together and
+        # then hold.
+        if (defn is not None and defn is wl.such_that
+                and '1' in thegoal.attr_list and '2' in thegoal.attr_list):
+            self.goal_stack = aim.next
+            self.goal_count += 1
+            self.push_goal(GoalType.PROVE, thegoal.attr_list['1'],
+                           _DEFRULES, None)
+            self.push_goal(GoalType.PROVE, thegoal.attr_list['2'],
+                           _DEFRULES, None)
+            return True
+
         # ── CUT ──
         if defn is wl.cut:
             self.goal_stack = aim.next
@@ -1742,15 +1926,41 @@ class Engine:
             if _bi_sym in _WRITE_BUILTINS and thegoal.attr_list:
                 from wild_life.built_ins import (
                     _eval_sort_comparison as _esc_w)
+                from wild_life.data_structures import (
+                    QUOTED_TRUE as _QUOTED_TRUE,
+                    NON_STRICT_TERM as _NON_STRICT_TERM)
+                from wild_life.built_ins import (
+                    _eval_and_conjunction as _eac_w)
                 for _w_k in list(thegoal.attr_list.keys()):
                     _w_a = thegoal.attr_list[_w_k].deref()
+                    # A meet is worked out before it is written, so that a
+                    # disjunction it comes to is written one alternative at
+                    # a time: `write(posint_stream_to(N) & prime)` writes the
+                    # 2 and comes back for the 3.
+                    if (_w_a.type is wl.and_sym and '1' in _w_a.attr_list
+                            and '2' in _w_a.attr_list
+                            and not (_w_a.flags & (_QUOTED_TRUE
+                                                   | _NON_STRICT_TERM))):
+                        _w_ev = _eac_w(_w_a, self)
+                        if _w_ev is None:
+                            self.goal_stack = aim.next
+                            self.goal_count += 1
+                            return False
+                        _w_ev = _w_ev.deref()
+                        if _w_ev is not _w_a:
+                            self.unifier.set_attr(thegoal, _w_k, _w_ev)
+                            _w_a = _w_ev
                     if _w_a.type is wl.disjunction and _w_a.attr_list:
                         if not self.unifier._settle_disjunction(_w_a):
                             self.goal_stack = aim.next
                             self.goal_count += 1
                             return False
                     # A sort comparison is written as the answer it gives:
-                    # isatest writes `1 :=< 1.1` and reads false.
+                    # isatest writes `1 :=< 1.1` and reads false.  A term a
+                    # non-strict call was handed is written as it stands,
+                    # though — that is what kept it from being worked out.
+                    if _w_a.flags & (_QUOTED_TRUE | _NON_STRICT_TERM):
+                        continue
                     _w_cmp = _esc_w(_w_a, self)
                     if _w_cmp is not None:
                         self.unifier.set_attr(thegoal, _w_k, _w_cmp)
@@ -2112,6 +2322,16 @@ class Engine:
                 # predicate the number the list is long and the category the
                 # word has, not the calls that stand for them.  A call that
                 # cannot be worked out yet is left as it is.
+                # `map(F,L)` and `reduce(F,E,L)` are among those calls:
+                # magic's `all_equal(map(sum_up,Square),Total)` hands the
+                # predicate the row sums, not the call that makes them.
+                if _a_pa_d.attr_list:
+                    from wild_life.built_ins import (
+                        _eval_map_or_reduce as _emor_pa)
+                    _mr_pa = _emor_pa(_a_pa_d, self)
+                    if _mr_pa is not None and _mr_pa.deref() is not _a_pa_d:
+                        self.unifier.set_attr(thegoal, _k_pa, _mr_pa)
+                        continue
                 if _a_pa_d.attr_list and not _iuf_pa(_a_pa_d):
                     _eeuf_pa(_a_pa_d, self, 0, set())
 
@@ -2133,6 +2353,7 @@ class Engine:
         _vm: dict = {}
         head = copy_term(head_orig, _vm)
         body = copy_term(body_orig, _vm)
+        _link_head_globals(head, head_orig, self)
         # A call written into a clause head's argument is there for its value:
         # `p_a(pair(foo_a(Y:titi_a), …))` matches against pair(t(Y), …), which
         # is what foo_a answers, not against the call itself.  Only a call a
@@ -2242,6 +2463,15 @@ class Engine:
         _prev_no_arith = getattr(self, 'no_arith_eval', False)
         if _non_strict:
             self.no_arith_eval = True
+        # A feature the head asks for that the call never brought becomes
+        # the call's own, and a disjunction written there is a choice like
+        # any other: `magic?` meeting `magic(S:{size;int})` leaves S free
+        # to be a size, with int to come back to.  login.c carries such a
+        # head sort as a disjunctive sort code and decodes it to one sort
+        # with the rest as a choice point; nothing unifies the feature
+        # here, so the node is settled once the head has matched.
+        _lone_hk = ([k for k in head.attr_list if k not in thegoal.attr_list]
+                    if head.attr_list else [])
         mark = self.trail.mark()
         ok = self.unifier.unify(thegoal, head)
         if _non_strict:
@@ -2260,6 +2490,12 @@ class Engine:
         # of a feature of the term it was given, and the answer is the feature
         # rather than the reading of it.  The term and the label are known
         # once the head has been matched, so that is where it is read.
+        for _k_lh in _lone_hk:
+            _v_lh = thegoal.attr_list.get(_k_lh)
+            if _v_lh is not None and _v_lh.deref().type is wl.disjunction:
+                if not self.unifier._settle_disjunction(_v_lh):
+                    self.trail.undo_to(mark)
+                    return False
         _hd = head_orig.__dict__.get('_wl_has_dot')
         if _hd is None:
             _hd = _term_has_dot(head_orig)
@@ -2552,6 +2788,14 @@ class Engine:
             if _is_user_function(_attr):
                 _evaled = _eval_user_func_sync(_attr, self)
                 if _evaled is not None and _evaled is not _attr:
+                    # The call stands for what it answered, so a name
+                    # written on it reads the same term the caller got:
+                    # `entries(Square:grid)` hands back the very squares
+                    # Square holds, and a number assigned to one of them
+                    # is the square's.
+                    from wild_life.built_ins import (
+                        _keep_call_value as _kcv_pf)
+                    _kcv_pf(_attr, _evaled, self)
                     self.unifier.set_attr(funct, _key, _evaled)
             elif _is_cond_builtin(_attr):
                 # `sift(cond(P =< Max, filter(Ns,P), Ns), Max)` passes on
@@ -2743,6 +2987,7 @@ class Engine:
         _vm: dict = {}
         head = copy_term(head_orig, _vm)
         body = copy_term(body_orig, _vm)
+        _link_head_globals(head, head_orig, self)
 
         # Handle conditional functional rule: body = (value | condition)
         # where '|' is the such-that / function-guard operator.
@@ -2784,6 +3029,7 @@ class Engine:
                             _vm_st: dict = {}
                             head = copy_term(head_orig, _vm_st)
                             body = copy_term(body_orig, _vm_st)
+                            _link_head_globals(head, head_orig, self)
                             body_d = body.deref()
                             val_part  = body_d.attr_list.get('1')
                             cond_part = body_d.attr_list.get('2')
@@ -2995,6 +3241,18 @@ class Engine:
         if _rule_cp is not None:
             self.drop_choice_point(_rule_cp)
             _rule_cp = None
+
+        # The call is worth what the rule answers, from here on and wherever
+        # else the call is written: `A = X:f(X)` leaves X the 1 that f
+        # answered rather than the call that answered it, and
+        # `A = g(X:f(X))` leaves X the 1 too.
+        _body_red = body.deref()
+        if (_body_red.value is not None and not _body_red.attr_list
+                and not _occurs_by_identity(head_orig, body_orig)):
+            _fd_red = funct.deref()
+            if _fd_red is not _body_red and _fd_red.coref is None:
+                self.trail.trail_psi(_fd_red, 'coref')
+                _fd_red.coref = _body_red
 
         # Sort-constrained computation rule fix:
         # Rule form: X:sort -> body_expr(X, ...)
@@ -3243,8 +3501,26 @@ class Engine:
             else:
                 self.push_goal(GoalType.UNIFY, body_d2, result, None)
         else:
-            # Push UNIFY first (runs LAST — body_d2 has fresh vars for embedded calls)
-            self.push_goal(GoalType.UNIFY, body_d2, result, None)
+            # A boolean operator whose operands are calls still answers a
+            # boolean once they have been worked out: structures.lf's
+            # `X \== Y -> not(X == Y)` hands back false, not `not true`.
+            # `=` is what reads it, the same as for a body that is a boolean
+            # from the start.
+            if (_body_sym in ('and', 'or', 'not', 'xor')
+                    and body_d2.attr_list):
+                _eq_defn_bo = (getattr(wl, 'eqsym', None)
+                               or wl.syntax_module.symbol_table.get('='))
+                if _eq_defn_bo is not None:
+                    _eq_term_bo = PsiTerm(type_def=_eq_defn_bo)
+                    _eq_term_bo.attr_list['1'] = result
+                    _eq_term_bo.attr_list['2'] = body_d2
+                    self.push_goal(GoalType.PROVE, _eq_term_bo, None, None)
+                else:
+                    self.push_goal(GoalType.UNIFY, body_d2, result, None)
+            else:
+                # Push UNIFY first (runs LAST — body_d2 has fresh vars for
+                # embedded calls)
+                self.push_goal(GoalType.UNIFY, body_d2, result, None)
 
             # Push each EVAL goal (runs FIRST — binds the fresh vars before UNIFY).
             # Also lift any embedded user-function calls from each EVAL goal's compound
@@ -3296,13 +3572,23 @@ class Engine:
         self.trail.trail_psi(v, 'coref')
         v.coref = u
 
-        # Match attributes
-        for key, vpsi in v.attr_list.items():
-            upsi = u.attr_list.get(key)
-            if upsi is None:
+        # Match attributes.  login.c walks the feature tree right-node-left
+        # and pushes one `match` goal at each node, so the smallest feature
+        # ends on top of the stack and is matched first: the goals are
+        # pushed here in the reverse of the order they are to run in.
+        def _mk(k):
+            try:
+                return (0, int(k))
+            except (ValueError, TypeError):
+                return (1, k)
+        _keys_m = sorted(v.attr_list.keys(), key=_mk)
+        for key in _keys_m:
+            if u.attr_list.get(key) is None:
                 self.trail.undo_to(mark)
                 return False
-            self.push_goal(GoalType.MATCH, upsi, vpsi, None)
+        for key in reversed(_keys_m):
+            self.push_goal(GoalType.MATCH, u.attr_list[key],
+                           v.attr_list[key], None)
         return True
 
     def clause_aim(self, retract: bool) -> bool:

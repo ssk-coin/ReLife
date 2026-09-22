@@ -302,9 +302,24 @@ def compute_all_glbs(d1: Definition, d2: Definition) -> List[Definition]:
         if not any(other is not d and d.is_subtype_of(other) for other in common):
             maximal.append(d)
 
-    # C版 Wild Life の実装に合わせ、GLB を型の生成順 (creation_id) でソートする。
-    # 型は最初に参照された宣言の順に生成されるため、宣言順に基づく安定した順序が得られる。
-    maximal.sort(key=lambda d: getattr(d, 'creation_id', 0))
+    # The order the alternatives are offered in.  C Wild Life encodes the sort
+    # hierarchy before it runs, and a sort's code is built from the sorts
+    # under it, so a sort with fewer of them comes first: `four_wheels &
+    # vehicle` offers truck, which nothing is under, before car, which
+    # rolls_royce is under.  Sorts that are alike in that are offered in the
+    # order they were declared: `glb(k,l)` offers a before b.
+    def _n_subs(d: Definition) -> int:
+        seen: set = set()
+        stack = list(d.children)
+        while stack:
+            c = stack.pop()
+            if id(c) in seen:
+                continue
+            seen.add(id(c))
+            stack.extend(c.children)
+        return len(seen)
+
+    maximal.sort(key=lambda d: (_n_subs(d), getattr(d, 'creation_id', 0)))
     return maximal
 
 
@@ -625,6 +640,31 @@ class Unifier:
         self.set_attr(t, key, var)
         return self._proto_arith_eq(var, cell)
 
+    @staticmethod
+    def _cond_asks_a_call(t: PsiTerm, _seen: set = None) -> bool:
+        """Whether a sort's membership condition asks a call about the term.
+
+        `zero := I | I = 0` says what the term must be, and says it now.
+        `prime := I:int | length(factors(I))=1` asks factors what the term
+        comes to, which is a question with no answer while the term is still
+        a variable.
+        """
+        from wild_life.data_structures import DefType as _DT_ca
+        if t is None:
+            return False
+        if _seen is None:
+            _seen = set()
+        t = t.deref()
+        if id(t) in _seen:
+            return False
+        _seen.add(id(t))
+        _defn = t.type
+        if (_defn is not None and _defn.type == _DT_ca.FUNCTION
+                and _defn.rule and _defn._builtin_func is None):
+            return True
+        return any(Unifier._cond_asks_a_call(_v, _seen)
+                   for _v in t.attr_list.values())
+
     def _prove_sort_condition(self, t: PsiTerm) -> bool:
         """Prove the membership condition a conditional sort carries.
 
@@ -638,6 +678,20 @@ class Unifier:
         if (self.engine is None or defn is None or defn.type is not _DT_sc.TYPE
                 or not defn.rule):
             return True
+        # A sort that was defined out of another carries that one's
+        # condition too: `prime := P:posint | …` is a posint before it is a
+        # prime, so both conditions are asked of what narrows to it.
+        _conds_sc = []
+        _seen_sc = set()
+        _stack_sc = [defn]
+        while _stack_sc:
+            _d_sc = _stack_sc.pop(0)
+            if _d_sc is None or id(_d_sc) in _seen_sc:
+                continue
+            _seen_sc.add(id(_d_sc))
+            if _d_sc.type is _DT_sc.TYPE and _d_sc.rule:
+                _conds_sc.append(_d_sc)
+            _stack_sc.extend(getattr(_d_sc, 'parents', ()) or ())
         # The proof narrows sorts of its own, including the pattern it matches
         # against; without a guard it would ask the same question again on the
         # way, without end.
@@ -648,7 +702,8 @@ class Unifier:
             from wild_life.data_structures import GoalType as _GT_sc
             from wild_life.inference import _DEFRULES as _DR_sc, _INNER_RUN_BARRIER as _IRB_sc
             eng = self.engine
-            for pat, cond in defn.rule:
+            _rules_sc = [_r for _d in _conds_sc for _r in _d.rule]
+            for pat, cond in _rules_sc:
                 if pat is None or cond is None:
                     continue
                 var_map: dict = {}
@@ -672,7 +727,21 @@ class Unifier:
                 eng.main_loop_ok = old_ok
                 eng.choice_stack, eng.goal_stack = cp_save, gs_save
                 if not ok:
+                    # A term that is still a variable has nothing for the
+                    # condition to have been about: `P = prime` says what P
+                    # will have to satisfy, and factorize asks it of P once P
+                    # is 29.  What a condition can settle by itself it still
+                    # settles now, which is how `A = zero` answers 0.
+                    _td_sc = t.deref()
                     self.trail.undo_to(mark)
+                    if (_td_sc.value is None and not _td_sc.attr_list
+                            and self._cond_asks_a_call(cond_copy)):
+                        from wild_life.data_structures import (
+                            Residuation as _R_sc)
+                        if not _td_sc.resid:
+                            self.trail.trail_psi(_td_sc, 'resid')
+                            _td_sc.resid = [_R_sc(goal=None, pending=True)]
+                        continue
                     return False
             return True
         finally:
@@ -975,9 +1044,12 @@ class Unifier:
                 # there is nothing to check: the call becomes its value.
                 self.bind(u, v)
                 self._wakeup_resid(u, v)
-            elif u_is_sort_var and u_is_fn_sort and not v_is_var:
+            elif (u_is_sort_var and u_is_fn_sort and not v_is_var
+                    and v.type is not WL.disjunction):
                 # Sort-constrained variable (X:sort) vs ground/non-variable term.
                 # Enforce the sort constraint: v's type must be a sub-sort of u's sort.
+                # A disjunction is not a sort to meet — it is a choice, and
+                # the branch below takes it one alternative at a time.
                 if not self._unify_types(u, v):
                     return False
                 self.bind(u, v)
@@ -1007,16 +1079,47 @@ class Unifier:
                     _elems = _cdisj(v, self.engine)
                     if not _elems:
                         return False
+                    # A variable that already says something takes only the
+                    # alternatives that fit it: `M:int` meeting `{a;1}` is
+                    # the 1.
+                    if u.type is not None and u.type is not WL.top:
+                        # Only the sorts are asked here: what a goal waiting
+                        # on u would say about an alternative is said by
+                        # running it, which is what backtracking into the
+                        # alternatives is for.
+                        _fits_u = []
+                        for _e_u in _elems:
+                            _m_u = self.trail.mark()
+                            try:
+                                _ok_u = self._unify_types(u, _e_u.deref())
+                            except UnificationFailure:
+                                _ok_u = False
+                            self.trail.undo_to(_m_u)
+                            if _ok_u:
+                                _fits_u.append(_e_u)
+                        if not _fits_u:
+                            return False
+                        _elems = _fits_u
                     # Bind u (X) to v FIRST so that choice-point trail marks are
                     # saved AFTER X.coref=v is set.  Backtracking then preserves
                     # X→v while undoing only v.coref (the inner binding).
                     self.bind(u, v)
-                    # Now push BIND_DIRECT choice points (trail mark AFTER u→v).
-                    for _alt in reversed(_elems[1:]):
-                        self.engine.push_choice_point(GoalType.BIND_DIRECT, v, _alt, None)
+                    # What u was waiting for, the node it has become waits for
+                    # too: coming back for the next alternative binds that
+                    # node, and a goal left behind on u would never hear of
+                    # it — which is how a square of magic took a number one
+                    # of its neighbours already had.
+                    self._carry_resids(u, v)
                     # Bind v (the disjunction node) to the first element.
                     self.bind(v, _elems[0])
-                    self._wakeup_resid(u, v)
+                    # What waited on this term goes back on the goal stack
+                    # BEFORE the alternatives are put by, so that each of
+                    # them carries the waiting goals in its continuation and
+                    # is judged by them — login.c releases the residuations
+                    # and only then pushes the type-disjunction choice point.
+                    self._wakeup_resid(u, v, defer=False)
+                    for _alt in reversed(_elems[1:]):
+                        self.engine.push_choice_point(GoalType.BIND_DIRECT, v, _alt, None)
                     # Fire sort delay rules for the first element (same as
                     # BIND_DIRECT does for subsequent elements). This ensures
                     # :: SortName | goal fires even for the first alternative.
@@ -1223,10 +1326,11 @@ class Unifier:
                     return False
                 # Bind v to u FIRST so choice-point marks are saved after v→u.
                 self.bind(v, u)
+                self._carry_resids(v, u)
+                self.bind(u, _elems[0])
+                self._wakeup_resid(v, u, defer=False)
                 for _alt in reversed(_elems[1:]):
                     self.engine.push_choice_point(GoalType.BIND_DIRECT, u, _alt, None)
-                self.bind(u, _elems[0])
-                self._wakeup_resid(v, u)
                 # Fire delay rules for the first element (mirrors BIND_DIRECT)
                 _uelems0_d = _elems[0].deref() if _elems else None
                 if (_uelems0_d is not None and WL.delay_rules and self.engine is not None
@@ -1321,6 +1425,45 @@ class Unifier:
             self._wakeup_resid(u, u)
             return True
         if v.type is WL.disjunction and self.engine is not None:
+            # A term with nothing in it yet follows the disjunction node, so
+            # that coming back for the next alternative moves it along and
+            # wakes what was waiting on it: magic's squares are bare `int`s,
+            # and each has to hear that its neighbour took the number first.
+            if (v.attr_list and u.value is None and not u.attr_list
+                    and u.coref is None):
+                from wild_life.built_ins import (
+                    _collect_disjunction as _cdisj_b)
+                _elems_b = _cdisj_b(v, self.engine)
+                if not _elems_b:
+                    return False
+                if u.type is not None and u.type is not WL.top:
+                    _fits_b = []
+                    for _e_b in _elems_b:
+                        _m_b = self.trail.mark()
+                        try:
+                            _ok_b = self._unify_types(u, _e_b.deref())
+                        except UnificationFailure:
+                            _ok_b = False
+                        self.trail.undo_to(_m_b)
+                        if _ok_b:
+                            _fits_b.append(_e_b)
+                    if not _fits_b:
+                        return False
+                    _elems_b = _fits_b
+                self.bind(u, v)
+                self._carry_resids(u, v)
+                self.bind(v, _elems_b[0])
+                self._wakeup_resid(u, v, defer=False)
+                for _alt_b in reversed(_elems_b[1:]):
+                    self.engine.push_choice_point(
+                        GoalType.BIND_DIRECT, v, _alt_b, None)
+                _e0_b = _elems_b[0].deref()
+                if (WL.delay_rules and _e0_b.type is not None
+                        and _e0_b.type is not WL.top
+                        and not getattr(_e0_b, '_delay_fired', False)):
+                    _e0_b._delay_fired = True
+                    self._fire_delay_rules(_e0_b, _e0_b.type)
+                return True
             # A term meeting a disjunction takes one of its alternatives, and
             # only one it fits: `pick_name(ursule)` against the head
             # `pick_name({alfred;…;gertrude})` has no alternative to take and
@@ -1395,6 +1538,35 @@ class Unifier:
                         return True
             except Exception:
                 pass
+            # A number meeting a sum that is still waiting on its terms is a
+            # constraint, not a shape to match: magic's `all_equal(RowSums,
+            # 15)` says what each row has to come to and waits for the
+            # squares.  `=` knows how to say that, so it is asked.
+            _expr_eq = v if u_is_num else u
+            if (self.engine is not None and _expr_eq.attr_list
+                    and not getattr(self, '_in_arith_eq', False)):
+                from wild_life.built_ins import (
+                    _ARITH_OPS_SET as _AOS_eq, _get_sym as _gs_eq,
+                    _collect_arith_vars as _cav_eq)
+                _vars_eq: list = []
+                if _gs_eq(_expr_eq) in _AOS_eq:
+                    _cav_eq(_expr_eq, WL, _vars_eq, set())
+                # Only where something is still unknown: `*(10)` is a
+                # multiplication waiting for its second argument, not an
+                # equation, and 50 is not what it comes to.
+                if _gs_eq(_expr_eq) in _AOS_eq and _vars_eq:
+                    _num_eq = u if u_is_num else v
+                    _eq_def = (getattr(WL, 'eqsym', None)
+                               or WL.syntax_module.symbol_table.get('='))
+                    if _eq_def is not None:
+                        from wild_life.built_ins import bi_unify as _bu_eq
+                        _eq_t = PsiTerm(type_def=_eq_def)
+                        _eq_t.attr_list = {'1': _num_eq, '2': _expr_eq}
+                        self._in_arith_eq = True
+                        try:
+                            return bool(_bu_eq(_eq_t, self.engine))
+                        finally:
+                            self._in_arith_eq = False
 
         # Two arithmetic expressions meet where a shared variable reaches both
         # slots of a clause head — `r3(X, 1+1, 2*1)` called as `r3(a,C,C)`.
@@ -1425,7 +1597,36 @@ class Unifier:
                         and not (t.flags & _NST_AA)
                         and not _iuf_aa(t))
 
-            if _is_open_arith(u) and _is_open_arith(v):
+            def _is_plain_atom(x):
+                """A sort that is nothing but itself, and never a number."""
+                if x is None:
+                    return False
+                x = x.deref()
+                from wild_life.data_structures import SORT_VAR as _SV_pa
+                if (x.attr_list or x.value is not None or x.resid
+                        or (x.flags & _SV_pa)):
+                    return False
+                _ty = x.type
+                if _ty is None or _ty is WL.top:
+                    return False           # a variable: it may yet be one
+                if WL.real is not None and _ty.is_subtype_of(WL.real):
+                    return False
+                from wild_life.data_structures import DefType as _DT_pa
+                if _ty.type == _DT_pa.FUNCTION or _ty.type == _DT_pa.GLOBAL:
+                    return False           # a call or a cell: it may answer one
+                return True
+
+            def _is_arith_equation(t):
+                # An operator given sorts to work on is not an expression at
+                # all: accumulators.lf writes `a + in` to mean adding a to the
+                # accumulator in, and `xpand_acc(A+B)` is matched against it
+                # for the two of them rather than for what they come to.
+                if not _is_open_arith(t):
+                    return False
+                return not any(_is_plain_atom(_v)
+                               for _v in t.attr_list.values())
+
+            if _is_arith_equation(u) and _is_arith_equation(v):
                 _ok_u_aa, _val_u_aa = _ea_aa(u, self.engine)
                 _ok_v_aa, _val_v_aa = (_ea_aa(v, self.engine) if _ok_u_aa
                                        else (False, 0.0))
@@ -1728,6 +1929,38 @@ class Unifier:
 
         return True  # 両方 None
 
+    def _carry_rest_into_alternatives(self, cp_before, rest_keys,
+                                      u_attrs, v_attrs) -> None:
+        """Put the feature unifications still to come into new alternatives.
+
+        login.c merges two terms' features by pushing one `unify` goal per
+        feature onto the goal stack, so a choice point made while the first
+        feature is unified still carries the rest in its continuation and
+        does them again when it is taken.  Here the features are unified in
+        place, so the ones still to come are put into each new alternative
+        by hand — without them, coming back for another alternative of the
+        first feature would leave the rest of the term unmatched.
+        """
+        eng = self.engine
+        if eng is None:
+            return
+        pairs = [(u_attrs[k], v_attrs[k]) for k in rest_keys
+                 if u_attrs.get(k) is not None and v_attrs.get(k) is not None]
+        if not pairs:
+            return
+        from wild_life.data_structures import Goal as _G_ua
+        cp = eng.choice_stack
+        while cp is not None and cp is not cp_before:
+            alt = cp.goal_stack
+            if alt is not None:
+                tail = alt.next
+                for (_uv, _vv) in reversed(pairs):
+                    g = _G_ua(GoalType.UNIFY, _uv, _vv, None)
+                    g.next = tail
+                    tail = g
+                alt.next = tail
+            cp = cp.next
+
     def _unify_attrs(self, u: PsiTerm, v: PsiTerm) -> bool:
         """特性を単一化する
         C版の global_unify_attr() に対応
@@ -1758,8 +1991,13 @@ class Unifier:
 
             if u_val is not None and v_val is not None:
                 # 両方に特性がある -> 再帰的に単一化
+                _cp_ua = self.engine.choice_stack if self.engine else None
                 if not self.unify(u_val, v_val):
                     return False
+                if self.engine is not None and self.engine.choice_stack is not _cp_ua:
+                    self._carry_rest_into_alternatives(
+                        _cp_ua, all_keys[all_keys.index(key) + 1:],
+                        u_attrs, v_attrs)
                 # u と v の特性を統一
                 unified = u_val.deref()
                 if key not in u.attr_list or u.attr_list[key] is not unified:
@@ -2178,7 +2416,7 @@ class Unifier:
             self.trail.trail_copy(dst, 'resid')
             dst.resid = list(dst.resid) + _new
 
-    def _wakeup_resid(self, var: PsiTerm, val: PsiTerm):
+    def _wakeup_resid(self, var: PsiTerm, val: PsiTerm, defer: bool = True):
         """残留ゴールを覚醒させる
         変数が束縛されたときに呼ばれる
         C版の wakeup() に対応
@@ -2215,7 +2453,7 @@ class Unifier:
         for g in goals_to_wake:
             self.trail.trail_psi(g, 'pending')  # restore pending=True on backtrack
             g.pending = False
-            if self._unify_nesting > 0 and self.engine is not None:
+            if defer and self._unify_nesting > 0 and self.engine is not None:
                 self._deferred_wakeups.append((g.type, g.a, g.b, g.c))
             else:
                 self.engine.push_goal(g.type, g.a, g.b, g.c)

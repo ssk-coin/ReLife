@@ -58,6 +58,64 @@ def title(quiet: bool = False) -> None:
 Frame = namedtuple('Frame', ['pre_mark', 'bindings_str', 'cs_before', 'var_tree', 'saved_pd'])
 
 
+def _without_line_comment(text: str) -> str:
+    """The line with any `%` comment taken off the end.
+
+    A query may be followed by a note — libstruct writes `test(...)?  %%
+    simple matching` — and what ends the line is the `?` before it, not the
+    last character of the note.  A `%` inside a string or a quoted name is
+    part of it, not the start of a comment.
+    """
+    quote = None
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if quote is not None:
+            if c == '\\':
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+        elif c in ('"', "'"):
+            quote = c
+        elif c == '%':
+            return text[:i]
+        i += 1
+    return text
+
+
+def _names_a_persistent(term, engine) -> bool:
+    """True when the query as written names a `persistent` global.
+
+    The cell such a name stands for is not the query's to undo, so a query
+    that reaches for one keeps what it did and answers at a level of its own.
+    A global a predicate reads on its way to an answer is not that: power_4
+    passes `result` around inside foo_4 and still answers at the top level,
+    which is why this asks the query text rather than the reading.
+    """
+    defs = getattr(engine.wl, 'global_defs', None)
+    if not defs:
+        return False
+    pre = getattr(engine, 'pre_query_globals', None) or set()
+    seen = set()
+    stack = [term]
+    while stack:
+        t = stack.pop()
+        if t is None:
+            continue
+        t = t.deref()
+        if id(t) in seen:
+            continue
+        seen.add(id(t))
+        d = t.type
+        if (d is not None and getattr(d, 'is_persistent', False)
+                and id(d) in pre):
+            return True
+        if t.attr_list:
+            stack.extend(t.attr_list.values())
+    return False
+
+
 def _prompt(depth: int, module_name: str = "") -> str:
     """Return the prompt string for the given depth level.
 
@@ -148,7 +206,61 @@ def run_repl(
     engine.noisy = False   # REPL handles all output itself
 
     # ---- Print banner -------------------------------------------------------
+    # The library files ask `quiet` before they warn about anything, so the
+    # flag the banner was suppressed by is the one they read.
+    WL.quietflag = quiet
     title(quiet)
+
+    # ---- Boot-load the term-expansion layer ---------------------------------
+    # C Wild Life links term_expansion.lf into its boot image, so the names the
+    # file declares public — associate_expanders and the rest — answer from
+    # every module.  Library files such as accumulators.lf call them while they
+    # load and abort without them.  The file sits next to built_ins.lf at the
+    # top of the source tree, which is where we look for it rather than in the
+    # working directory.
+    #
+    # C keeps the file's helpers to the built-in module, where the public
+    # declaration is what lets a name out of it.  Here every name in the
+    # built-in module answers from everywhere, declared public or not, so the
+    # file is given a module of its own and only the names it declares public
+    # are put where the rest of the interpreter sees them.  Several of the
+    # helpers — prefix, warn, line — are words a program is free to use for
+    # something else of its own.
+    term_expansion_file = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "term_expansion.lf")
+    if os.path.isfile(term_expansion_file):
+        expansion_module = WL.create_module("term_expansion")
+        expansion_module.open_modules = [WL.bi_module, WL.syntax_module]
+        saved_module = WL.current_module
+        WL.set_current_module(expansion_module)
+        try:
+            engine.load_file(term_expansion_file)
+        except HaltException:
+            return 0
+        except Exception as exc:
+            sys.stderr.write(
+                f"Warning: could not load {term_expansion_file}: {exc}\n")
+        finally:
+            WL.set_current_module(saved_module)
+        for name, defn in expansion_module.symbol_table.items():
+            if defn.keyword is not None and defn.keyword.public:
+                WL.bi_module.symbol_table.setdefault(name, defn)
+
+    # ---- The built-ins that are written in LIFE -----------------------------
+    # C Wild Life compiles part of built_ins.lf in, so `clause(X:(append(A,B)
+    # -> C))` reads back the two rules append is made of.  The interpreter
+    # answers the calls itself; these give a program the text of them.
+    prelude_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "prelude.lf")
+    if os.path.isfile(prelude_file):
+        try:
+            engine.load_file(prelude_file)
+        except HaltException:
+            return 0
+        except Exception as exc:
+            sys.stderr.write(
+                f"Warning: could not load {prelude_file}: {exc}\n")
 
     # ---- Load system initialisation file (.set_up) --------------------------
     # Note: built_ins.lf uses complex module syntax not yet supported by the
@@ -346,11 +458,11 @@ def run_repl(
             # of a multi-line fact/rule/query.  Read continuation lines,
             # showing '|    ' for each one, until the buffer ends with '.'
             # or '?', or until EOF / a blank line terminates the input.
-            _stripped_r = line_stripped.rstrip()
+            _stripped_r = _without_line_comment(line_stripped).rstrip()
             if _stripped_r and not (_stripped_r.endswith('.') or _stripped_r.endswith('?')):
                 _buf = line_stripped
                 while True:
-                    _stripped_r = _buf.rstrip()
+                    _stripped_r = _without_line_comment(_buf).rstrip()
                     if not _stripped_r or _stripped_r.endswith('.') or _stripped_r.endswith('?'):
                         break
                     sys.stdout.write('|    ')
@@ -434,7 +546,8 @@ def run_repl(
                 # this query's own variables.
                 engine._frame_var_trees = [f.var_tree for f in frame_stack
                                            if f.var_tree]
-                engine.used_existing_global = False
+                engine.used_existing_global = _names_a_persistent(term, engine)
+                engine.persistent_store_touched = False
 
                 saved_noisy = engine.noisy
                 engine.noisy = False
@@ -462,6 +575,9 @@ def run_repl(
                     engine.goal_stack = None
                     engine.trail.undo_to(pre_mark)
                     engine.choice_stack = cs_before
+                    # An abort gives up the levels the session had open as
+                    # well as the query: what it leaves is the top level.
+                    _pop_all()
                     # When the aborthook ran it already wrote its output (ending
                     # with a newline), so we skip the leading '\n' to keep the
                     # next prompt on its own line without an extra blank line.
@@ -550,6 +666,14 @@ def run_repl(
                         # not be reliable across undo). The stored string was correct
                         # when the parent query succeeded.
                         parent_bindings = frame_stack[-1].bindings_str
+                        # Unless the query wrote into persistent store, which
+                        # the undo does not take back: `A.4 = e` opens the
+                        # feature for good and only then fails to fill it.
+                        if getattr(engine, 'persistent_store_touched', False):
+                            _pv_trees = [f.var_tree for f in frame_stack
+                                         if f.var_tree]
+                            parent_bindings = _format_bindings(
+                                {}, engine, extra_var_trees=_pv_trees)
                         if parent_bindings:
                             sys.stdout.write(parent_bindings + "\n")
                     # Do NOT pop the frame on fresh-query failure at depth > 0:

@@ -436,6 +436,25 @@ class PrintState:
                 if coref is not None and id(coref) in var_id_set:
                     aliased_to.add(id(coref))
 
+        # Two names for one term where one of them reaches it through
+        # something else: `A = X:f(X)` leaves X pointing at the cell f's value
+        # went into and A pointing at the value, so the two are one term and
+        # the first of them names it.  Two names bound to the same value each
+        # in their own right — `A = B*A, A = 1` — are not that, and each is
+        # written as the value.
+        _by_node: dict = {}
+        for _n_fv in sorted(var_tree.keys()):
+            _p_fv = var_tree.get(_n_fv)
+            if _p_fv is None:
+                continue
+            _by_node.setdefault(id(_p_fv.deref()), []).append(_p_fv)
+        for _nid_fv, _ps_fv in _by_node.items():
+            if len(_ps_fv) < 2:
+                continue
+            if any(id(getattr(_p_fv, 'coref', None)) != _nid_fv
+                   for _p_fv in _ps_fv):
+                aliased_to.add(id(_ps_fv[0]))
+
         for name in sorted(var_tree.keys()):
             pterm = var_tree.get(name)
             if pterm is None:
@@ -448,11 +467,6 @@ class PrintState:
             # If the node IS structural, it must be pre-registered so that
             # when it appears inside another term (e.g. A = W+E where W=34)
             # it prints as the variable name "W" rather than "W: 34".
-            if (coref is not None
-                    and coref.value is not None
-                    and pid not in aliased_to
-                    and id(pterm.deref()) not in self._structural_ids):
-                continue
             t = pterm.deref()
             tid = id(t)
             # Only register if not yet registered (sorted order ensures first
@@ -841,7 +855,7 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
         cur = start
         list_depth = 0
         while True:
-            if ps.print_depth > 0 and depth + list_depth >= ps.print_depth:
+            if ps.print_depth > 0 and list_depth + 1 >= ps.print_depth:
                 yield None, None, True   # sentinel for "..."
                 return
             arg1, arg2 = _get_two_args(cur.attr_list)
@@ -891,7 +905,7 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
     done_f = False
     t_walk = t
     while not done_f:
-        if ps.print_depth > 0 and depth + list_depth_f >= ps.print_depth:
+        if ps.print_depth > 0 and list_depth_f + 1 >= ps.print_depth:
             if not first_f:
                 flat_ps.write(sep)   # comma before "..."
             flat_ps.write("...")
@@ -952,7 +966,7 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
     first2 = True
     done2 = False
     while not done2:
-        if ps.print_depth > 0 and depth + list_depth2 >= ps.print_depth:
+        if ps.print_depth > 0 and list_depth2 + 1 >= ps.print_depth:
             if not first2:
                 ps.write(sep)   # comma before "..."
             ps.write("...")
@@ -1039,6 +1053,11 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
     if t is None:
         return
     t = t.deref()
+
+    # `display_persistent` asks to be shown what lives in persistent store.
+    if (getattr(wl, 'display_persistent_mode', False)
+            and t.__dict__.get('_wl_persistent_written', False)):
+        ps.write(' $')
 
     _psym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
 
