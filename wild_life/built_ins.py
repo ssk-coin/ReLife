@@ -3757,6 +3757,56 @@ def _is_user_function(t: PsiTerm) -> bool:
     return not (t.flags & _IUF_SKIP_FLAGS)
 
 
+def _settle_disj_body_sync(body_d, eng, _depth):
+    """The alternative a body of alternatives comes to, read here and now.
+
+    eval_aim unifies the body with the result, and a body of alternatives
+    settles there to the first one that holds, keeping the rest as choice
+    points.  Read where a value is wanted there is no goal to come back to,
+    so the first alternative whose guard holds is the answer: transequ's
+    `{ ([get_const(V,T)] | consta(T),!) ; … }` is the get_const list when the
+    term is a constant.  Returns None when none of them holds.
+    """
+    if body_d is None or eng is None:
+        return None
+    body_d = body_d.deref()
+    if body_d.type is not eng.wl.disjunction:
+        return None
+    _alts = _collect_disjunction(body_d, eng)
+    if not _alts:
+        return None
+    from wild_life.inference import prove_cond as _pc_dj
+    for _alt_dj in _alts:
+        _a_d = _alt_dj.deref()
+        _mark_dj = eng.trail.mark()
+        if _a_d.type is eng.wl.such_that:
+            _val_dj = _a_d.attr_list.get('1')
+            _grd_dj = _a_d.attr_list.get('2')
+            if _val_dj is None or _grd_dj is None:
+                eng.trail.undo_to(_mark_dj)
+                continue
+            if not _pc_dj(_grd_dj.deref(), eng):
+                eng.trail.undo_to(_mark_dj)
+                continue
+            # Only a guard that commits settles the body here.  The
+            # alternatives after it are choice points in eval_aim, and
+            # there is nowhere to keep them when the value is read out;
+            # a guard ending in a cut takes them away itself, so nothing
+            # is lost.  Without one the call is left to the engine's own
+            # EVAL goal, which can hold the alternatives.
+            from wild_life.inference import _body_has_cut as _bhc_dj
+            if not _bhc_dj(_grd_dj.deref(), eng.wl):
+                eng.trail.undo_to(_mark_dj)
+                return None
+            _v_dj = _val_dj.deref()
+        else:
+            eng.trail.undo_to(_mark_dj)
+            return None
+        _ev_dj = _eval_body_sync(_v_dj, eng, _depth + 1)
+        return _ev_dj if _ev_dj is not None else _v_dj
+    return None
+
+
 def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
     """Synchronously evaluate a user-defined function call, cycles included.
 
@@ -3965,6 +4015,10 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
             continue
 
         body_d2 = body_d.deref()
+        if body_d2.type is eng.wl.disjunction:
+            _dj_val = _settle_disj_body_sync(body_d2, eng, _depth)
+            if _dj_val is not None:
+                return _dj_val
         result = _eval_body_sync(body_d2, eng, _depth + 1)
         if (result is None and _is_user_function(body_d2)
                 and _has_applicable_rule(body_d2)):
