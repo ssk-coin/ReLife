@@ -415,8 +415,11 @@ class WildLifeRuntime:
         self.succeed.type = DefType.TYPE
         self._make_type_link(self.succeed, self.top)
 
-        # eof
-        self.eof = self.update_symbol(bi, "eof")
+        # eof.  The token the reader hands back at the end of the input is
+        # the sort `end_of_file` itself (built_ins.c: eof=update_symbol
+        # (syntax_module,"end_of_file")), so the word written into a file
+        # ends what is being read there just as the end of the file does.
+        self.eof = self.update_symbol(syn, "end_of_file")
         self.eof.type = DefType.TYPE
 
         # comment (コメントトークン)
