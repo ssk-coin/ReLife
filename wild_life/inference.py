@@ -562,6 +562,18 @@ def _eval_body_to_result(branch: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
     # below cannot evaluate 1 + {disjunction} because the arithmetic wrapping
     # the embedded function call is not reduced after the EVAL goal fires.
     wl = eng.wl
+
+    # `Value | Goal` standing where a value belongs: c_cond checks the
+    # branch it chose out on the spot, and a such-that is a function, so
+    # the goal runs and the value is what the cond is worth.
+    if (branch_d.type is not None and branch_d.type is wl.such_that
+            and branch_d.attr_list):
+        from wild_life.built_ins import _eval_suchthat_sync as _ess_br
+        _st_val = _ess_br(branch_d, eng, 0)
+        if _st_val is None:
+            return False
+        return eng.unifier.unify(result, _st_val)
+
     if branch_d.type is not None and branch_d.type is wl.disjunction:
         from wild_life.built_ins import _eval_body_sync
         evaled = _eval_body_sync(branch_d, eng, 0)

@@ -4733,6 +4733,44 @@ def _apply_lub_to_var(t: 'PsiTerm', target: 'PsiTerm', eng) -> bool:
     return _unify(eng, target, first_psi)
 
 
+def _eval_suchthat_sync(st_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
+    """Work out a `Value | Goal` standing where a value belongs.
+
+    A such-that is a function, so a cond that hands one back as its value
+    has it checked out on the spot: the goal runs and the value is what the
+    cond is worth.  Answers None when the goal does not hold, leaving the
+    bindings it made undone.
+    """
+    val_part = st_d.attr_list.get('1')
+    cond_part = st_d.attr_list.get('2')
+    if val_part is None or cond_part is None:
+        return None
+    from wild_life.inference import (
+        GoalType as _GT_st, _DEFRULES as _DR_st,
+        _INNER_RUN_BARRIER as _IRB_st, _leftmost_goal as _lmg_st)
+    mark = eng.trail.mark()
+    _cond_d = cond_part.deref()
+    _eval_embedded_user_funcs(_lmg_st(_cond_d, eng.wl), eng, _depth + 1, set())
+    cp_save = eng.choice_stack
+    gs_save = eng.goal_stack
+    eng.goal_stack = None
+    eng.push_goal(_GT_st.PROVE, _cond_d, _DR_st, None)
+    old_ok = eng.main_loop_ok
+    cond_ok = eng.run(cs_barrier=cp_save if cp_save is not None else _IRB_st)
+    eng.main_loop_ok = old_ok
+    eng.choice_stack = cp_save
+    eng.goal_stack = gs_save
+    if not cond_ok:
+        eng.trail.undo_to(mark)
+        return None
+    val_d = val_part.deref()
+    _ok_a, _v = _eval_arith(val_d, eng)
+    if _ok_a:
+        return _make_number(eng, _v)
+    _eval_embedded_user_funcs(val_d, eng, _depth + 1, set())
+    return val_d
+
+
 def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
     """Synchronously evaluate a function body expression.
 
@@ -4762,6 +4800,13 @@ def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
             _eval_body_sync(_warg, eng, _depth + 1)
         # Return @ (top) so intersecting with another sort gives that sort unchanged
         return PsiTerm(type_def=eng.wl.top)
+
+    # `Value | Goal` standing where a value belongs: run the goal, answer
+    # the value.  A cond hands its chosen branch back as its value and
+    # checks it out, and a such-that is a function like any other.
+    if (body_d.type is not None and body_d.type is eng.wl.such_that
+            and body_d.attr_list):
+        return _eval_suchthat_sync(body_d, eng, _depth)
 
     # User-defined function call?
     if _is_user_function(body_d):
