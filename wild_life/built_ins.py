@@ -3564,6 +3564,11 @@ def _term_contains_disjunction(t: PsiTerm, eng, depth: int = 0,
     t = t.deref()
     if t.type is None:
         return False
+    # A term held as it is written is not evaluated, so a choice inside it
+    # is part of what is written: the `{40;41;…}` of a grammar rule reaches
+    # the clause the rule compiles to whole.
+    if t.flags & QUOTED_TRUE:
+        return False
     if t.type is eng.wl.disjunction:
         return True
     if not t.attr_list:
@@ -3588,11 +3593,13 @@ def _disjunction_nodes(t: PsiTerm, eng, _seen: set = None,
     if _seen is None:
         _seen = set()
     t = t.deref()
-    if id(t) in _seen:
+    if id(t) in _seen or (t.flags & QUOTED_TRUE):
         return out
     _seen.add(id(t))
     for _k in sorted(t.attr_list.keys()):
         _sub = t.attr_list[_k].deref()
+        if _sub.flags & QUOTED_TRUE:
+            continue
         if (_sub.type is eng.wl.disjunction and _sub.attr_list
                 and id(_sub) not in _seen):
             _seen.add(id(_sub))

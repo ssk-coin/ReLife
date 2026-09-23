@@ -2347,7 +2347,15 @@ class Engine:
         #   → X is unbound (not a disjunction at the call site), so NO expansion here.
         #     The disjunction comes from the clause head; those choice points are
         #     created during head unification (after cut_barrier) → '!' DOES cut them.
-        _goal_alts = _expand_head_disj(thegoal, wl)
+        # A predicate declared non_strict is handed its arguments as they
+        # are written, so a choice in one of them is part of what is
+        # written: `X --> [{32;9;10}], …` compiles to a clause that keeps
+        # the choice, and expanding it here would compile away all but the
+        # first character.
+        _goal_alts = ([thegoal] if (defn is not None
+                                    and hasattr(self, 'non_strict_set')
+                                    and defn in self.non_strict_set)
+                      else _expand_head_disj(thegoal, wl))
         if len(_goal_alts) > 1:
             for _alt in reversed(_goal_alts[1:]):
                 self.push_choice_point(GoalType.PROVE, _alt, _DEFRULES, None)

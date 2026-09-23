@@ -1126,6 +1126,7 @@ class Unifier:
                 # top-level query variable also dereferences correctly.
                 if (not v_is_var and v.type is WL.disjunction
                         and v.attr_list  # bare disj type markers have no elements
+                        and not (v.flags & _QUOTED_TRUE)
                         and self.engine is not None):
                     from wild_life.built_ins import _collect_disjunction as _cdisj
                     _elems = _cdisj(v, self.engine)
@@ -1371,7 +1372,8 @@ class Unifier:
             # If u is a disjunction psi-term, expand into UNIFY choice points.
             # Same logic as in the u_is_var+else branch above: bind u (the disjunction)
             # to elem[0] and bind v to u, so body refs deref correctly.
-            if u.type is WL.disjunction and self.engine is not None:
+            if (u.type is WL.disjunction and not (u.flags & _QUOTED_TRUE)
+                    and self.engine is not None):
                 from wild_life.built_ins import _collect_disjunction as _cdisj
                 _elems = _cdisj(u, self.engine)
                 if not _elems:
