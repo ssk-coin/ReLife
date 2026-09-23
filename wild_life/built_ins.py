@@ -3934,7 +3934,11 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
         # settled.  A rule no narrowing could ever fit is passed over; one the
         # call is not specific enough for is left to the engine's own EVAL
         # goal, which suspends the call until a variable is bound.
-        from wild_life.inference import _rule_match_status as _rms_sync
+        from wild_life.inference import (
+            _rule_match_status as _rms_sync, _call_is_curried as _cic_sync)
+        if _cic_sync(head.deref(), t):
+            t.attr_list = t_copy_attrs
+            return t
         _sync_match = _rms_sync(head.deref(), t, eng)
         if _sync_match == 'never':
             t.attr_list = t_copy_attrs

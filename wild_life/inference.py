@@ -895,6 +895,21 @@ def _copy_to_depth(t: 'PsiTerm', var_map: dict, depth: int) -> 'PsiTerm':
     return n
 
 
+def _call_is_curried(head: 'PsiTerm', call: 'PsiTerm') -> bool:
+    """Whether the rule asks the call for an argument it was not given.
+
+    match_attr raises attr_missing when the head names a feature the call
+    has not got, and eval_cut then answers the call itself rather than the
+    rule's value: `dissolve_features_of(psi => s,var => V)` is the function
+    still waiting for its list and its table, not a reduction of it.  Only
+    the call's own features are read this way, as can_curry is spent on the
+    first match and a feature missing deeper down residuates instead.
+    """
+    if head is None or call is None or not head.attr_list:
+        return False
+    return any(k not in call.attr_list for k in head.attr_list)
+
+
 def _rule_match_status(head: 'PsiTerm', call: 'PsiTerm', eng):
     """Whether this rule applies to the call, cannot, or is not settled yet.
 
@@ -3140,6 +3155,8 @@ class Engine:
                     # write(N)` does not apply to `inst(Y)` with Y still a
                     # variable, and narrowing Y to inst_name to make it fit
                     # would answer a question the call has not settled.
+                    if _call_is_curried(head.deref(), funct):
+                        return self.unifier.unify(result, funct)
                     _st_match = _rule_match_status(head.deref(), funct, self)
                     if _st_match == 'never':
                         return False
@@ -3293,6 +3310,8 @@ class Engine:
         # no narrowing could ever fit is passed over; one the call is not yet
         # specific enough for makes the call wait on the terms that would
         # settle it.
+        if _call_is_curried(_head_d_arity, funct):
+            return self.unifier.unify(result, funct)
         _match = _rule_match_status(_head_d_arity, funct, self)
         if _match == 'never':
             return False
