@@ -3032,21 +3032,22 @@ class Engine:
                 return self.unifier.unify(result, funct)
             return False
 
-        # Expand disjunctions embedded in function arguments BEFORE pre-eval.
-        # This must happen first so that nested function calls like f2(f2({1;2}))
-        # push EVAL-level CPs (with the full continuation) rather than letting
-        # _eval_user_func_sync push inner CPs that miss the outer evaluation.
-        # e.g. f2(f2({1;2})) → push EVAL CP for f2(f2(2)), try f2(f2(1)) first.
-        # Then pre-eval evaluates inner calls on each alternative separately.
-        from wild_life.built_ins import _term_contains_disjunction, _expand_term_disjunctions
+        # A choice written inside a call is settled before the call is
+        # reduced, and settled on the disjunction itself: check_func binds
+        # the term to what evaluating it answers, so the `Y` of
+        # `ts([Y:{40;41;44}],Ys)` reads the alternative the call was given.
+        # Expanding into a copy of the call per alternative left the
+        # disjunction unbound and Y worth the whole choice.  The eval goal
+        # goes back on the stack, so the call is reduced once the choice is
+        # made — and it is made ahead of pre-eval, so a nested call is
+        # reduced against one alternative at a time.
+        from wild_life.built_ins import (
+            _term_contains_disjunction, _disjunction_nodes)
         if _term_contains_disjunction(funct, self):
-            _alts = _expand_term_disjunctions(funct, self)
-            if len(_alts) > 1:
-                # Push choice points for alternatives 2..N (in reverse so first
-                # alternative is tried next, then 2nd, etc.)
-                for _alt in reversed(_alts[1:]):
-                    self.push_choice_point(GoalType.EVAL, _alt, result, active)
-                funct = _alts[0]
+            _dj_nodes_ev = _disjunction_nodes(funct, self)
+            if _dj_nodes_ev:
+                self.push_goal(GoalType.EVAL, funct, result, active)
+                return self.unifier._settle_disjunction(_dj_nodes_ev[0])
 
         # Pre-evaluate any function call arguments in funct.
         # This enables patterns like f(g(x)) where g(x) needs to be evaluated
