@@ -23,7 +23,7 @@ import sys
 
 from wild_life.data_structures import (
     PsiTerm, Definition, OperatorData, OperatorType, Rule,
-    featcmp_key, QUOTED_TRUE
+    featcmp_key, QUOTED_TRUE, feature_key_of
 )
 from wild_life.runtime import WL, init
 from wild_life.tokenizer import TokenizerState
@@ -422,8 +422,12 @@ class Parser:
                         t3 = self.ts.read_token()
                         if self.equ_tok(t3, "=>"):
                             t3 = self.read_life_form(',', ')')
-                            # 特性を挿入 (常にシンボル名のみ使用; モジュール修飾は外部参照用)
-                            feat_name = t2.type.symbol if t2.type else str(count)
+                            # A feature declared private to a module is
+                            # filed under the name that says so, as
+                            # parser.c files it: the same word in another
+                            # module is a different feature.
+                            feat_name = (feature_key_of(t2.type)
+                                         if t2.type else str(count))
                             self._feature_insert(feat_name, t.attr_list, t3)
                             f2 = False
                         else:

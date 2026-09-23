@@ -96,7 +96,7 @@ class _DictSnapshot:
 # working it out costs nothing and changes nothing else.
 _SHAPE_FUNCS_UC = frozenset((
     'root_sort', 'sort', 'features', 'parents', 'children', 'arity',
-    'length', 'combined_name',
+    'length', 'combined_name', 'strip', 'copy_pointer',
 ))
 
 

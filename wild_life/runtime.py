@@ -331,7 +331,7 @@ class WildLifeRuntime:
 
         # --- 基本型 ---
         # top: すべての型の親 (最も一般的)
-        self.top = self.update_symbol(bi, "@")
+        self.top = self.update_symbol(syn, "@")
         self.top.type = DefType.TYPE
         self.top.always_check = True
         self.top.protected = True

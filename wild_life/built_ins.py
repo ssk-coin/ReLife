@@ -22,7 +22,7 @@ from typing import Optional, Tuple
 from wild_life.data_structures import (
     PsiTerm, Definition, GoalType, DefType, FACT, QUERY, ERROR,
     int_div as _int_div, NON_STRICT_TERM as _NST_SWAP,
-    QUOTED_TRUE, REDUCED
+    QUOTED_TRUE, REDUCED, feature_key_of
 )
 from wild_life.unification import (
     UnificationFailure, CutException, HaltException, AbortException,
@@ -1419,20 +1419,13 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         for key in reversed(sorted_keys):
             is_pos = key.lstrip('-').isdigit() and int(key) >= 0
 
-            if ctx_mod is not None and not is_pos:
-                # What keeps a feature out of another module's sight is
-                # its being declared private there, not its being left
-                # undeclared: `private_feature(a)` in abc hides a from
-                # def, and b and c, which nobody declared at all, are
-                # plain to both.
-                _kw_fv = None
-                if term_type_mod is not None:
-                    _kd_fv = term_type_mod.symbol_table.get(key)
-                    if _kd_fv is not None:
-                        _kw_fv = _kd_fv.keyword
-                if (_kw_fv is not None
-                        and getattr(_kw_fv, 'private_feature', False)
-                        and term_type_mod is not ctx_mod):
+            _bare_fv = key
+            if ctx_mod is not None and not is_pos and '#' in key:
+                # The name a feature is filed under says which module
+                # keeps it to itself; no other module sees it, and the
+                # one that does sees it by its plain name.
+                _km_fv, _bare_fv = key.split('#', 1)
+                if _km_fv != ctx_mod.module_name:
                     continue
 
             if is_pos:
@@ -1441,7 +1434,7 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             else:
                 # Named feature: create atom in context module if given, else user module
                 target_mod = ctx_mod if ctx_mod is not None else wl.user_module
-                kterm = wl.make_atom(key, target_mod)
+                kterm = wl.make_atom(_bare_fv, target_mod)
 
             pair = PsiTerm()
             pair.type = wl.alist
@@ -1540,7 +1533,7 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
                 # use the actual value as the key (e.g. "" -> '', not 'string')
                 fkey = str(feat.value)
         elif feat.type and feat.type.keyword:
-            fkey = feat.type.keyword.symbol
+            fkey = feature_key_of(feat.type)
         else:
             return None
         val = term.attr_list.get(fkey)
@@ -2008,28 +2001,13 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
             if t_str is not None:
                 t = t_str
             elif sym == '.':
-                # T.F where feature F doesn't exist on T → unbound var → write '@'.
-                # In C Wild Life, accessing a non-existent attribute yields a fresh
-                # unbound variable, and write prints it as '@' (the top sort).
-                _a1 = t.attr_list.get('1')
-                _a2 = t.attr_list.get('2')
-                if _a1 is not None and _a2 is not None:
-                    _term_d = _a1.deref()
-                    _feat_d = _a2.deref()
-                    _fsym_raw = _feat_d.type.keyword.symbol if (
-                        _feat_d.type and _feat_d.type.keyword) else None
-                    if _fsym_raw in ('integer', 'real', 'int', 'float', 'number') and \
-                            _feat_d.value is not None:
-                        _fkey = str(int(_feat_d.value))
-                    elif _fsym_raw is not None:
-                        _fkey = _fsym_raw
-                    else:
-                        _fkey = None
-                    if _fkey is not None and _fkey not in _term_d.attr_list:
-                        _fresh_var = PsiTerm()
-                        if wl:
-                            _fresh_var.type = wl.top
-                        t = _fresh_var
+                # T.F where T hasn't got F yet.  c_get_feature gives the term
+                # the feature and answers the fresh variable it put there, so
+                # the write shows `@` and the term keeps the feature after.
+                _dot_cell = (_resolve_dot_feat(t, eng)
+                             if eng is not None else None)
+                if _dot_cell is not None:
+                    t = _dot_cell.deref()
             elif (_is_user_function(t) and eng is not None
                     and not _term_reaches_itself(t)
                     and _has_applicable_rule(t)):
@@ -5593,7 +5571,7 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
             if feat.value is not None:
                 fkey = str(feat.value)
             else:
-                fkey = feat.type.keyword.symbol
+                fkey = feature_key_of(feat.type)
     else:
         return None
     existing = host.attr_list.get(fkey)

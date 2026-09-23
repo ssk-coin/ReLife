@@ -502,33 +502,47 @@ def _print_symbol_quoted(ps: PrintState, sym: str, quote: bool) -> None:
         ps.write(sym)
 
 
+_WL_FOR_MODULES = None
+
+
+def _display_modules() -> bool:
+    """Whether names are being written with the module they belong to."""
+    global _WL_FOR_MODULES
+    if _WL_FOR_MODULES is None:
+        from wild_life.runtime import WL as _w
+        _WL_FOR_MODULES = _w
+    return bool(getattr(_WL_FOR_MODULES, 'display_modules_mode', False))
+
+
+def _print_module_prefix(ps: PrintState, kw) -> None:
+    """Write the `module#` a name is written behind under display_modules."""
+    if not _display_modules():
+        return
+    _mod = getattr(kw, 'module', None)
+    if _mod is None or not getattr(_mod, 'module_name', ''):
+        return
+    _print_symbol_quoted(ps, _mod.module_name, ps.const_quote)
+    ps.write('#')
+
+
 def _print_symbol(ps: PrintState, kw) -> None:
     """Print a keyword symbol (module-aware)."""
     if kw is None:
         return
+    _print_module_prefix(ps, kw)
     sym = kw.symbol if hasattr(kw, 'symbol') else str(kw)
     ps.write(sym)
 
 
 def _print_symbol_q(ps: PrintState, kw) -> None:
-    """Print a keyword symbol with quoting if needed."""
-    if kw is None:
-        return
-    sym = kw.symbol if hasattr(kw, 'symbol') else str(kw)
-    _print_symbol_quoted(ps, sym, ps.const_quote)
+    """Print a keyword symbol with quoting if needed.
 
-
-def _print_module_qualified(ps: PrintState, kw) -> None:
-    """Print a module-qualified name as module#symbol (each part quoted separately).
-
-    Produces output like abc#abc or def#d without quoting the # separator.
-    This matches C Wild Life's display_modules output format.
+    Under display_modules the name is written behind the module it belongs
+    to, as pretty_quote_symbol does: `user#foo`, `built_ins#true`, `syntax#=`.
     """
     if kw is None:
         return
-    if hasattr(kw, 'module') and kw.module and kw.module.module_name:
-        _print_symbol_quoted(ps, kw.module.module_name, ps.const_quote)
-        ps.write('#')
+    _print_module_prefix(ps, kw)
     sym = kw.symbol if hasattr(kw, 'symbol') else str(kw)
     _print_symbol_quoted(ps, sym, ps.const_quote)
 
@@ -1224,19 +1238,7 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
         if ps.print_depth == 0 or depth + 1 < ps.print_depth:
             args_written = _pretty_psi_with_ops(ps, t, sprec, depth + 1)
         if not args_written:
-            _kw = t.type.keyword if t.type else None
-            # Use module-qualified name only when display_modules mode is active
-            # (enabled by display_modules? directive, as in C Wild Life)
-            # Under display_modules every name is written with the module
-            # it belongs to, the one doing the asking among them: the
-            # interpreter writes `user#foo`, `built_ins#true` and
-            # `syntax#@` alike.
-            if (_kw is not None and hasattr(_kw, 'module') and _kw.module is not None
-                    and _kw.module.module_name != ''
-                    and getattr(wl, 'display_modules_mode', False)):
-                _print_module_qualified(ps, _kw)
-            else:
-                _print_symbol_q(ps, _kw)
+            _print_symbol_q(ps, t.type.keyword if t.type else None)
 
     if not args_written and t.attr_list:
         # A term can carry features as well as a value — `23(1)` is the
@@ -1335,17 +1337,12 @@ def _render_one_attr(ps: PrintState, k: str, v, depth: int, cnt: list, wl,
     """Render a single key=>value attribute pair into ps."""
     iv = _str_to_int(k)
     if iv < 0:
-        # Named feature: check if private_feature AND display_modules mode → module-qualified name
+        # A feature kept private to a module is filed under the name that
+        # says so; the module shows only when the reader has asked for
+        # modules, and otherwise the plain name is written.
         display_k = k
-        if (getattr(wl, 'display_modules_mode', False)
-                and parent_type is not None and parent_type.keyword is not None
-                and parent_type.keyword.module is not None
-                and parent_type.keyword.module.module_name not in ('user', 'bi', 'syntax', '')):
-            mod = parent_type.keyword.module
-            kw_defn = mod.symbol_table.get(k)
-            if (kw_defn is not None and kw_defn.keyword is not None
-                    and kw_defn.keyword.private_feature):
-                display_k = f"{mod.module_name}#{k}"
+        if '#' in k and not getattr(wl, 'display_modules_mode', False):
+            display_k = k.split('#', 1)[1]
         _print_symbol_quoted(ps, display_k, ps.const_quote)
         ps.write(" => ")
     elif iv == cnt[0]:

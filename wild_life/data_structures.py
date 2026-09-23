@@ -158,6 +158,24 @@ def bump_hierarchy_generation() -> None:
     _HIERARCHY_GEN[0] += 1
 
 
+def feature_key_of(defn) -> str:
+    """The name a feature label is filed under among a term's features.
+
+    A feature its module keeps to itself is filed under the combined name
+    that says which module that is, and every other under its plain one, so
+    the `a` of one module is not the `a` of another.  parser.c files them
+    this way and built_ins.c looks them up the same, both through
+    keyword->combined_name.
+    """
+    _kw = getattr(defn, 'keyword', None)
+    if _kw is None:
+        return getattr(defn, 'symbol', '')
+    if (getattr(_kw, 'private_feature', False)
+            and getattr(_kw, 'module', None) is not None):
+        return "%s#%s" % (_kw.module.module_name, _kw.symbol)
+    return _kw.symbol
+
+
 class Definition:
     """シンボル定義 - 型定義、述語定義、関数定義を含む
     C版の struct wl_definition に対応
