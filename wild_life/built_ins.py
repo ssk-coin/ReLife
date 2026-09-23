@@ -1397,6 +1397,11 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
                 _mod_name = _mod_t.type.keyword.symbol
             if _mod_name:
                 ctx_mod = wl.find_module(_mod_name)
+        else:
+            # Asked without a module, a term's features are the ones the
+            # module doing the asking can see, written as that module
+            # writes them.
+            ctx_mod = wl.current_module
 
         # Get the term's defining module (for feature visibility checks)
         term_type_mod = None
@@ -1415,23 +1420,19 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             is_pos = key.lstrip('-').isdigit() and int(key) >= 0
 
             if ctx_mod is not None and not is_pos:
-                # Check visibility of named feature in ctx_mod
-                visible = False
+                # What keeps a feature out of another module's sight is
+                # its being declared private there, not its being left
+                # undeclared: `private_feature(a)` in abc hides a from
+                # def, and b and c, which nobody declared at all, are
+                # plain to both.
+                _kw_fv = None
                 if term_type_mod is not None:
-                    kw_defn = term_type_mod.symbol_table.get(key)
-                    if kw_defn is not None and kw_defn.keyword is not None:
-                        kw = kw_defn.keyword
-                        if term_type_mod is ctx_mod:
-                            # Same module: always visible (including private features)
-                            visible = True
-                        elif kw.public and not kw.private_feature:
-                            visible = True
-                    else:
-                        # Not in term_type_mod: anonymous / user feature, always visible
-                        visible = True
-                else:
-                    visible = True
-                if not visible:
+                    _kd_fv = term_type_mod.symbol_table.get(key)
+                    if _kd_fv is not None:
+                        _kw_fv = _kd_fv.keyword
+                if (_kw_fv is not None
+                        and getattr(_kw_fv, 'private_feature', False)
+                        and term_type_mod is not ctx_mod):
                     continue
 
             if is_pos:
@@ -4374,7 +4375,11 @@ def _eval_strip_or_copy_func(t: 'PsiTerm', eng, use_src_type: bool) -> 'PsiTerm'
             new_src_attrs[k] = fresh
             new_res_attrs[k] = fresh
         else:
-            new_src_attrs[k] = v  # keep non-positional attrs in src only
+            # A named feature is the stripped term's as much as a
+            # positional one, and it is the same cell in both: binding
+            # `strip(X).a` binds X's a.
+            new_src_attrs[k] = v
+            new_res_attrs[k] = v
 
     # Trail src.attr_list so backtracking restores the raw values
     eng.trail.trail_psi(src, 'attr_list')
@@ -4978,6 +4983,15 @@ def _try_eval_any_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     # Built-in copy_term
     if _is_copy_term_func(td):
         return _eval_copy_term_func(td)
+
+    # `strip(T)` is T's features under the top sort, and copy_pointer(T)
+    # is T's features under T's own.  Read where a value belongs -- the
+    # `Y : strip(X)` of feature_module's test2 -- they are worth that,
+    # not the call.
+    if _is_strip_func(td):
+        return _eval_strip_or_copy_func(td, eng, False)
+    if _is_copy_pointer_func(td):
+        return _eval_strip_or_copy_func(td, eng, True)
 
     # Built-in cond(C,T,E)
     if _is_cond_builtin_local(td):

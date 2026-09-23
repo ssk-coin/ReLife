@@ -1227,8 +1227,12 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
             _kw = t.type.keyword if t.type else None
             # Use module-qualified name only when display_modules mode is active
             # (enabled by display_modules? directive, as in C Wild Life)
+            # Under display_modules every name is written with the module
+            # it belongs to, the one doing the asking among them: the
+            # interpreter writes `user#foo`, `built_ins#true` and
+            # `syntax#@` alike.
             if (_kw is not None and hasattr(_kw, 'module') and _kw.module is not None
-                    and _kw.module.module_name not in ('user', 'bi', 'syntax', '')
+                    and _kw.module.module_name != ''
                     and getattr(wl, 'display_modules_mode', False)):
                 _print_module_qualified(ps, _kw)
             else:
