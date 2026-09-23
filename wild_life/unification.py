@@ -934,7 +934,8 @@ class Unifier:
         # A variable on the other side is left alone: it takes the call
         # itself, and reading it can wait until something needs the value.
         if self.engine is not None and u is not v:
-            from wild_life.built_ins import _try_eval_any_func as _tef_uc
+            from wild_life.built_ins import (
+                _is_user_function as _iuf_uc, _try_eval_any_func as _tef_uc)
             for _n_uc in range(2):
                 _call_uc = u if _n_uc == 0 else v
                 _other_uc = v if _n_uc == 0 else u
@@ -943,6 +944,11 @@ class Unifier:
                 _kw_uc = (_call_uc.type.keyword
                           if _call_uc.type is not None else None)
                 if _kw_uc is None or _kw_uc.symbol not in _SHAPE_FUNCS_UC:
+                    continue
+                # A program may give one of these names rules of its own --
+                # wam.lf writes `arity(T) -> length(features(T))` -- and
+                # those are worked out where any other call is, not here.
+                if _iuf_uc(_call_uc):
                     continue
                 if (_other_uc.value is None and not _other_uc.attr_list
                         and (_other_uc.type is None or _other_uc.type is WL.top)):

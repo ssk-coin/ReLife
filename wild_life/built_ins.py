@@ -3776,7 +3776,8 @@ def _settle_disj_body_sync(body_d, eng, _depth):
     if not _alts:
         return None
     from wild_life.inference import prove_cond as _pc_dj
-    for _alt_dj in _alts:
+    for _i_dj, _alt_dj in enumerate(_alts):
+        _last_dj = (_i_dj == len(_alts) - 1)
         _a_d = _alt_dj.deref()
         _mark_dj = eng.trail.mark()
         if _a_d.type is eng.wl.such_that:
@@ -3790,15 +3791,18 @@ def _settle_disj_body_sync(body_d, eng, _depth):
                 continue
             # Only a guard that commits settles the body here.  The
             # alternatives after it are choice points in eval_aim, and
-            # there is nowhere to keep them when the value is read out;
-            # a guard ending in a cut takes them away itself, so nothing
-            # is lost.  Without one the call is left to the engine's own
+            # there is nowhere to keep them when the value is read out.
+            # A guard ending in a cut takes them away itself, and the last
+            # alternative has none after it to lose, so for those nothing
+            # is lost.  Otherwise the call is left to the engine's own
             # EVAL goal, which can hold the alternatives.
             from wild_life.inference import _body_has_cut as _bhc_dj
-            if not _bhc_dj(_grd_dj.deref(), eng.wl):
+            if not (_last_dj or _bhc_dj(_grd_dj.deref(), eng.wl)):
                 eng.trail.undo_to(_mark_dj)
                 return None
             _v_dj = _val_dj.deref()
+        elif _last_dj:
+            _v_dj = _a_d
         else:
             eng.trail.undo_to(_mark_dj)
             return None
