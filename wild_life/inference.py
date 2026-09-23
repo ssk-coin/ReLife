@@ -171,6 +171,12 @@ def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
         _mark_non_strict_args(sub, eng, visited)
 
 
+# The built-ins that reach their arguments through C's evaluating deref, so
+# a choice standing in an argument is worked out before they see it.  The
+# ones that use deref_ptr instead -- mresiduate among them -- are handed the
+# choice as it stands, and are not listed here.
+_DEREF_EVAL_BUILTINS = frozenset(('=',))
+
 # Built-ins that print what they are given: their arguments are values.
 _WRITE_BUILTINS = frozenset((
     'write', 'writeq', 'writeln', 'print',
@@ -1919,6 +1925,22 @@ class Engine:
             # that has to wait on a variable — a lazy list building itself —
             # is written out in full rather than as the call.
             _bi_sym = defn.keyword.symbol if defn.keyword else ''
+            # A choice standing where one of these built-ins wants a value
+            # is settled on the argument itself, not by making a copy of the
+            # goal per alternative: c_eval_disjunction binds the disjunction
+            # to one alternative and leaves the rest to come back to, so
+            # everything sharing it follows the choice — the X of
+            # `(X:{40;41;44}) = 41` among them.  The goal goes back on the
+            # stack, so it is asked again once the choice is made.
+            if thegoal.attr_list and _bi_sym in _DEREF_EVAL_BUILTINS:
+                for _k_dj in list(thegoal.attr_list.keys()):
+                    _ad_dj = thegoal.attr_list[_k_dj].deref()
+                    if _ad_dj.type is wl.disjunction and _ad_dj.attr_list:
+                        self.goal_stack = aim.next
+                        self.goal_count += 1
+                        self.push_goal(GoalType.PROVE, thegoal, aim.b, aim.c)
+                        return self.unifier._settle_disjunction(_ad_dj)
+
             # What is written is one term, and a variable standing for a
             # disjunction is worth one alternative at a time: `write(X:{1;2;3})`
             # writes 1 and comes back for 2 and 3, with X worth what was
