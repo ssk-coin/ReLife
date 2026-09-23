@@ -506,7 +506,31 @@ class Parser:
             t.attr_list = dict(t2.attr_list)
             t.attr_list[WL.functor.symbol] = t2
 
+        # `features`, `feature_values` and `str2psi` answer for a module, and
+        # the module they answer for is the one the call is written in, not
+        # the one the goal happens to run under.  read_psi_term hands them
+        # that module here, as a second argument, so a call in one module
+        # sees the features that module sees however far away it is called
+        # from.
+        if (t.type is not None and t.type in self._module_arg_defs()
+                and '2' not in t.attr_list):
+            _mod_arg = PsiTerm()
+            _mod_arg.type = WL.quoted_string
+            _mod_arg.value = WL.current_module.module_name
+            t.attr_list['2'] = _mod_arg
+
         return t
+
+    def _module_arg_defs(self) -> frozenset:
+        """The functions read_psi_term hands the module they are written in."""
+        _defs = getattr(WL, '_module_arg_defs', None)
+        if _defs is None:
+            _defs = frozenset(
+                d for d in (WL.bi_module.symbol_table.get(_n)
+                            for _n in ('features', 'feature_values', 'str2psi'))
+                if d is not None)
+            WL._module_arg_defs = _defs
+        return _defs
 
     def _feature_insert(self, key: str, attr_list: dict,
                         psi: PsiTerm):

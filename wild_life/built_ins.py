@@ -895,19 +895,6 @@ def _proper_list_elems(t: PsiTerm, eng) -> Optional[list]:
         cur = t2.deref()
 
 
-def _feature_defn(eng):
-    """The `features` built-in's own definition, used to ask it a question."""
-    wl = eng.wl
-    for mod in (getattr(wl, 'bi_module', None), getattr(wl, 'syntax_module', None),
-                getattr(wl, 'user_module', None)):
-        if mod is None:
-            continue
-        d = mod.symbol_table.get('features')
-        if d is not None:
-            return d
-    return None
-
-
 def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     """Try to evaluate string built-in functions (psi2str, str2psi, strcon).
 
@@ -1364,10 +1351,13 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             result = eng.wl.make_cons(item, result)
         return result
 
-    elif sym == 'features':
+    elif sym in ('features', 'feature_values'):
         # features(T[, MOD]) -> list of attribute labels (sorted: positional first, then named)
         # If MOD is given, only includes features visible from module MOD,
         # and each named feature is returned as a MOD-qualified atom.
+        # feature_values names the same features and answers what they hold,
+        # as make_feature_list does with its `val` flag.
+        _want_values = (sym == 'feature_values')
         a1 = t.attr_list.get('1')
         if a1 is None:
             return None
@@ -1428,7 +1418,9 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
                 if _km_fv != ctx_mod.module_name:
                     continue
 
-            if is_pos:
+            if _want_values:
+                kterm = a1.attr_list[key]
+            elif is_pos:
                 n = int(key)
                 kterm = wl.make_integer(n)
             else:
@@ -1441,51 +1433,6 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             pair.attr_list = {'1': kterm, '2': lst}
             lst = pair
 
-        return lst
-
-    elif sym == 'feature_values':
-        # feature_values(T[, MOD]) -> the values of T's features, in the same
-        # order features(T) names them.
-        a1 = t.attr_list.get('1')
-        if a1 is None:
-            return None
-        a1 = a1.deref()
-        _a1_ev = _try_eval_string_func(a1, eng)
-        if _a1_ev is not None:
-            a1 = _a1_ev.deref()
-        wl = eng.wl
-        # Ask features() which labels are visible from here, so that a
-        # private feature stays out of both answers alike.
-        _feat_defn = _feature_defn(eng)
-        if _feat_defn is None:
-            return None
-        _feat_call = PsiTerm(type_def=_feat_defn)
-        _feat_call.attr_list = dict(t.attr_list)
-        _feat_call.attr_list['1'] = a1
-        _labels = _try_eval_string_func(_feat_call, eng)
-        _elems = _proper_list_elems(_labels, eng) if _labels is not None else None
-        if _elems is None:
-            return None
-        vals = []
-        for _lab in _elems:
-            _ld = _lab.deref()
-            if _ld.value is not None:
-                _key = (str(int(_ld.value))
-                        if float(_ld.value).is_integer() else str(_ld.value))
-            elif _ld.type is not None and _ld.type.keyword is not None:
-                _key = _ld.type.keyword.symbol
-            else:
-                continue
-            _v = a1.attr_list.get(_key)
-            if _v is not None:
-                vals.append(_v)
-        lst = PsiTerm()
-        lst.type = wl.nil
-        for _v in reversed(vals):
-            pair = PsiTerm()
-            pair.type = wl.alist
-            pair.attr_list = {'1': _v, '2': lst}
-            lst = pair
         return lst
 
     elif sym == 'readf':
