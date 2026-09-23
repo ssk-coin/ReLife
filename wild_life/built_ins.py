@@ -3816,6 +3816,10 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
     # variables — would hand out fresh ones on the next rule.
     for _key in list(t.attr_list.keys()):
         _attr = t.attr_list[_key].deref()
+        # An argument held as it is written stays as it is: the `{ … }` a
+        # grammar rule hands the expander is the goal it was written as.
+        if _attr.flags & QUOTED_TRUE:
+            continue
         _ev = _try_eval_any_func(_attr, eng)
         if _ev is None and _attr.attr_list:
             # Compound arg (e.g. `(CX, NT) & memo_copy(X, Table)` or
@@ -4781,6 +4785,11 @@ def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
     if _depth > 2000:
         return None
 
+    # A term held as it is written is worth itself: nothing inside it is
+    # asked for a value, however much of it reads like a call.
+    if body_d.flags & QUOTED_TRUE:
+        return body_d
+
     # Arithmetic expression?
     ok_a, val = _eval_arith(body_d, eng)
     if ok_a:
@@ -5105,6 +5114,12 @@ def _eval_embedded_user_funcs(
     # ``write(X:`(1+2), eval(X))`` is printed as the sum, not as 3.
     if (td.type is not None and td.type.keyword is not None
             and td.type.keyword.symbol == '`'):
+        return
+    # A choice held as it is written stays whole: the `{ X = strcon(…),
+    # cond(…) }` a grammar rule hands the expander is the goal it was
+    # written as, and reading it here would ask a question the rule has
+    # not come to yet.
+    if (td.flags & QUOTED_TRUE) and td.type is eng.wl.disjunction:
         return
     # Check if this term is a non-strict-first-arg built-in (e.g. setq, assert).
     # For these, skip evaluating argument '1' — it is a function/predicate NAME

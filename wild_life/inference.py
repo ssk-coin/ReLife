@@ -2899,13 +2899,27 @@ class Engine:
         term with its bindings gone — `split(2,[],ll(C,[1|l(C)]))` would see a
         couple whose left feature had become @ again.
         """
+        # A function declared non_strict is handed its arguments as they are
+        # written: check_func reduces them only when evaluate_args says so,
+        # and `transLifeCode({… cond(is_syntactic(X) …)})` is given the goal
+        # a grammar rule wrote, not an answer to it.
+        if (funct.type is not None and hasattr(self, 'non_strict_set')
+                and funct.type in self.non_strict_set):
+            return
         from wild_life.built_ins import (
             _eval_user_func_sync, _is_user_function,
             _try_eval_string_func, _try_eval_arith_to_term,
             _eval_embedded_user_funcs,
         )
+        from wild_life.data_structures import QUOTED_TRUE as _QT_pf
         for _key in list(funct.attr_list.keys()):
             _attr = funct.attr_list[_key].deref()
+            # An argument held as it is written is not reduced: the goal a
+            # grammar rule wrote inside `{ … }` travels through the expander
+            # as the goal, and the `A` of `A point_virgule transLifeCode(B)`
+            # is that goal, not an answer to it.
+            if _attr.flags & _QT_pf:
+                continue
             if _is_user_function(_attr):
                 _evaled = _eval_user_func_sync(_attr, self)
                 if _evaled is not None and _evaled is not _attr:
