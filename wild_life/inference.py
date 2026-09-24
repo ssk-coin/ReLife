@@ -3811,6 +3811,102 @@ class Engine:
         self.push_goal(GoalType.UNIFY, head, rule_head, None)
         return True
 
+    def _expanding_load_on(self) -> bool:
+        """Whether `expand_load` has asked for clauses to be expanded.
+
+        built_ins.lf's first_load reads load_option and takes simple_exp_load
+        over simple_load, which is what makes a grammar rule reach the
+        predicate it is written for rather than piling up as a clause of
+        `-->` itself.  Asked once per file, as first_load asks it.
+        """
+        _bi = self.wl.module_table.get('built_ins')
+        _defn = _bi.symbol_table.get('load_option') if _bi else None
+        if _defn is None:
+            return False
+        from wild_life.built_ins import _persistent_cell
+        _probe = PsiTerm(type_def=_defn)
+        _cell = _persistent_cell(_probe, self)
+        if _cell is None:
+            return False
+        _cd = _cell.deref()
+        return _cd.type is self.wl.true
+
+    def _expand_clause(self, t: PsiTerm):
+        """What term_xpand makes of a clause, as a list of definitions.
+
+        A sort with an expander of its own is rewritten by it; anything else
+        comes back as it went in, which is term_xpand's last alternative.
+        Answers None when the expansion could not be worked out, and the
+        caller files the clause as it stands.
+        """
+        _te = self.wl.module_table.get('term_expansion')
+        _defn = _te.symbol_table.get('term_xpand') if _te else None
+        if _defn is None or not _defn.rule:
+            return None
+        # The expander is given a copy to work from.  Looking a clause over
+        # narrows what it is written with — a global's name in a head is
+        # read for the cell it stands for — and a clause that comes back
+        # unexpanded has to be filed exactly as it was read.
+        from wild_life.unification import copy_term as _ct_xp
+        _work = _ct_xp(t, {})
+        _out = self.wl.make_var()
+        _call = PsiTerm(type_def=_defn)
+        # The clause is data to the expander, not something to work out:
+        # create_global's body is `cond(has_feature(...),...)`, and a call
+        # that evaluated its argument would run the cond while merely
+        # looking the clause over.  C reads the clause off a stream, where
+        # nothing marks it for evaluation; here the quote says the same.
+        from wild_life.data_structures import QUOTED_TRUE as _QT_xp
+
+        _quoted_by_us = []
+
+        def _quote_deep(_n, _seen):
+            _n = _n.deref()
+            if id(_n) in _seen:
+                return
+            _seen.add(id(_n))
+            if not (_n.flags & _QT_xp):
+                _n.flags |= _QT_xp
+                _quoted_by_us.append(_n)
+            for _sub in _n.attr_list.values():
+                _quote_deep(_sub, _seen)
+
+        def _unquote():
+            for _n in _quoted_by_us:
+                _n.flags &= ~_QT_xp
+            del _quoted_by_us[:]
+
+        # The root stays as it is — term_xpand looks the clause up by
+        # `combined_name(A)`, which reads the root functor — while
+        # everything under it is data.  A node the clause already had
+        # quoted stays as it was: a non-strict argument is quoted from the
+        # moment it is read, and unquoting it here would hand the argument
+        # over to be worked out.
+        _seen_xp = set()
+        _seen_xp.add(id(_work.deref()))
+        for _sub_xp in _work.deref().attr_list.values():
+            _quote_deep(_sub_xp, _seen_xp)
+        _call.attr_list = {'1': _work, '2': _out}
+        _cs_before = self.choice_stack
+        _gs_before = self.goal_stack
+        self.goal_stack = None
+        self.push_goal(GoalType.PROVE, _call, _DEFRULES, None)
+        _ok_before = self.main_loop_ok
+        _ok = self.run(cs_barrier=(_cs_before if _cs_before is not None
+                                   else _INNER_RUN_BARRIER))
+        self.main_loop_ok = _ok_before
+        self.choice_stack = _cs_before
+        self.goal_stack = _gs_before
+        _unquote()
+        if not _ok:
+            return None
+        from wild_life.built_ins import _proper_list_elems
+        _res = _out.deref()
+        if _res is _work.deref():
+            return None          # term_xpand's last alternative: A = B
+        _elems = _proper_list_elems(_res, self)
+        return _elems if _elems is not None else [_res]
+
     def load_file(self, filename: str) -> bool:
         """Load a LIFE source file."""
         from wild_life.tokenizer import tokenizer_from_file
@@ -3828,6 +3924,7 @@ class Engine:
         # and puts it back at end of file, so a program that imports a library
         # is still in its own module once the load returns.
         _module_before_load = self.wl.current_module
+        _expanding = self._expanding_load_on()
         try:
             while True:
                 try:
@@ -3845,7 +3942,15 @@ class Engine:
                 if sort == FACT:
                     self.assert_first = False
                     try:
-                        self.assert_clause(t)
+                        _defs = self._expand_clause(t) if _expanding else None
+                        if _defs is None:
+                            self.assert_clause(t)
+                        else:
+                            for _d in _defs:
+                                # An expander hands each clause over under a
+                                # backquote, which is what kept it from being
+                                # worked out while it was being built.
+                                self.assert_clause(_unquote_clause(_d))
                     except SortCycleException:
                         # Cycle in .lf file: write a newline so refout matches
                         # (the C interpreter outputs \n before halting), then exit.
@@ -4169,6 +4274,21 @@ _DEFRULES = object()  # sentinel — same role as DEFRULES macro in C
 # calls eng.run() for a sub-proof.  When cs_barrier is this sentinel (non-None),
 # run() will NOT undo trail entries to position 0 on failure — it only sets
 # main_loop_ok=False and returns False, leaving outer bindings intact.
+def _unquote_clause(t: 'PsiTerm') -> 'PsiTerm':
+    """A clause as an expander hands it over, with its backquotes taken off.
+
+    std_expander builds each clause it generates under a backquote, which is
+    what kept the clause from being worked out while it was being put
+    together; what is asserted is the clause underneath.
+    """
+    t = t.deref()
+    while True:
+        _sym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+        if _sym != '`' or list(t.attr_list.keys()) != ['1']:
+            return t
+        t = t.attr_list['1'].deref()
+
+
 _INNER_RUN_BARRIER = object()
 
 

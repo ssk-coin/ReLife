@@ -192,7 +192,7 @@ def run_repl(
     from wild_life.inference import Engine, DeclarationError
     from wild_life.parser_ import parse_string
     from wild_life.unification import HaltException, AbortException, SortCycleException
-    from wild_life.data_structures import QUERY, FACT, ERROR
+    from wild_life.data_structures import QUERY, FACT, ERROR, DefType
 
     # ---- Initialise runtime (modules, types, operators) --------------------
     if not WL._initialized:
@@ -226,6 +226,23 @@ def run_repl(
     # are put where the rest of the interpreter sees them.  Several of the
     # helpers — prefix, warn, line — are words a program is free to use for
     # something else of its own.
+    # built_ins.lf declares the three names `load` keeps its state in
+    # (`persistent(load_option,top_load,loading)?`, then `load_option <<-
+    # false?`).  We answer load ourselves and never read that file, but
+    # term_expansion.lf writes load_option from expand_load and first_load
+    # reads it back, so the name has to already be a global of the built-in
+    # module when term_expansion.lf is read: a name it meets undeclared
+    # becomes one of its own, and expand_load then writes somewhere nothing
+    # reads.
+    for _global_name in ("load_option", "top_load", "loading"):
+        _global_defn = WL.update_symbol(WL.bi_module, _global_name)
+        _global_defn.type = DefType.FUNCTION
+        _global_defn.is_persistent = True
+        if _global_defn.rule is None:
+            _global_defn.rule = []
+        if _global_defn not in WL.global_defs:
+            WL.global_defs.append(_global_defn)
+
     term_expansion_file = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "term_expansion.lf")

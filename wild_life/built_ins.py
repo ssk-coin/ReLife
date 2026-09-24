@@ -646,6 +646,19 @@ def _eval_arith_comparison(t: PsiTerm, eng) -> Optional[PsiTerm]:
     return _make_atom(eng, 'true' if held else 'false')
 
 
+def _bool_operand(t: PsiTerm, eng) -> PsiTerm:
+    """An operand of a boolean operator, read for what it stands for.
+
+    A `persistent` name stands for what was last written into it wherever it
+    is read, arguments included, which is what makes term_expansion.lf's
+    `load_option <<- assert_rules or expand2file` a question about two stored
+    booleans rather than about two bare names.
+    """
+    if t is None:
+        return t
+    return _stored_side(t, eng) if eng is not None else t.deref()
+
+
 def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
     """Try to evaluate a boolean function application.
 
@@ -662,6 +675,8 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None or a2 is None:
             return None
         # Recursively evaluate args
+        a1 = _bool_operand(a1, eng)
+        a2 = _bool_operand(a2, eng)
         a1 = (_try_eval_bool(a1, eng) or _eval_arith_comparison(a1, eng)
               or _eval_sort_comparison(a1, eng)
               or _eval_bool_builtin(a1, eng) or a1.deref())
@@ -687,6 +702,8 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
         a1, a2 = _get_two_args(t)
         if a1 is None or a2 is None:
             return None
+        a1 = _bool_operand(a1, eng)
+        a2 = _bool_operand(a2, eng)
         a1 = (_try_eval_bool(a1, eng) or _eval_arith_comparison(a1, eng)
               or _eval_sort_comparison(a1, eng)
               or _eval_bool_builtin(a1, eng) or a1.deref())
@@ -712,6 +729,7 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
         a1 = t.attr_list.get('1')
         if a1 is None:
             return None
+        a1 = _bool_operand(a1, eng)
         a1 = (_try_eval_bool(a1.deref(), eng)
               or _eval_arith_comparison(a1, eng)
               or _eval_sort_comparison(a1, eng)
@@ -727,6 +745,8 @@ def _try_eval_bool(t: PsiTerm, eng) -> Optional[PsiTerm]:
         a1, a2 = _get_two_args(t)
         if a1 is None or a2 is None:
             return None
+        a1 = _bool_operand(a1, eng)
+        a2 = _bool_operand(a2, eng)
         a1 = (_try_eval_bool(a1, eng) or _eval_arith_comparison(a1, eng)
               or _eval_sort_comparison(a1, eng)
               or _eval_bool_builtin(a1, eng) or a1.deref())
@@ -6534,7 +6554,7 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
         _wl_nb = eng.wl
         from wild_life.data_structures import SORT_VAR as _SV_NB
         def _bool_arg_ok(t_ok):
-            t_ok = t_ok.deref()
+            t_ok = _bool_operand(t_ok, eng)
             s_ok = _get_sym(t_ok)
             if s_ok in ('true', 'false'):
                 return True
@@ -8761,7 +8781,11 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
             # What is written in is a value, so a comparison written on the
             # right is the answer it gives: structures.lf's
             # `res <<- (S :== true)` stores true or false, not the question.
-            _rhs_sc = _eval_sort_comparison(rhs_d, eng)
+            # A call is likewise asked for its answer, which is what makes
+            # term_expansion.lf's `load_option <<- assert_rules or expand2file`
+            # store true rather than the question it is written as.
+            _rhs_sc = (_eval_sort_comparison(rhs_d, eng)
+                       or _try_eval_any_func(rhs_d, eng))
             if _rhs_sc is not None and _rhs_sc.deref() is not rhs_d:
                 rhs_d = _rhs_sc.deref()
         defn.rule = []          # clear existing rules
@@ -8829,6 +8853,15 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         # and its three arguments away together, and display_persistent
         # writes a ` $` in front of each of them.
         lhs._wl_persistent_written = True
+        # What goes into persistent store is a copy, not the working term:
+        # term_expansion.lf files an expander with
+        # `expansion_methods_table.combined_name(S) <<- (E,T)`, and E and T
+        # are the caller's variables — left shared, the query that made the
+        # entry takes its own bindings back out of the store on the way out
+        # and leaves `(@,@)` behind.
+        from wild_life.unification import copy_term as _ct_pers
+        if rhs_term.attr_list or rhs_term.coref is not None:
+            rhs_term = _ct_pers(rhs_term, {})
         _mark_persistent_deep(rhs_term, set())
     else:
         eng.trail.trail_psi(lhs, 'value')
