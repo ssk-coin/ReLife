@@ -6080,6 +6080,15 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
         # not trigger failure.  Only a standalone {} at argument level fails.
         if td.type is _wl_bi_dn.disjunction:
             return False
+        # A term held as it is written is not worked out, so a `{}` inside it
+        # is part of what is written rather than a call with no answer:
+        # accumulators.lf reads a grammar rule's braces with
+        # `non_strict(transLifeCode)` and `transLifeCode({}) -> fail`.
+        if td.flags & QUOTED_TRUE:
+            return False
+        _ns_dn = getattr(eng, 'non_strict_set', None)
+        if _ns_dn and td.type in _ns_dn:
+            return False
         for _v in td.attr_list.values():
             if _has_disj_nil(_v, _depth + 1):
                 return True

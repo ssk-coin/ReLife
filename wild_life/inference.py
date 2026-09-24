@@ -960,6 +960,11 @@ def _call_is_curried(head: 'PsiTerm', call: 'PsiTerm') -> bool:
     return any(k not in call.attr_list for k in head.attr_list)
 
 
+def wl_disj_nil(eng):
+    """The sort `{}` stands for, read off the engine's runtime."""
+    return eng.wl.disj_nil
+
+
 def _rule_match_status(head: 'PsiTerm', call: 'PsiTerm', eng):
     """Whether this rule applies to the call, cannot, or is not settled yet.
 
@@ -2435,6 +2440,22 @@ class Engine:
             thegoal = _goal_alts[0]
         elif len(_goal_alts) == 0:
             return False  # empty disjunction in argument → fail
+        # `{}` is a choice with nothing to choose, so a call given one as an
+        # argument it works out has nothing to prove: `p({})` fails where
+        # `non_strict(p)` would have handed p the `{}` itself.
+        if (thegoal.attr_list and len(_goal_alts) == 1
+                and not (defn is not None
+                         and hasattr(self, 'non_strict_set')
+                         and defn in self.non_strict_set)):
+            for _dn_a in thegoal.attr_list.values():
+                _dn_d = _dn_a.deref()
+                from wild_life.data_structures import (
+                    QUOTED_TRUE as _QT_dn)
+                if (_dn_d.type is wl.disj_nil and not _dn_d.attr_list
+                        and not (_dn_d.flags & _QT_dn)):
+                    self.goal_stack = aim.next
+                    self.goal_count += 1
+                    return False
 
         # A strict predicate is given values, not calls: reduce a built-in
         # function in an argument before matching, so that a clause body
@@ -2885,6 +2906,18 @@ class Engine:
                 if not ok:
                     self.trail.undo_to(mark)
                 return ok
+        # A choice with nothing to choose is what a call comes to when it has
+        # no value at all, and an equation has no answer then: dichotomy's
+        # `solve(F,A,B) -> cond(F(A)*F(B)>0,{},dichotomy(F,A,B))` answers `{}`
+        # over an interval it cannot bracket a root in, and
+        # `X = solve(poly,-5,4)` says No.  This is about a value worked out,
+        # not about the term `{}` itself -- a rule head may be written with
+        # one, and accumulators.lf's `transLifeCode({})` is matched by it.
+        from wild_life.data_structures import QUOTED_TRUE as _QT_ua
+        _v_d = v.deref()
+        if (_v_d.type is wl_disj_nil(self) and not _v_d.attr_list
+                and not (_v_d.flags & _QT_ua)):
+            return False
         mark = self.trail.mark()
         ok = self.unifier.unify(u, v)
         if not ok:

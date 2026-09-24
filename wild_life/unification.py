@@ -1183,10 +1183,6 @@ class Unifier:
                         _elem0_d._delay_fired = True
                         self._fire_delay_rules(_elem0_d, _elem0_d.type)
                     return True
-                # Fix A: Empty disjunction (disj_nil = bottom type) cannot
-                # be unified with any variable — unify with {} must fail.
-                if v.type is WL.disj_nil:
-                    return False
                 self.bind(u, v)
                 # Fix B: SORT_VAR daemon transfer.
                 # When a SORT_VAR variable u has daemon residuations (from
