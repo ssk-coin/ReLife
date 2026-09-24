@@ -3822,42 +3822,51 @@ class Engine:
             return False
 
         p = Parser(ts)
-        while True:
-            try:
-                term, sort = p.parse()
-            except Exception as e:
-                print(f"*** Syntax error in '{filename}': {e}", file=sys.stderr)
-                break
-
-            if term is None:
-                break
-            t = term.deref()
-            wl = self.wl
-            if t.type is wl.eof:
-                break
-            if sort == FACT:
-                self.assert_first = False
+        # The module a file is read in belongs to the file: `module("abc")?`
+        # written in one says where the rest of that file goes, not where the
+        # reader carries on afterwards.  login.c keeps it in the input state
+        # and puts it back at end of file, so a program that imports a library
+        # is still in its own module once the load returns.
+        _module_before_load = self.wl.current_module
+        try:
+            while True:
                 try:
-                    self.assert_clause(t)
-                except SortCycleException:
-                    # Cycle in .lf file: write a newline so refout matches
-                    # (the C interpreter outputs \n before halting), then exit.
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
-                    raise HaltException(1)
-            elif sort == QUERY:
-                # Execute query; push as goal.  A query in a file runs for its
-                # first solution only: the alternatives it leaves behind are
-                # dropped, so they do not turn the prompt that follows the load
-                # into a '--1>' continuation of the file's last query.
-                _cs_before = self.choice_stack
-                # A query written in a file is given to a non-strict call as
-                # it is written, the same as one typed at the prompt.
-                _mark_non_strict_args(t, self)
-                self.push_goal(GoalType.PROVE, t, _DEFRULES, None)
-                self.run(cs_barrier=_cs_before)
-                self.choice_stack = _cs_before
-                self.goal_stack = None
+                    term, sort = p.parse()
+                except Exception as e:
+                    print(f"*** Syntax error in '{filename}': {e}", file=sys.stderr)
+                    break
+
+                if term is None:
+                    break
+                t = term.deref()
+                wl = self.wl
+                if t.type is wl.eof:
+                    break
+                if sort == FACT:
+                    self.assert_first = False
+                    try:
+                        self.assert_clause(t)
+                    except SortCycleException:
+                        # Cycle in .lf file: write a newline so refout matches
+                        # (the C interpreter outputs \n before halting), then exit.
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                        raise HaltException(1)
+                elif sort == QUERY:
+                    # Execute query; push as goal.  A query in a file runs for its
+                    # first solution only: the alternatives it leaves behind are
+                    # dropped, so they do not turn the prompt that follows the load
+                    # into a '--1>' continuation of the file's last query.
+                    _cs_before = self.choice_stack
+                    # A query written in a file is given to a non-strict call as
+                    # it is written, the same as one typed at the prompt.
+                    _mark_non_strict_args(t, self)
+                    self.push_goal(GoalType.PROVE, t, _DEFRULES, None)
+                    self.run(cs_barrier=_cs_before)
+                    self.choice_stack = _cs_before
+                    self.goal_stack = None
+        finally:
+            self.wl.current_module = _module_before_load
         return True
 
     # ─── main loop ──────────────────────────────────────────────────────────

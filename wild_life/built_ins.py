@@ -1115,7 +1115,11 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
                 return wl.make_number(float(a1.value))
             if defn.is_subtype_of(wl.quoted_string):
                 return _make_string(eng, str(a1.value))
-        return _make_atom(eng, defn.keyword.symbol)
+        # The sort itself, not a name read again: c_root_sort hands back a
+        # term whose type is the term's own, and building a fresh atom out
+        # of the symbol looks it up in whatever module is current, which
+        # turns accumulators#gram_init into an undefined user#gram_init.
+        return PsiTerm(type_def=defn)
 
     elif sym == 'getenv':
         # getenv(Name) is what the environment says Name is worth.  A name the
@@ -12549,6 +12553,14 @@ def register_all(wl) -> None:
                 defn = wl.update_symbol(mod, name)
                 if defn.keyword:
                     defn.keyword.public = True
+                # A name this module took from one it opened is handed on
+                # under this module's own name too: accumulators declares
+                # acc_info public although acc_declarations defines it, and
+                # tokenizer, which opens accumulators, reads it from there.
+                # update_symbol files the name in the module's own table
+                # before linking it to the definition it found, and this is
+                # that filing.
+                mod.symbol_table.setdefault(name, defn)
             i += 1
         return True
     _reg('public', _bi_public)
@@ -12720,7 +12732,6 @@ def register_all(wl) -> None:
         for _n in names:
             if not eng.load_file(_resolve_life_file(_n)):
                 return False
-            wl.current_module = wl.user_module
         _open_defn = wl.update_symbol(wl.bi_module, 'open')
         for _n in names:
             _base = _os_im.path.basename(_n)
