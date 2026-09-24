@@ -2047,8 +2047,6 @@ class Engine:
                         _eeuf_w(_a_w, self, 0, set())
             self.goal_stack = aim.next
             self.goal_count += 1
-            if self.trace:
-                print(f"[trace] prove built-in {defn.keyword.symbol}", file=sys.stderr)
             try:
                 result = defn._builtin_func(thegoal, self)
                 return bool(result)
@@ -2355,10 +2353,6 @@ class Engine:
 
         self.goal_stack = aim.next
         self.goal_count += 1
-
-        if self.trace:
-            sym = defn.keyword.symbol if defn and defn.keyword else '?'
-            print(f"[trace] prove {sym}", file=sys.stderr)
 
         # ── DISJUNCTION EXPANSION IN ACTUAL ARGUMENTS ────────────────────────
         # When any ACTUAL argument of thegoal is a disjunction (e.g. p({1;2;3})?),

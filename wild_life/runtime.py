@@ -205,7 +205,7 @@ class WildLifeRuntime:
         update_symbol(None, name) がそれらのシンボルを参照できるようにする。
         """
         self.user_module = self._create_module("user")
-        self.bi_module = self._create_module("bi")
+        self.bi_module = self._create_module("built_ins")
         self.syntax_module = self._create_module("syntax")
         self.current_module = self.user_module
 
@@ -586,7 +586,10 @@ class WildLifeRuntime:
         # Python dict 挿入順 = op/3 列挙順なので、この順序が厳密に重要。
         # ════════════════════════════════════════════════════════════════════
 
-        op(1200, OT.FY,  "man")       #  1  手引き宣言 (FY = right-assoc prefix)
+        # `man` is declared in built_ins.lf, so it belongs to the built-in
+        # module: a program of its own defining man overrides
+        # built_ins#man, not syntax#man.
+        op(1200, OT.FY,  "man", self.bi_module)   #  1  手引き宣言 (FY = right-assoc prefix)
         op(600,  OT.XFX, "$=<")       #  2  sort value ≤
         op(600,  OT.XFX, "$==")       #  3  sort value ==
         op(900,  OT.FY,  "\\+")       #  4  negation as failure

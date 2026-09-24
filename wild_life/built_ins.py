@@ -10617,17 +10617,27 @@ def bi_alias(goal: PsiTerm, eng) -> bool:
 # trace / notrace / spy / nospy
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _say_trace_state(on: bool) -> None:
+    """Say which way tracing has just been turned, as new_trace says it."""
+    print("*** Tracing is turned %s" % ("on." if on else "off."))
+
+
 def bi_trace(goal: PsiTerm, eng) -> bool:
-    """trace — enable execution tracing."""
-    if not eng.trace:
-        eng.trace = True
-        print("*** Tracing is turned on.", file=sys.stderr)
+    """trace — turn execution tracing the other way.
+
+    toggle_trace calls new_trace(trace?0:1), so asking twice turns it back
+    off, and the answer goes to the ordinary output rather than to the
+    error stream.
+    """
+    eng.trace = not eng.trace
+    _say_trace_state(eng.trace)
     return True
 
 
 def bi_notrace(goal: PsiTerm, eng) -> bool:
-    """notrace — disable execution tracing."""
+    """notrace — turn execution tracing off."""
     eng.trace = False
+    _say_trace_state(False)
     return True
 
 
