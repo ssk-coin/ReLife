@@ -9600,10 +9600,10 @@ def bi_load(goal: PsiTerm, eng) -> bool:
     wl = eng.wl
     delay_count_before = len(wl.delay_rules)
     result = eng.load_file(filename)
-
-    # C版 Wild Life は .lf ファイルのロード後にカレントモジュールを
-    # user モジュールへ戻す。Python 版でも同じ動作を再現する。
-    wl.current_module = wl.user_module
+    # The module is put back by load_file, to the one the reader was in when
+    # the file was opened -- which is not always user: `module("parser")?`
+    # followed by `load("tokenizer")?` carries on in parser, and the opens
+    # that follow belong to parser rather than to whoever asked for it.
 
     # In C Wild Life, load(X) is implemented via user-defined predicates in
     # built_ins.lf: features(X) and load_2/2.  After loading and encode_types(),
