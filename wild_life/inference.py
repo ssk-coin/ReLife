@@ -324,6 +324,13 @@ def _expand_head_disj(head: PsiTerm, wl, depth: int = 0) -> list:
     if head_d.type is wl.disjunction:
         if _disj_is_open(head_d, wl):
             return [head_d]
+        from wild_life.data_structures import QUOTED_TRUE as _QT_ehd
+        if head_d.flags & _QT_ehd:
+            # A quoted choice is data rather than a choice to take: the
+            # braces in `p --> {A = chr(B)}` are how a grammar rule carries
+            # code, and taking the alternative here hands the expander the
+            # code itself, which it then reads as a non-terminal.
+            return [head_d]
         return _collect_disj_elems(head_d, wl)
 
     attr_keys = list(head_d.attr_list.keys())
