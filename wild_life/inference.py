@@ -279,6 +279,35 @@ def _collect_disj_elems(t: PsiTerm, wl) -> list:
     return elems
 
 
+def _disj_is_open(t: PsiTerm, wl) -> bool:
+    """Whether a choice runs out in a variable rather than in `{}`.
+
+    `{A|B}` and `{a;b}` are the same shape -- disj(1 => …,2 => …) -- and
+    only the end tells them apart: the second ends in disj_nil and names
+    two alternatives, the first ends in a variable and is a pattern for a
+    choice with a head and a tail.  Reading a pattern as a list of
+    alternatives makes `transLifeCode({A|B})` into two clauses whose head
+    is a bare variable, and a call then matches itself for ever.
+    """
+    node = t
+    for _ in range(64):
+        node = node.deref()
+        if node.type is None:
+            return True
+        if node.type is wl.disj_nil:
+            return False
+        if node.type is not wl.disjunction:
+            # The spine ends here: a variable is a tail, anything else is
+            # the last alternative.
+            return (node.type is wl.top and not node.attr_list
+                    and node.value is None)
+        tail = node.attr_list.get('2')
+        if tail is None:
+            return False
+        node = tail
+    return False
+
+
 def _expand_head_disj(head: PsiTerm, wl, depth: int = 0) -> list:
     """Expand disjunctions in a head term into a list of alternative terms.
 
@@ -293,6 +322,8 @@ def _expand_head_disj(head: PsiTerm, wl, depth: int = 0) -> list:
     if head_d.type is None:
         return [head_d]
     if head_d.type is wl.disjunction:
+        if _disj_is_open(head_d, wl):
+            return [head_d]
         return _collect_disj_elems(head_d, wl)
 
     attr_keys = list(head_d.attr_list.keys())
