@@ -2136,6 +2136,20 @@ class Engine:
                 return True
             if defn is None:
                 return False
+            if (defn.type is DefType.GLOBAL and not thegoal.attr_list
+                    and thegoal.value is None):
+                # A `global` name standing where a goal is expected is what
+                # it holds, proved in its place: accumulators.lf's grammar
+                # expander writes `gram <- true` and then asks `gram,!` to
+                # tell a grammar rule from an ordinary accumulator one.
+                from wild_life.built_ins import _global_cell as _gc_pg
+                _cell_gl = _gc_pg(thegoal, self)
+                if _cell_gl is not None:
+                    self.goal_stack = aim.next
+                    self.goal_count += 1
+                    self.push_goal(GoalType.PROVE, _cell_gl.deref(),
+                                   _DEFRULES, None)
+                    return True
             if defn.type == DefType.PREDICATE:
                 rules = defn.rule or []
                 if getattr(defn, "is_dynamic", False) and not callable(rules):
