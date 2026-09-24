@@ -435,9 +435,14 @@ class WildLifeRuntime:
 
         # disj_nil: the empty disjunction {}
         # User-facing name is 'disj_nil'; when printing it prints as '{}'.
+        # It stands on its own, as C's `{}` does: nothing puts it under disj.
+        # `{}` is the end of a choice, not a choice of none, and a pattern
+        # for a choice with a head and a tail -- accumulators.lf's
+        # `transLifeCode({A|B})` -- must not match it, or the clause written
+        # for `{}` is never reached.
         self.disj_nil = self.update_symbol(bi, "disj_nil")
         self.disj_nil.type = DefType.TYPE
-        self._make_type_link(self.disj_nil, self.disjunction)
+        self._make_type_link(self.disj_nil, self.top)
 
         # stream
         self.stream = self.update_symbol(bi, "stream")

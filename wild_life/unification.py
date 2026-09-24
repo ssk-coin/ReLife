@@ -1416,13 +1416,32 @@ class Unifier:
                 self._try_sort_narrowing(_u_canon)
             return True
 
+        # `{A|B}` is a pattern for a choice with a head and a tail, not a set
+        # of alternatives: its spine runs out in a variable rather than in
+        # `{}`.  Read as alternatives, accumulators.lf's
+        # `transLifeCode({A|B})` binds neither A nor B, so the code a grammar
+        # rule carries in braces never reaches the clause it expands to, and
+        # `{}` matches that same head instead of `transLifeCode({})`.  Two
+        # choices meeting where one of them is such a pattern are matched by
+        # their features, the way any two terms of one sort are.
+        _disj_pattern = False
+        if u.type is WL.disjunction and v.type is WL.disjunction:
+            from wild_life.inference import _disj_is_open as _dio_uni
+            _disj_pattern = _dio_uni(u, WL) or _dio_uni(v, WL)
+        elif ((u.type is WL.disj_nil and v.type is WL.disjunction)
+                or (v.type is WL.disj_nil and u.type is WL.disjunction)):
+            # `{}` is the end of a choice, not a choice of none: it has no
+            # alternative to take from the choice it meets, so the two are
+            # matched -- and refused -- by their sorts.
+            _disj_pattern = True
+
         # Disjunction × Disjunction: compute cross-product semantic intersection.
         # e.g. {1;2;3} vs {real;int} inside a({1;2;3})=a({real;int}) or reversed.
         # Try each pair (concrete_i, abstract_j); collect successful concrete elements.
         # Push choice points on the "concrete" disjunction so that variable display
         # (via deref of the attr_list entry) updates correctly on each backtrack.
         if (u.type is WL.disjunction and v.type is WL.disjunction and
-                self.engine is not None):
+                not _disj_pattern and self.engine is not None):
             from wild_life.built_ins import _collect_disjunction as _cdisj_cross
             _u_elems = _cdisj_cross(u, self.engine)
             _v_elems = _cdisj_cross(v, self.engine)
@@ -1473,12 +1492,14 @@ class Unifier:
         # Disjunction × concrete: a choice point from disjunction×disjunction
         # expansion fires with unify(u_disj, element).  The element was already
         # vetted during cross-product computation, so just bind u to it directly.
-        if u.type is WL.disjunction and self.engine is not None:
+        if (u.type is WL.disjunction and not _disj_pattern
+                and self.engine is not None):
             self.trail.trail_psi(u, 'coref')
             u.coref = v
             self._wakeup_resid(u, u)
             return True
-        if v.type is WL.disjunction and self.engine is not None:
+        if (v.type is WL.disjunction and not _disj_pattern
+                and self.engine is not None):
             # A term with nothing in it yet follows the disjunction node, so
             # that coming back for the next alternative moves it along and
             # wakes what was waiting on it: magic's squares are bare `int`s,
