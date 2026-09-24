@@ -3833,7 +3833,7 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
         # grammar rule hands the expander is the goal it was written as.
         if _attr.flags & QUOTED_TRUE:
             continue
-        _ev = _try_eval_any_func(_attr, eng)
+        _ev = _try_eval_any_func(_attr, eng, _depth + 1)
         if _ev is None and _attr.attr_list:
             # Compound arg (e.g. `(CX, NT) & memo_copy(X, Table)` or
             # `(B, NT) & copy_body(...)`) — use _eval_body_sync so that
@@ -4937,12 +4937,18 @@ def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
     return body_d
 
 
-def _try_eval_any_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
+def _try_eval_any_func(t: PsiTerm, eng,
+                       _depth: int = 0) -> Optional[PsiTerm]:
     """Try to evaluate t as any functional form (user-defined or built-in).
 
     Returns the evaluated PsiTerm, or None if t is not a functional form
     (or evaluation fails).  Used to eagerly reduce function sub-terms that
     appear in predicate-argument position inside function bodies.
+
+    How far the reduction has already gone is carried through: this is one
+    step of the same chain the caller is in, and starting it again from
+    nothing let a call reduce its own arguments for ever without the depth
+    limit ever coming near.
     """
     if t is None or eng is None:
         return None
@@ -4977,11 +4983,11 @@ def _try_eval_any_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         # -- a body of alternatives among them.
         eng.trail.trail_psi(td, 'coref')
         td.coref = _ap_t
-        return _try_eval_any_func(_ap_t, eng)
+        return _try_eval_any_func(_ap_t, eng, _depth)
 
     # User-defined function
     if _is_user_function(td):
-        return _eval_user_func_sync(td, eng, 0)
+        return _eval_user_func_sync(td, eng, _depth)
 
     # Built-in copy_term
     if _is_copy_term_func(td):
@@ -4998,7 +5004,7 @@ def _try_eval_any_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
 
     # Built-in cond(C,T,E)
     if _is_cond_builtin_local(td):
-        return _eval_body_sync(td, eng, 0)
+        return _eval_body_sync(td, eng, _depth)
 
     # children(X) — returns list of direct sub-sorts
     if _is_children_func(td):
