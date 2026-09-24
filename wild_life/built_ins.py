@@ -2545,6 +2545,14 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     # alone here the same way `_is_user_function` leaves it alone elsewhere;
     # so is a call that reaches itself, which has no value but itself.
     if _is_user_function(t):
+        # A call to a function declared non_strict is not an arithmetic
+        # expression: check_func reduces a call's arguments only when
+        # evaluate_args says so, and reducing `transLifeCode({…})` here to
+        # see whether it comes to a number walks it and point_virgule round
+        # each other until the depth runs out.
+        _ns_ea = getattr(eng, 'non_strict_set', None)
+        if _ns_ea and t.type in _ns_ea:
+            return False, 0.0
         note_persistent_use(t.type, eng)
         active = [(h, b) for (h, b) in t.type.rule if h is not None and b is not None]
         from wild_life.unification import copy_term
@@ -3814,7 +3822,12 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
     # puts the call's arguments back as they were, and an argument whose
     # reduction was a side effect — cb's create_vvars handing out numbered
     # variables — would hand out fresh ones on the next rule.
-    for _key in list(t.attr_list.keys()):
+    # A function declared non_strict is handed its arguments as they are
+    # written: check_func reduces them only when evaluate_args says so.
+    _ns_sync = getattr(eng, 'non_strict_set', None)
+    _strict_args = (() if (_ns_sync and t.type in _ns_sync)
+                    else list(t.attr_list.keys()))
+    for _key in _strict_args:
         _attr = t.attr_list[_key].deref()
         # An argument held as it is written stays as it is: the `{ … }` a
         # grammar rule hands the expander is the goal it was written as.
