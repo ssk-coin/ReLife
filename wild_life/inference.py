@@ -584,6 +584,14 @@ def _eval_body_to_result(branch: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
 
     branch_d = branch.deref()
 
+    # A branch held as it is written is the value: std_expander.lf's
+    # `X comma Y -> cond(X :== succeed, Y, cond(Y :== succeed, X, (X,Y)))`
+    # hands back the code a grammar rule carries, and working it out here
+    # runs that code while the rule is still being compiled.
+    from wild_life.data_structures import QUOTED_TRUE as _QT_br
+    if branch_d.flags & _QT_br:
+        return eng.unifier.unify(result, branch_d)
+
     # Arithmetic?
     arith_ok, arith_val = _eval_arith(branch_d, eng)
     if arith_ok:
@@ -3002,6 +3010,19 @@ class Engine:
             # grammar rule wrote inside `{ … }` travels through the expander
             # as the goal, and the `A` of `A point_virgule transLifeCode(B)`
             # is that goal, not an answer to it.
+            # A backquote's work is done once the term is handed over: what
+            # the call is given is the term itself, held as it is written.
+            # std_expander.lf's `X comma Y` compares X with `succeed`, and a
+            # quote left standing in front of it makes that comparison false
+            # however the code a grammar rule carries came out.
+            if (_attr.type is not None and _attr.type.keyword is not None
+                    and _attr.type.keyword.symbol == '`'
+                    and list(_attr.attr_list.keys()) == ['1']):
+                _inner_bq = _attr.attr_list['1'].deref()
+                _mark_arith_non_strict(_inner_bq)
+                _freeze_calls_deep(_inner_bq, _QT_pf)
+                self.unifier.set_attr(funct, _key, _inner_bq)
+                continue
             if _attr.flags & _QT_pf:
                 continue
             if _is_user_function(_attr):

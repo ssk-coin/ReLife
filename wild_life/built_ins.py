@@ -3934,6 +3934,22 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
         # grammar rule hands the expander is the goal it was written as.
         if _attr.flags & QUOTED_TRUE:
             continue
+        # A backquote's work is done once the term is handed over: what the
+        # call is given is the term itself, held as it is written.
+        # std_expander.lf's `X comma Y` compares X with `succeed`, and a
+        # quote left standing in front of it makes that comparison false
+        # however the code a grammar rule carries came out.
+        if (_attr.type is not None and _attr.type.keyword is not None
+                and _attr.type.keyword.symbol == '`'
+                and list(_attr.attr_list.keys()) == ['1']):
+            from wild_life.inference import (
+                _mark_arith_non_strict as _mans_bq,
+                _freeze_calls_deep as _fcd_bq)
+            _inner_bq = _attr.attr_list['1'].deref()
+            _mans_bq(_inner_bq)
+            _fcd_bq(_inner_bq, QUOTED_TRUE)
+            eng.unifier.set_attr(t, _key, _inner_bq)
+            continue
         _ev = _try_eval_any_func(_attr, eng, _depth + 1)
         if _ev is None and _attr.attr_list:
             # Compound arg (e.g. `(CX, NT) & memo_copy(X, Table)` or
@@ -6045,9 +6061,11 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
 
         `` `(X:f(X)) `` is the term f(X), so it is not reduced to what f
         answers, the way the arithmetic under a backtick is not reduced.
+        A cond is a call like any other: `` `(cond(a,b,c)) `` is that term,
+        and working it out would ask `a` as a goal.
         """
         from wild_life.data_structures import QUOTED_TRUE as _QT_bq
-        if _is_user_function(td):
+        if _is_user_function(td) or _is_cond_builtin_local(td):
             eng.trail.trail_psi(td, 'flags')
             td.flags |= _QT_bq
 
@@ -6200,6 +6218,11 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
     for _cond_side, _other_side in ((b_d, a_d), (a_d, b_d)):
         if not _is_cond_builtin_local(_cond_side):
             continue
+        # A cond written down rather than asked is worth itself:
+        # `Z = `(cond(a,b,c))` hands Z the cond, and working it out would
+        # ask `a` as a goal, which is not what a backquote is for.
+        if _cond_side.flags & QUOTED_TRUE:
+            return _unify(eng, _other_side, _cond_side)
         _cond_arg = (list(_cond_side.attr_list.values()) or [None])[0]
         if _cond_arg is not None and _cond_is_undecided(_cond_arg.deref(), eng):
             # Nothing has said which way it goes, so it is worth itself: the
