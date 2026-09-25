@@ -557,6 +557,20 @@ def _patch_cut_barriers(term: PsiTerm, wl, cut_point, seen=None) -> None:
         _patch_cut_barriers(v, wl, cut_point, seen)
 
 
+def _patch_eval_cut_barriers(eng, body, body_orig, cut_point) -> None:
+    """Give the cut atoms in a copied function body their barrier.
+
+    The answer to "has this body a cut" is the same for every copy, so it is
+    remembered on the stored body the way prove_aim remembers it.
+    """
+    _hc = body_orig.__dict__.get('_wl_has_cut')
+    if _hc is None:
+        _hc = _body_has_cut(body_orig, eng.wl)
+        body_orig._wl_has_cut = _hc
+    if _hc:
+        _patch_cut_barriers(body, eng.wl, cut_point)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Functional cond(C, T, E) evaluator
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3222,12 +3236,19 @@ class Engine:
         # once head matching and the guard both succeed, so the guard is
         # followed by a cut back to this level.
         _rule_cp = None
+        # A `!` written in a rule's guard reaches back to where the call was
+        # made and no further, exactly as one in a predicate's body does.  An
+        # unpatched cut atom carries no barrier at all and empties the whole
+        # choice stack, so the caller's alternatives — `orient(D,K) = in ; …`
+        # in chapla — would go with it.
+        _eval_cut_barrier = self.choice_stack
         if len(active) > 1:
             _rule_cp = self.push_choice_point(GoalType.EVAL, funct, result, active[1:])
 
         _vm: dict = {}
         head = copy_term(head_orig, _vm)
         body = copy_term(body_orig, _vm)
+        _patch_eval_cut_barriers(self, body, body_orig, _eval_cut_barrier)
         _link_head_globals(head, head_orig, self)
 
         # Handle conditional functional rule: body = (value | condition)
@@ -3270,6 +3291,8 @@ class Engine:
                             _vm_st: dict = {}
                             head = copy_term(head_orig, _vm_st)
                             body = copy_term(body_orig, _vm_st)
+                            _patch_eval_cut_barriers(
+                                self, body, body_orig, _eval_cut_barrier)
                             _link_head_globals(head, head_orig, self)
                             body_d = body.deref()
                             val_part  = body_d.attr_list.get('1')
