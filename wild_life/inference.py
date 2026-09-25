@@ -2111,9 +2111,21 @@ class Engine:
                     _eval_embedded_user_funcs as _eeuf_w)
                 for _k_w in list(thegoal.attr_list.keys()):
                     _a_w = thegoal.attr_list[_k_w].deref()
+                    # A built-in call is left to the printer, which already
+                    # asks it for its value; reaching into one here would
+                    # work out its arguments sooner than the call itself
+                    # would, and `write(length(X))` over a list that builds
+                    # itself would read it at the wrong moment.  An equation
+                    # is not a call of that kind — it is the shape the term
+                    # was written in — so what stands inside it is written
+                    # as its value: `write(a = f(1))` prints what f answers.
+                    _a_w_sym = (_a_w.type.keyword.symbol
+                                if (_a_w.type is not None
+                                    and _a_w.type.keyword is not None) else '')
                     if (_a_w.attr_list and not _iuf_w(_a_w)
                             and _a_w.type is not None
-                            and _a_w.type._builtin_func is None):
+                            and (_a_w.type._builtin_func is None
+                                 or _a_w_sym == '=')):
                         _eeuf_w(_a_w, self, 0, set())
             self.goal_stack = aim.next
             self.goal_count += 1
