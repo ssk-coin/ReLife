@@ -96,6 +96,8 @@ _ARITH_OPS_SET = frozenset((
     '\\',
     # Time functions (0-ary arithmetic; always return a number)
     'cpu_time', 'real_time',
+    # Where the choice point stack stands (0-ary; a number)
+    'get_choice',
     # Global integer counter (0-ary; increments each evaluation)
     'genint',
     # Random integer draw (unary)
@@ -116,7 +118,7 @@ def _is_complete_arith_expr(t: 'PsiTerm') -> bool:
     if sym not in _ARITH_OPS_SET:
         return False
     # Nullary operators are always complete
-    if sym in ('cpu_time', 'real_time', 'genint'):
+    if sym in ('cpu_time', 'real_time', 'genint', 'get_choice'):
         return True
     # Unary-only operators: need exactly '1' arg
     # `sign` is not among them: Wild Life leaves the name to the program, and
@@ -923,6 +925,15 @@ def _proper_list_elems(t: PsiTerm, eng) -> Optional[list]:
         cur = t2.deref()
 
 
+def _choice_stamp(eng) -> int:
+    """The number that stands for where the choice point stack is now."""
+    from wild_life.data_structures import ChoicePoint as _CP_cs
+    _cs = getattr(eng, 'choice_stack', None) if eng is not None else None
+    if _cs is not None:
+        return _cs.serial
+    return _CP_cs._serial_counter
+
+
 def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     """Try to evaluate string built-in functions (psi2str, str2psi, strcon).
 
@@ -1559,6 +1570,24 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if val is None:
             return None
         return val.deref()
+
+    elif sym == 'exists_choice':
+        # exists_choice(A,B) — whether a choice point was made after A and no
+        # later than B.  Both numbers come from get_choice.
+        _ec1 = t.attr_list.get('1')
+        _ec2 = t.attr_list.get('2')
+        if _ec1 is None or _ec2 is None:
+            return None
+        _ok1, _v1 = _eval_arith(_ec1.deref(), eng)
+        _ok2, _v2 = _eval_arith(_ec2.deref(), eng)
+        if not (_ok1 and _ok2):
+            return None
+        _g1, _g2 = int(_v1), int(_v2)
+        _cp_ec = getattr(eng, 'choice_stack', None)
+        while _cp_ec is not None and _cp_ec.serial > _g2:
+            _cp_ec = _cp_ec.next
+        _ans_ec = _cp_ec is not None and _cp_ec.serial > _g1
+        return PsiTerm(type_def=(eng.wl.true if _ans_ec else eng.wl.false))
 
     elif sym == 'chr':
         # chr(N) → character string for ASCII code N (uses N mod 256)
@@ -2817,7 +2846,8 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     # cpu_time / real_time / genint) sit past this exit, so they are named
     # here — otherwise none of them would ever be reached.
     _arith_late_syms = frozenset(('strlen', 'asc', 'int', 'real', 'random',
-                                  'cpu_time', 'real_time', 'genint'))
+                                  'cpu_time', 'real_time', 'genint',
+                                  'get_choice'))
     if sym not in _arith_binary_syms and sym not in _arith_late_syms:
         return False, 0.0
     arg1, arg2 = _get_two_args(t)
@@ -2937,6 +2967,13 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     # real_time — 0-ary function returning wall-clock time in seconds
     if sym == 'real_time' and not t.attr_list:
         return True, float(time.time())
+
+    # get_choice — where the choice point stack stands, as the number the
+    # newest choice point was made with.  built_ins.c answers
+    # global_time_stamp-1 for an empty stack, which is a number below every
+    # choice point still to be made.
+    if sym == 'get_choice' and not t.attr_list:
+        return True, float(_choice_stamp(eng))
 
     # genint — 0-ary global integer counter; increments on each evaluation
     if sym == 'genint' and not t.attr_list:
@@ -11963,6 +12000,26 @@ def register_all(wl) -> None:
             eng.non_strict_set.add(arg.type)
         return True
     _reg('non_strict', _bi_non_strict)
+
+    def _bi_set_choice(goal, eng):
+        """set_choice(N): take the choice point stack back to where N was.
+
+        The number comes from an earlier get_choice, and the stack only ever
+        shrinks: every choice point made since is dropped, which is the
+        ancestor cut control.lf's catch/throw is built out of.
+        """
+        arg = goal.attr_list.get('1')
+        if arg is None:
+            return False
+        _ok_sc, _v_sc = _eval_arith(arg.deref(), eng)
+        if not _ok_sc:
+            return False
+        _limit_sc = int(_v_sc)
+        while (eng.choice_stack is not None
+               and eng.choice_stack.serial > _limit_sc):
+            eng.choice_stack = eng.choice_stack.next
+        return True
+    _reg('set_choice', _bi_set_choice)
 
     def _bi_delay_check(goal, eng):
         """delay_check(S, …): hold S's prototype and delay rules until a term
