@@ -947,6 +947,34 @@ def _choice_stamp(eng) -> int:
     return _CP_cs._serial_counter
 
 
+def _psi_root_string(t: PsiTerm, eng) -> Optional[str]:
+    """The string psi2str makes of a term.
+
+    c_psi2string writes a number with %g, a string as itself, and anything
+    else as its root sort's name — so `psi2str(concat(1,2,3))` is "concat"
+    and `psi2str([1,2])` is "cons".
+    """
+    if t is None:
+        return None
+    t = t.deref()
+    # A name written with a backquote stands for the name: preparser.lf asks
+    # `psi2str(` Oper)` for the operator's own spelling.
+    while (t.type is not None and t.type.keyword is not None
+           and t.type.keyword.symbol == '`'
+           and list(t.attr_list) == ['1']):
+        t = t.attr_list['1'].deref()
+    wl = eng.wl
+    if (t.value is not None and t.type is not None
+            and t.type.is_subtype_of(wl.real)):
+        return '%g' % float(t.value)
+    if (t.value is not None and t.type is not None
+            and t.type.is_subtype_of(wl.quoted_string)):
+        return str(t.value)
+    if t.type is not None and t.type.keyword is not None:
+        return t.type.keyword.symbol
+    return None
+
+
 def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     """Try to evaluate string built-in functions (psi2str, str2psi, strcon).
 
@@ -991,7 +1019,9 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         _a1_ev = _try_eval_any_func(a1, eng)
         if _a1_ev is not None:
             a1 = _a1_ev.deref()
-        s = _term_to_display_string(a1, eng)
+        s = _psi_root_string(a1, eng)
+        if s is None:
+            return None
         return _make_string(eng, s)
 
     elif sym == 'current_module':
@@ -12231,7 +12261,9 @@ def register_all(wl) -> None:
         if a1 is None:
             return False
         a1 = a1.deref()
-        s = _term_to_display_string(a1, eng)
+        s = _psi_root_string(a1, eng)
+        if s is None:
+            return False
         result = _make_string(eng, s)
         if a2 is None:
             # Unary form psi2str(T): print and return
