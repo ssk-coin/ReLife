@@ -11681,7 +11681,6 @@ def register_all(wl) -> None:
     _reg('nonvar', bi_nonvar)
     _reg('atom', bi_atom)
     _reg('float', bi_float_check)
-    _reg('integer', bi_integer)
     _reg('number', bi_number)
     _reg('string', bi_string)
     _reg('is_list', bi_is_list)

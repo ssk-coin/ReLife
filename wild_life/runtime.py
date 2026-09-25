@@ -389,17 +389,17 @@ class WildLifeRuntime:
         self.real.type = DefType.TYPE
         self._make_type_link(self.real, self.built_in)
 
-        # int <| real (canonical name is 'int'; 'integer' is a backward-compat alias)
+        # int <| real.  built_ins.c names the sort `int` and nothing else:
+        # `integer` is a name of the user's, undefined until they define it.
         self.integer = self.update_symbol(bi, "int")
         self.integer.type = DefType.TYPE
         self._make_type_link(self.integer, self.real)
-        bi.symbol_table["integer"] = self.integer  # integer -> int alias
 
-        # bool — fourth child of built_in (canonical name; 'boolean' is an alias)
+        # bool — fourth child of built_in.  `boolean` is likewise a name of
+        # the user's, which babel.lf defines as `{yes;no}`.
         self.boolean = self.update_symbol(bi, "bool")
         self.boolean.type = DefType.TYPE
         self._make_type_link(self.boolean, self.built_in)
-        bi.symbol_table["boolean"] = self.boolean  # boolean -> bool alias
 
         # true, false (bool のサブタイプ)
         self.true = self.update_symbol(bi, "true")
