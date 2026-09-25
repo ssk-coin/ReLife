@@ -725,13 +725,17 @@ class Unifier:
         return any(Unifier._cond_asks_a_call(_v, _seen)
                    for _v in t.attr_list.values())
 
-    def _prove_sort_condition(self, t: PsiTerm) -> bool:
+    def _prove_sort_condition(self, t: PsiTerm, _depth: int = 0) -> bool:
         """Prove the membership condition a conditional sort carries.
 
         `zero := I | I = 0.` makes every zero satisfy `I = 0`, so narrowing a
         term to zero has to prove that of the term — and keep what the proof
         binds, which is how `A = zero` answers `A = 0: zero`, and how
         `C = -5` refuses to be positive.
+
+        A sort the definition names carries its own definition too: with
+        `outer := @(i => inner)` and `inner := @(x => 1)`, fetch_def fills
+        the inner in as well, so the i comes out an `inner(x => 1)`.
         """
         from wild_life.data_structures import DefType as _DT_sc
         defn = t.type
@@ -803,9 +807,25 @@ class Unifier:
                             _td_sc.resid = [_R_sc(goal=None, pending=True)]
                         continue
                     return False
-            return True
+            # The sorts the pattern named are filled in after this one, not
+            # while it is being proven: the guard above answers True to any
+            # nested call, so a sub-term asked here would be passed over.
+            _subs_sc = []
+            if _depth < 16:
+                _t_sc = t.deref()
+                for _v_sc in _t_sc.attr_list.values():
+                    _vd_sc = _v_sc.deref()
+                    if (_vd_sc.type is not None
+                            and _vd_sc.type.type is _DT_sc.TYPE
+                            and _vd_sc.type.rule and not _vd_sc.attr_list
+                            and _vd_sc.value is None):
+                        _subs_sc.append(_vd_sc)
         finally:
             self._proving_sort.clear()
+        for _s_sc in _subs_sc:
+            if not self._prove_sort_condition(_s_sc, _depth + 1):
+                return False
+        return True
 
     def _suspend_meet(self, x: PsiTerm):
         """Make a meet wait on the call it names, and stand for its value.
