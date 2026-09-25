@@ -351,7 +351,9 @@ def run_repl(
         sys.stdout.flush()
 
     # ---- Main REPL ---------------------------------------------------------
-    # No initial prompt — the first output comes from the load or the first query.
+    # The prompt comes before the first line is read, as it does before every
+    # line after it: life.c writes one as soon as the banner is out.
+    _write_prompt(0)
     exit_code = 0
     repl_line_number = 0   # running line counter for error messages
 
