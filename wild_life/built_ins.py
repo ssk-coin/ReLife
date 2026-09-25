@@ -6122,12 +6122,12 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
                         (_b_sym_apply == '@' or b_d.type is _wl_uni.apply))
     _a_is_apply_type = (a_d.type is not None and
                         (_a_sym_apply == '@' or a_d.type is _wl_uni.apply))
-    if _is_bare_arith_op(a_d) and _b_is_apply_type and b_d.attr_list:
+    if _is_bare_arith_op(a_d) and (_b_is_apply_type or _is_bare_arith_op(b_d)) and b_d.attr_list:
         import sys as _sys_uni
         _sym_uni = _term_to_str(a_d, eng)
         _sys_uni.stderr.write(f'*** Error: attempt to unify with curried function {_sym_uni}\n')
         return False
-    if _is_bare_arith_op(b_d) and _a_is_apply_type and a_d.attr_list:
+    if _is_bare_arith_op(b_d) and (_a_is_apply_type or _is_bare_arith_op(a_d)) and a_d.attr_list:
         import sys as _sys_uni2
         _sym_uni2 = _term_to_str(b_d, eng)
         _sys_uni2.stderr.write(f'*** Error: attempt to unify with curried function {_sym_uni2}\n')
@@ -8766,7 +8766,8 @@ def _invert_unary_call(known: PsiTerm, call: PsiTerm, eng):
 
 # Two-argument operators that stand for a function until both arguments are
 # there: `and(B)` is waiting for its second, not a term with room for one.
-_CURRIABLE_BINARY_OPS = frozenset(('and', 'or', 'xor')) | _ARITH_OPS_SET
+_CURRIABLE_BINARY_OPS = (frozenset(('and', 'or', 'xor', '==='))
+                         | _ARITH_OPS_SET)
 
 
 def report_static_definition(defn) -> None:
