@@ -1529,6 +1529,15 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             return None
         term = a1.deref()
         feat = a2.deref()
+        # `P.a.d` parses as `(P.a).d`, so the host is itself a dot term: read
+        # it left to right, or the feature is looked for on the unresolved
+        # call rather than on the term it stands for.
+        if (term.type is not None and term.type.keyword is not None
+                and term.type.keyword.symbol == '.'):
+            _host_ev = _try_eval_string_func(term, eng)
+            if _host_ev is None:
+                return None
+            term = _host_ev.deref()
         # Determine the feature key string
         # Note: the integer sort has keyword.symbol == 'int' (not 'integer'),
         # and the real sort has keyword.symbol == 'real'.  When a numeric
