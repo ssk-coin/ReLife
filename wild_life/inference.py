@@ -106,7 +106,12 @@ def _freeze_calls_deep(t: PsiTerm, quoted_flag: int,
             continue
         visited.add(id(node))
         _is_disj = _disj_def is not None and node.type is _disj_def
-        if _iuf_ns(node) or _is_disj or _gs_ns(node) in _SC_ns:
+        # A cond is a call like any other: preparser.lf writes a chain of
+        # `cond(T :== xfx, …)` into the code a grammar rule carries, and
+        # asking it while the rule is being compiled settles it against a T
+        # nothing has bound and loses every branch but the last.
+        _is_cond = _gs_ns(node) == 'cond' and node.attr_list
+        if _iuf_ns(node) or _is_disj or _is_cond or _gs_ns(node) in _SC_ns:
             if not (node.flags & quoted_flag):
                 # Remembered, so that filing the term as a clause can let
                 # its calls go again: what a non-strict call may not work

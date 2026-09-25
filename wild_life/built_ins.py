@@ -4191,22 +4191,12 @@ def _cond_is_undecided(c: 'PsiTerm', eng, _depth: int = 0) -> bool:
             if _may_yet_be_a_number(_v, eng):
                 return True
         return False
-    if sym in _SORT_COMPARISONS and len(c.attr_list) == 2:
-        from wild_life.runtime import WL as _WL_cu
-
-        def _unsaid(x):
-            x = x.deref()
-            return (x.value is None and not x.attr_list
-                    and (x.type is None or x.type is _WL_cu.top))
-
-        _l = c.attr_list.get('1')
-        _r = c.attr_list.get('2')
-        if _l is not None and _r is not None:
-            # `T :== xfx` asks a question nothing has answered yet.  `X :== @`
-            # is a different question — whether X is still a variable — and it
-            # has an answer whatever X turns out to be.
-            if _unsaid(_l) != _unsaid(_r):
-                return _unsaid(_l)
+    # A comparison of sorts always has an answer, whether or not either side
+    # has been said yet: `T :== xfx` on a T nothing has bound is false, since
+    # what T is so far is not xfx.  std_expander.lf's
+    # `X comma Y -> cond(X :== succeed, Y, cond(Y :== succeed, X, (X,Y)))`
+    # is built on that -- it joins two goals before either is worked out --
+    # and a question left open there leaves the cond itself in the clause.
     return False
 
 
