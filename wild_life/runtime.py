@@ -681,7 +681,6 @@ class WildLifeRuntime:
         op(400,  OT.YFX, "rem",    enumerable=False)  # remainder (Prolog)
         op(600,  OT.XFX, "=>",     enumerable=False)  # feature assignment
         op(500,  OT.FX,  "+",      enumerable=False)  # unary plus
-        op(500,  OT.FX,  "-",      enumerable=False)  # unary minus (FX alias)
         # 宣言キーワード (FX prefix; man は上で FY として定義済み)
         op(1200, OT.FX,  "type",   enumerable=False)  # type declaration
         op(1200, OT.FX,  "fun",    enumerable=False)  # function declaration
