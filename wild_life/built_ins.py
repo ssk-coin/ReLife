@@ -2626,6 +2626,12 @@ def _apply_to_call(t: PsiTerm, eng) -> Optional[PsiTerm]:
     if fa is None:
         return None
     fv = fa.deref()
+    # A name handed on as a value keeps its backquote — lists.lf is given
+    # `order => ` $>` — and applying it is applying the name it holds.
+    while (fv.type is not None and fv.type.keyword is not None
+           and fv.type.keyword.symbol == '`'
+           and list(fv.attr_list) == ['1']):
+        fv = fv.attr_list['1'].deref()
     if fv.type is None or _term_is_unbound(fv, eng):
         return None
     call = PsiTerm()
@@ -6381,6 +6387,13 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
         if _functor_arg is None:
             return None
         _functor_val = _functor_arg.deref()
+        # A name handed on as a value keeps its backquote — lists.lf is given
+        # `order => ` $>` — and applying it is applying the name it holds.
+        while (_functor_val.type is not None
+               and _functor_val.type.keyword is not None
+               and _functor_val.type.keyword.symbol == '`'
+               and list(_functor_val.attr_list) == ['1']):
+            _functor_val = _functor_val.attr_list['1'].deref()
         if _term_is_unbound(_functor_val, eng):
             # Functor is unbound — residuate on functor_val so that when A=parse
             # fires, the pending goal X=A(Q) is re-evaluated.
