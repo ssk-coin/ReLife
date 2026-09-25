@@ -253,6 +253,84 @@ def _needs_quoting(s: str) -> bool:
 # Printer state class
 # ─────────────────────────────────────────────────────────────────────────────
 
+class _Tab:
+    """A tabulation mark: one group of items that break together.
+
+    C Wild Life prints a term into memory as a list of items, each tied to a
+    tab, and then works out which tabs to break so the whole thing fits the
+    page.  A broken tab puts every item after the first on a line of its own,
+    lined up under the column the tab was first printed at.
+    """
+
+    __slots__ = ('broken', 'printed', 'column')
+
+    def __init__(self) -> None:
+        self.broken = False
+        self.printed = False
+        self.column = 0
+
+
+def _strpos(pos: int, s: str) -> int:
+    """The column reached after writing s from column pos."""
+    nl = s.rfind('\n')
+    if nl >= 0:
+        return len(s) - nl - 1
+    return pos + len(s)
+
+
+def _work_out_length(items, page_width: int) -> None:
+    """Decide which tabs to break, as print.c's work_out_length does.
+
+    Each pass walks the items as they would be printed and notes the longest
+    line and the outermost tab still whole on it; that tab is broken and the
+    whole thing measured again.  When nothing can be broken any further the
+    line is left long, which is why C's output has lines past the page width.
+    """
+    while True:
+        pos = 0
+        done = True
+        w = -1
+        worst = None
+        root = None
+        for tab, parts in items:
+            if tab.broken and tab.printed:
+                pos = tab.column
+                root = None
+            if not tab.printed:
+                tab.column = pos
+            if not tab.broken:
+                if root is None or root.column >= tab.column:
+                    root = tab
+            pos = _strpos(pos, ''.join(parts))
+            tab.printed = True
+            if pos > page_width:
+                done = False
+            if pos > w:
+                w = pos
+                worst = root
+        for tab, _parts in items:
+            tab.printed = False
+        if done:
+            return
+        if worst is None:
+            return
+        worst.broken = True
+
+
+def _emit_items(items) -> str:
+    """The text of a laid-out item list, as print.c's pretty_output writes it."""
+    out = []
+    for tab, parts in items:
+        if tab.broken and tab.printed:
+            out.append('\n')
+            out.append(' ' * tab.column)
+        out.extend(parts)
+        tab.printed = True
+    for tab, _parts in items:
+        tab.printed = False
+    return ''.join(out)
+
+
 class PrintState:
     """Holds all per-print-call state (replaces C's global print vars)."""
 
@@ -264,14 +342,11 @@ class PrintState:
         self.write_canon: bool = False
         self.write_corefs: bool = True
         self.listing_flag: bool = False
-        self.indent: bool = False
         self.gen_sym_counter: int = 0
         # Maps id(psiterm) -> name string or None
         self.pointer_names: Dict[int, Optional[str]] = {}
         # Maps id(psiterm) -> name string (already printed)
         self.printed_pointers: Dict[int, str] = {}
-        # Buffer for indenting mode
-        self._buf: List[str] = []
         # Column tracking for line-wrapping
         self.col: int = 0
         self.max_col: int = MAX_COL
@@ -284,14 +359,16 @@ class PrintState:
         # Track psi-term ids that were first seen as structural components
         # (i.e. inside another term's attr_list), used by forbid_variables.
         self._structural_ids: Set[int] = set()
+        # The item list the text is built into, one entry per tabulation
+        # mark.  Everything written lands in the last entry; the line breaks
+        # are worked out once the whole term is there.
+        self.root_tab: _Tab = _Tab()
+        self.items: list = [[self.root_tab, []]]
 
     # ─── output helpers ────────────────────────────────────────────────────
 
     def write(self, s: str) -> None:
-        if self.indent:
-            self._buf.append(s)
-        else:
-            self.outfile.write(s)
+        self.items[-1][1].append(s)
         # Track column position
         nl = s.rfind('\n')
         if nl >= 0:
@@ -299,11 +376,35 @@ class PrintState:
         else:
             self.col += len(s)
 
+    def new_tab(self) -> '_Tab':
+        """A fresh tabulation mark, for one bracketed group."""
+        return _Tab()
+
+    def mark_tab(self, tab: '_Tab') -> None:
+        """Start a new item at TAB: a place the group may be broken."""
+        self.items.append([tab, []])
+
+    def laid_out(self) -> str:
+        """Everything written so far, with the line breaks worked out."""
+        _work_out_length(self.items, self.max_col)
+        return _emit_items(self.items)
+
+    def take(self) -> str:
+        """Lay out what has been written and start a fresh stream.
+
+        A listing writes a clause's head and its body as two pieces of text
+        that are put together with the indentation the listing wants, so each
+        is laid out on its own.
+        """
+        text = self.laid_out()
+        self.root_tab = _Tab()
+        self.items = [[self.root_tab, []]]
+        self.col = 0
+        return text
+
     def flush(self) -> None:
-        if self.indent:
-            text = ''.join(self._buf)
-            self.outfile.write(text)
-            self._buf.clear()
+        self.outfile.write(self.laid_out())
+        self.items = [[self.root_tab, []]]
         self.outfile.flush()
 
     # ─── naming helpers ─────────────────────────────────────────────────────
@@ -839,14 +940,12 @@ def _find_improper_tail(start_cell, pointer_names: dict, wl, t_type):
 
 
 def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
-    """Pretty-print a list or disjunction with column-aware wrapping.
+    """Pretty-print a list or disjunction.
 
-    If the entire list fits on the current line (col + flat_length <= max_col),
-    it is printed inline.  Otherwise each element is placed on its own line,
-    indented to align with the first element (one past the opening bracket).
+    The list is one tabulation group: if the line it sits on turns out too
+    long, every element after the first goes on a line of its own, lined up
+    one past the opening bracket.
     """
-    import io
-
     t_type = t.type
 
     if t_type == wl.alist or (wl.alist and t_type and
@@ -860,167 +959,60 @@ def _pretty_list(ps: PrintState, t: 'PsiTerm', depth: int, wl) -> None:
         prefix_str = ''
         open_br, sep, close_br = '[', ',', ']'
 
-    # Column where the opening bracket will land
-    indent_col = ps.col + len(prefix_str) + 1  # align with first element
-
-    # ── helper: iterate over list nodes ───────────────────────────────────────
-    def _iter_list(start):
-        """Yield (arg1, arg2, is_tail) tuples; is_tail=True for the last arg2."""
-        cur = start
-        list_depth = 0
-        while True:
-            if ps.print_depth > 0 and list_depth + 1 >= ps.print_depth:
-                yield None, None, True   # sentinel for "..."
-                return
-            arg1, arg2 = _get_two_args(cur.attr_list)
-            if arg1: arg1 = arg1.deref()
-            if arg2: arg2 = arg2.deref()
-            tid2 = id(arg2) if arg2 is not None else None
-            if arg2 is None:
-                yield arg1, None, True
-                return
-            if tid2 in ps.pointer_names and ps.pointer_names[tid2]:
-                yield arg1, arg2, True   # improper list with named tail
-                return
-            if (arg2.type == wl.nil and not arg2.attr_list) or \
-               (arg2.type == wl.disj_nil and not arg2.attr_list):
-                yield arg1, None, True
-                return
-            if not _check_legal_cons(arg2, t_type):
-                yield arg1, arg2, True   # improper list
-                return
-            yield arg1, None, False
-            cur = arg2
-            list_depth += 1
-
-    # ── flat rendering into a buffer ──────────────────────────────────────────
-    flat_buf = io.StringIO()
-    flat_ps = PrintState(outfile=flat_buf)
-    flat_ps.print_depth = ps.print_depth
-    flat_ps.const_quote = ps.const_quote
-    flat_ps.write_resids = ps.write_resids
-    flat_ps.no_arith_eval = ps.no_arith_eval  # propagate frozen context
-    flat_ps.frozen_arith = ps.frozen_arith
-    flat_ps.write_canon = ps.write_canon
-    flat_ps.listing_flag = ps.listing_flag
-    flat_ps.pointer_names = ps.pointer_names
-    flat_ps.printed_pointers = dict(ps.printed_pointers)
-    flat_ps.col = ps.col + len(prefix_str)  # column just before '['
-    flat_ps.max_col = 10_000                # suppress inner wrapping during probe
-
-    if prefix_str:
-        flat_ps.write(prefix_str)
-    flat_ps.write(open_br)
-
-    # Re-iterate the original term for flat rendering
-    cur = t
-    list_depth_f = 0
-    first_f = True
-    done_f = False
-    t_walk = t
-    while not done_f:
-        if ps.print_depth > 0 and list_depth_f + 1 >= ps.print_depth:
-            if not first_f:
-                flat_ps.write(sep)   # comma before "..."
-            flat_ps.write("...")
-            # If remaining list has an improper/cyclic tail, show "|tail"
-            # C Wild Life always shows the tail even when depth is exhausted.
-            tail_kind, tail_val = _find_improper_tail(t_walk, flat_ps.pointer_names, wl, t_type)
-            if tail_kind == 'named':
-                flat_ps.write("|")
-                flat_ps.write(tail_val)
-            elif tail_kind == 'improper':
-                flat_ps.write("|")
-                _pretty_tag_or_psi_term(flat_ps, tail_val, MAX_PRECEDENCE + 1, depth)
-            done_f = True
-            break
-        arg1, arg2 = _get_two_args(t_walk.attr_list)
-        if arg1: arg1 = arg1.deref()
-        if arg2: arg2 = arg2.deref()
-        if not first_f:
-            flat_ps.write(sep)
-        first_f = False
-        _pretty_tag_or_psi_term(flat_ps, arg1, 999, depth)
-        if arg2 is None:
-            done_f = True
-        else:
-            tid2 = id(arg2)
-            if tid2 in flat_ps.pointer_names and flat_ps.pointer_names[tid2]:
-                flat_ps.write("|")
-                _pretty_tag_or_psi_term(flat_ps, arg2, MAX_PRECEDENCE + 1, depth)
-                done_f = True
-            elif (arg2.type == wl.nil and not arg2.attr_list) or \
-                 (arg2.type == wl.disj_nil and not arg2.attr_list):
-                done_f = True
-            elif not _check_legal_cons(arg2, t_type):
-                flat_ps.write("|")
-                _pretty_tag_or_psi_term(flat_ps, arg2, MAX_PRECEDENCE + 1, depth)
-                done_f = True
-            else:
-                t_walk = arg2
-        list_depth_f += 1
-
-    flat_ps.write(close_br)
-    flat_str = flat_buf.getvalue()
-
-    # ── decide: inline or multi-line ─────────────────────────────────────────
-    if ps.col + len(flat_str) <= ps.max_col:
-        # Fits: write the flat string and sync printed_pointers
-        ps.write(flat_str)
-        ps.printed_pointers.update(flat_ps.printed_pointers)
-        return
-
-    # Multi-line: each element on its own line, indented to indent_col
     if prefix_str:
         ps.write(prefix_str)
     ps.write(open_br)
 
-    t_walk2 = t
-    list_depth2 = 0
-    first2 = True
-    done2 = False
-    while not done2:
-        if ps.print_depth > 0 and list_depth2 + 1 >= ps.print_depth:
-            if not first2:
-                ps.write(sep)   # comma before "..."
+    tab = ps.new_tab()
+    t_walk = t
+    list_depth = 0
+    first = True
+    done = False
+    while not done:
+        if ps.print_depth > 0 and list_depth + 1 >= ps.print_depth:
+            if not first:
+                ps.write(sep)
+            ps.mark_tab(tab)
             ps.write("...")
-            # If remaining list has an improper/cyclic tail, show "|tail"
-            tail_kind2, tail_val2 = _find_improper_tail(t_walk2, ps.pointer_names, wl, t_type)
-            if tail_kind2 == 'named':
+            # If the rest of the list has an improper or cyclic tail, show it:
+            # C Wild Life writes the tail even where the depth has run out.
+            tail_kind, tail_val = _find_improper_tail(
+                t_walk, ps.pointer_names, wl, t_type)
+            if tail_kind == 'named':
                 ps.write("|")
-                ps.write(tail_val2)
-            elif tail_kind2 == 'improper':
+                ps.write(tail_val)
+            elif tail_kind == 'improper':
                 ps.write("|")
-                _pretty_tag_or_psi_term(ps, tail_val2, MAX_PRECEDENCE + 1, depth)
-            done2 = True
+                _pretty_tag_or_psi_term(ps, tail_val, MAX_PRECEDENCE + 1, depth)
             break
-        arg1, arg2 = _get_two_args(t_walk2.attr_list)
-        if arg1: arg1 = arg1.deref()
-        if arg2: arg2 = arg2.deref()
-        if not first2:
+        arg1, arg2 = _get_two_args(t_walk.attr_list)
+        if arg1:
+            arg1 = arg1.deref()
+        if arg2:
+            arg2 = arg2.deref()
+        if not first:
             ps.write(sep)
-            ps.write("\n")
-            ps.write(" " * indent_col)
-        first2 = False
+        ps.mark_tab(tab)
+        first = False
         _pretty_tag_or_psi_term(ps, arg1, 999, depth)
         if arg2 is None:
-            done2 = True
+            done = True
         else:
             tid2 = id(arg2)
             if tid2 in ps.pointer_names and ps.pointer_names[tid2]:
                 ps.write("|")
                 _pretty_tag_or_psi_term(ps, arg2, MAX_PRECEDENCE + 1, depth)
-                done2 = True
+                done = True
             elif (arg2.type == wl.nil and not arg2.attr_list) or \
                  (arg2.type == wl.disj_nil and not arg2.attr_list):
-                done2 = True
+                done = True
             elif not _check_legal_cons(arg2, t_type):
                 ps.write("|")
                 _pretty_tag_or_psi_term(ps, arg2, MAX_PRECEDENCE + 1, depth)
-                done2 = True
+                done = True
             else:
-                t_walk2 = arg2
-        list_depth2 += 1
+                t_walk = arg2
+        list_depth += 1
 
     ps.write(close_br)
 
@@ -1359,63 +1351,26 @@ def _render_one_attr(ps: PrintState, k: str, v, depth: int, cnt: list, wl,
 
 def _pretty_attr(ps: PrintState, attr_list: dict, depth: int, wl,
                  parent_type=None) -> None:
-    """Print attribute list in parenthesized form, with column-aware wrapping.
+    """Print an attribute list in parenthesized form.
 
-    If the flat representation fits on the current line it is printed inline.
-    Otherwise each attribute is placed on its own line, indented to align with
-    the first attribute (one past the opening parenthesis).
+    The whole list is one tabulation group: if the line it sits on turns out
+    too long, every attribute after the first goes on a line of its own,
+    lined up one past the opening parenthesis.  Which groups break is worked
+    out over the finished term rather than here.
     parent_type: optional Definition of the enclosing term's type, used to
                  look up private_feature status of named attributes.
     """
-    import io
     from wild_life.data_structures import featcmp_key
     keys = sorted(attr_list.keys(), key=featcmp_key)
 
-    # Column where the first attribute starts (one past the opening '(')
-    indent_col = ps.col + 1
-
-    # ── flat pass to measure total width ─────────────────────────────────────
-    flat_buf = io.StringIO()
-    flat_ps = PrintState(outfile=flat_buf)
-    flat_ps.print_depth = ps.print_depth
-    flat_ps.const_quote = ps.const_quote
-    flat_ps.write_resids = ps.write_resids
-    flat_ps.no_arith_eval = ps.no_arith_eval  # propagate frozen context
-    flat_ps.frozen_arith = ps.frozen_arith
-    flat_ps.write_canon = ps.write_canon
-    flat_ps.listing_flag = ps.listing_flag
-    flat_ps.pointer_names = ps.pointer_names
-    flat_ps.printed_pointers = dict(ps.printed_pointers)
-    flat_ps.col = ps.col            # column before '('
-    flat_ps.max_col = 10_000        # suppress wrapping in probe pass
-
-    flat_ps.write("(")
-    cnt_f = [1]
-    first_f = True
-    for k in keys:
-        if not first_f:
-            flat_ps.write(",")
-        first_f = False
-        _render_one_attr(flat_ps, k, attr_list[k], depth, cnt_f, wl, parent_type)
-    flat_ps.write(")")
-    flat_str = flat_buf.getvalue()
-
-    # ── decide: inline or multi-line ─────────────────────────────────────────
-    if ps.col + len(flat_str) <= ps.max_col:
-        # Fits on the current line — use the flat string
-        ps.write(flat_str)
-        ps.printed_pointers.update(flat_ps.printed_pointers)
-        return
-
-    # ── multi-line: each attribute on its own line ────────────────────────────
     ps.write("(")
+    tab = ps.new_tab()
     cnt = [1]
     first = True
     for k in keys:
         if not first:
             ps.write(",")
-            ps.write("\n")
-            ps.write(" " * indent_col)
+        ps.mark_tab(tab)
         first = False
         _render_one_attr(ps, k, attr_list[k], depth, cnt, wl, parent_type)
     ps.write(")")
@@ -1463,14 +1418,13 @@ def term_to_string(t: Optional['PsiTerm'], quoted: bool = True,
     ps = PrintState(outfile=buf)
     ps.print_depth = print_depth
     ps.const_quote = quoted
-    ps.indent = False
 
     vt = var_tree or {}
     ps.go_through(t, vt)
     ps.insert_variables(vt, False)
 
     _pretty_tag_or_psi_term(ps, t, MAX_PRECEDENCE + 1, 0, wl)
-    return buf.getvalue()
+    return ps.laid_out()
 
 
 def write_term(t: Optional['PsiTerm'], outfile: IO = None,
@@ -1492,7 +1446,6 @@ def write_term(t: Optional['PsiTerm'], outfile: IO = None,
     ps.const_quote = quoted
     ps.write_canon = canonical
     ps.no_arith_eval = no_arith_eval
-    ps.indent = False
     ps.max_col = max_col
 
     vt = var_tree or {}
@@ -1500,6 +1453,7 @@ def write_term(t: Optional['PsiTerm'], outfile: IO = None,
     ps.insert_variables(vt, False)
 
     _pretty_tag_or_psi_term(ps, t, MAX_PRECEDENCE + 1, 0, wl)
+    outfile.write(ps.laid_out())
 
 
 def print_variables(var_tree: dict, outfile: IO = None,
@@ -1527,7 +1481,6 @@ def print_variables(var_tree: dict, outfile: IO = None,
     ps.print_depth = print_depth
     ps.const_quote = True
     ps.write_resids = True
-    ps.indent = False
 
     # Scan all variables to build pointer_names / printed_pointers
     for name, pterm in var_tree.items():
@@ -1541,73 +1494,53 @@ def print_variables(var_tree: dict, outfile: IO = None,
     if not sorted_names:
         return False
 
-    # ── Render each binding's value to a string ───────────────────────────────
-    # We render to a buffer so we can check total length before deciding
-    # whether to use single-line or multi-line format.
-    # Column offset = len("NAME = ") so that nested lists indent correctly.
-    binding_strs: list = []
+    # ── One item stream, one tab for the bindings ────────────────────────────
+    # C builds the whole answer as items under a single tab and works the
+    # line breaks out over all of it at once, so a value that has to be
+    # broken is broken where it stands rather than rendered on its own.
+    tab = ps.new_tab()
+    first = True
     for name in sorted_names:
         pterm = var_tree[name]
         t = pterm.deref()
+        if not first:
+            ps.write(", ")
+        ps.mark_tab(tab)
+        first = False
+        ps.write(name)
+        ps.write(" = ")
         n2 = ps.printed_pointers.get(id(t))
         if n2 and n2 < name:
-            val_str = n2
-        else:
-            val_buf = io.StringIO()
-            val_ps = PrintState(outfile=val_buf)
-            val_ps.print_depth = print_depth
-            val_ps.const_quote = True
-            val_ps.write_resids = True
-            val_ps.pointer_names = ps.pointer_names
-            val_ps.printed_pointers = dict(ps.printed_pointers)
-            val_ps.col = len(name) + 3   # column just after "NAME = "
-            val_ps.max_col = ps.max_col
-            # Use sprec=700 (the precedence of '=') so that operator expressions
-            # with prec >= 700 (like '->' prec 1200, ',' prec 1000) are
-            # surrounded by parentheses in the "X = VALUE" binding context.
-            #
-            # Backtick-valued variables: decide whether to strip the backtick.
-            # A backtick that was the direct top-level argument to write() is a
-            # sort annotation → strip it (show the inner sort term, e.g. {(a,b,A)}).
-            # A backtick that was only encountered inside a write() context (e.g.
-            # L:`{c,d,L,e} inside an outer `{...}) is a structural value → keep it.
-            _is_backtick = (t.type is not None
-                            and t.type.keyword is not None
-                            and t.type.keyword.symbol == '`')
-            _written_ids = getattr(wl, '_written_backtick_ids', set())
-            if _is_backtick and id(t) not in _written_ids:
-                val_ps.no_arith_eval = True  # keep the backtick visible
-            _pretty_psi_term(val_ps, t, 700, 0, wl)
-            val_ps.no_arith_eval = False   # reset for safety
-            val_str = val_buf.getvalue()
-            # Carry forward any newly named pointers
-            ps.printed_pointers.update(val_ps.printed_pointers)
-        binding_strs.append((name, val_str))
+            ps.write(n2)
+            continue
+        # Use sprec=700 (the precedence of '=') so that operator expressions
+        # with prec >= 700 (like '->' prec 1200, ',' prec 1000) are
+        # surrounded by parentheses in the "X = VALUE" binding context.
+        #
+        # Backtick-valued variables: decide whether to strip the backtick.
+        # A backtick that was the direct top-level argument to write() is a
+        # sort annotation → strip it (show the inner sort term, e.g. {(a,b,A)}).
+        # A backtick that was only encountered inside a write() context (e.g.
+        # L:`{c,d,L,e} inside an outer `{...}) is a structural value → keep it.
+        _is_backtick = (t.type is not None
+                        and t.type.keyword is not None
+                        and t.type.keyword.symbol == '`')
+        _written_ids = getattr(wl, '_written_backtick_ids', set())
+        if _is_backtick and id(t) not in _written_ids:
+            ps.no_arith_eval = True  # keep the backtick visible
+        _pretty_psi_term(ps, t, 700, 0, wl)
+        ps.no_arith_eval = False     # reset for safety
 
-    # ── Decide single-line vs multi-line ──────────────────────────────────────
-    # total = sum of "NAME = VAL" + ", " separators + "." terminator
-    total_len = sum(len(n) + 3 + len(v) for n, v in binding_strs)
-    total_len += 2 * (len(binding_strs) - 1)   # ", " between bindings
-    total_len += 1                              # "." at end
-    # C Wild Life uses an 80-character line limit (not 79) for variable display.
-    _PRINT_VAR_COL = 80
-    multi_line = total_len > _PRINT_VAR_COL or any('\n' in v for _, v in binding_strs)
+    ps.write(".")
+    # Wild Life appends a blank line when the bindings span several lines:
+    # the end of the display is an item of its own under the same tab, so a
+    # broken tab puts a line break in front of it.  The newline that follows
+    # the answer is the caller's.
+    ps.mark_tab(tab)
 
-    # ── Emit ──────────────────────────────────────────────────────────────────
-    for i, (name, val_str) in enumerate(binding_strs):
-        is_last = (i == len(binding_strs) - 1)
-        outfile.write(name)
-        outfile.write(" = ")
-        outfile.write(val_str)
-        if not is_last:
-            outfile.write(", ")
-            if multi_line:
-                outfile.write("\n")
-    outfile.write(".")
-    # Wild Life appends an extra blank line when bindings span multiple lines.
-    if multi_line:
-        outfile.write("\n")
-
+    # C's page limit for the variable display is 80 columns.
+    ps.max_col = 80
+    outfile.write(ps.laid_out())
     return True
 
 

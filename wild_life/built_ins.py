@@ -9985,7 +9985,6 @@ def _rule_to_string(h, b, wl, inline: bool = False):
     # 共有 PrintState: head / body 全体をまとめてスキャン
     ps = PrintState(outfile=io.StringIO())
     ps.const_quote = True
-    ps.indent = False
     # A listing shows the clause as written: `a(1+2).` lists as `a(1 + 2)`,
     # not as the 3 it would evaluate to when the clause is used.
     ps.no_arith_eval = True
@@ -10014,13 +10013,12 @@ def _rule_to_string(h, b, wl, inline: bool = False):
         _pretty_tag_or_psi_term(ps, h, MAX_PRECEDENCE + 1, 0, wl)
     finally:
         ps.write_canon = _was_canon
-    head_str = ps.outfile.getvalue()
+    head_str = ps.take()
 
     body_str = None
     if b is not None:
-        ps.outfile = io.StringIO()
         _pretty_tag_or_psi_term(ps, b, MAX_PRECEDENCE + 1, 0, wl)
-        body_str = ps.outfile.getvalue()
+        body_str = ps.take()
 
     return head_str, body_str
 
