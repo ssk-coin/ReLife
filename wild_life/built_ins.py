@@ -10186,6 +10186,42 @@ _BUILTIN_FUNCTION_SYMS = frozenset((
 ))
 
 
+def _listed_sort_name(sym: str) -> str:
+    """A sort's name as a listing writes it, quoted when it has to be.
+
+    `'Ph.D' <| degree_list.` has to read back as the name it names, so a
+    name that is not a plain word is written in quotes.
+    """
+    from wild_life.print_term import _needs_quoting as _nq_ls
+    if sym and _nq_ls(sym):
+        return "'" + sym.replace("'", "''") + "'"
+    return sym
+
+
+def _sort_decl_to_string(defn, attrs: dict, wl) -> str:
+    """The `:: Sort(features).` line a sort's own features list as.
+
+    The `:: ` is written into the same print state as the term, so the
+    features line up under the sort's opening bracket the way built_ins.lf's
+    listing writes them.
+    """
+    import io as _io_sd
+    from wild_life.print_term import (
+        PrintState, _pretty_tag_or_psi_term, MAX_PRECEDENCE
+    )
+    proto = PsiTerm(type_def=defn)
+    proto.attr_list = dict(attrs)
+    ps = PrintState(outfile=_io_sd.StringIO())
+    ps.const_quote = True
+    ps.no_arith_eval = True
+    ps.go_through(proto)
+    ps.insert_variables({}, False)
+    ps.write(":: ")
+    _pretty_tag_or_psi_term(ps, proto, MAX_PRECEDENCE + 1, 0, wl)
+    ps.write(".")
+    return ps.take()
+
+
 def _bi_listing_one(defn, wl, imported: bool = False) -> None:
     """Helper: list clauses for a single Definition.
 
@@ -10330,6 +10366,20 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
             flush_imported()
             name = defn.keyword.symbol if defn.keyword else '?'
             print()
+            # What the sort says every term of it carries, written as the
+            # declaration that says it: `place := @(city => string, …)` and
+            # `:: place(city => string, …)` both list as the `::` form.
+            _proto_lst = dict(getattr(defn, 'prototype_attrs', None) or {})
+            for _pat, _cond in (defn.rule or []):
+                if _pat is None or _cond is None:
+                    continue
+                if _cond.deref().type is not wl.succeed:
+                    continue
+                _pd_lst = _pat.deref()
+                for _k_lst, _v_lst in _pd_lst.attr_list.items():
+                    _proto_lst.setdefault(_k_lst, _v_lst)
+            if _proto_lst:
+                print(_sort_decl_to_string(defn, _proto_lst, wl))
             for _pat, _cond in (defn.rule or []):
                 if _pat is None or _cond is None:
                     continue
@@ -10352,17 +10402,20 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
                 finally:
                     _pat_d.type, _pat_d.flags = _was_type, _was_flags
                 print(f":: {_pat_str} | {_cond_str or 'succeed'}.")
+            _qname = _listed_sort_name(name)
             if defn.parents:
                 for _parent in defn.parents:
-                    _pname = _parent.keyword.symbol if _parent.keyword else '@'
-                    print(f"{name} <| {_pname}.")
+                    _pname = (_listed_sort_name(_parent.keyword.symbol)
+                              if _parent.keyword else '@')
+                    print(f"{_qname} <| {_pname}.")
             else:
-                print(f"{name} <| @.")
+                print(f"{_qname} <| @.")
             # The sorts that sit under this one are part of what it is, so
             # listing a sort shows them too.
             for _child in getattr(defn, 'children', []):
-                _cname = _child.keyword.symbol if _child.keyword else '@'
-                print(f"{_cname} <| {name}.")
+                _cname = (_listed_sort_name(_child.keyword.symbol)
+                          if _child.keyword else '@')
+                print(f"{_cname} <| {_qname}.")
         elif defn is not None and defn.type == DefType.GLOBAL:
             # C Wild Life lists a global by name only — it does not report the
             # value the cell currently holds.
@@ -11627,8 +11680,8 @@ def register_all(wl) -> None:
     _reg('var', bi_var)
     _reg('nonvar', bi_nonvar)
     _reg('atom', bi_atom)
-    _reg('integer', bi_integer)
     _reg('float', bi_float_check)
+    _reg('integer', bi_integer)
     _reg('number', bi_number)
     _reg('string', bi_string)
     _reg('is_list', bi_is_list)
