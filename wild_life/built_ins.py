@@ -2968,7 +2968,10 @@ def _get_linear_coeff(expr, x_var, eng):
                 return None
             return (c1[0] * v2, c1[1] * v2)
         return None
-    elif sym == '/':
+    elif sym in ('/', '//'):
+        # An integer division reads as a division here; what keeps `3 = A//2`
+        # from answering A = 6 is the caller, which takes the answer only
+        # where it comes to nothing at all.
         if arg1 is None or arg2 is None:
             return None
         ok2, v2 = _eval_arith(arg2, eng)
@@ -3111,6 +3114,11 @@ def _try_solve_nonlinear(expr, x_var, v_lhs, eng):
             if ok1 and v_lhs != 0.0:
                 return v1 / v_lhs
     if sym == '//':
+        # x // x = v → (v-1)*x = 0, so v≠1 leaves x nothing but 0, the same
+        # as for `/`: `24 = B//B` answers B = 0.
+        if (id(arg1.deref()) == id(x_var) and id(arg2.deref()) == id(x_var)
+                and abs(v_lhs - 1.0) > 1e-12):
+            return 0.0
         # a // x = v  →  x, when exactly one integer divisor gives v
         if id(arg2.deref()) == id(x_var):
             ok1, v1 = _eval_arith(arg1, eng)
@@ -3237,7 +3245,7 @@ def _linear_decompose_psi(expr, x_var, eng, wl):
             b_psi = _make_number(eng, v_b * v2) if ok_b else r1[1]
             return (r1[0] * v2, b_psi)
         return None
-    elif sym == '/':
+    elif sym in ('/', '//'):
         if arg1 is None or arg2 is None:
             return None
         ok2, v2 = _eval_arith(arg2, eng)
@@ -3250,6 +3258,25 @@ def _linear_decompose_psi(expr, x_var, eng, wl):
             return (r1[0] / v2, b_psi)
         return None
     return None
+
+
+def _has_int_div(t: 'PsiTerm', _depth: int = 0) -> bool:
+    """Whether a `//` is written anywhere inside the expression.
+
+    An integer division only pins its dividend down where the answer is
+    nothing at all: `0 = A//2` says A is 0, while `3 = A//2` leaves A
+    waiting, since 6 and 7 both divide to 3.
+    """
+    if t is None or _depth > 12:
+        return False
+    t = t.deref()
+    if t.type is not None and t.type.keyword is not None \
+            and t.type.keyword.symbol == '//':
+        return True
+    for _sub in t.attr_list.values():
+        if _has_int_div(_sub, _depth + 1):
+            return True
+    return False
 
 
 def bi_is(goal: PsiTerm, eng) -> bool:
@@ -7124,6 +7151,13 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
                 solved = False
                 if vars_in_expr:
                     ok_lhs, v_lhs = _eval_arith(a_d_final, eng)
+                    # Integer division answers a whole number, so a side with
+                    # a fraction is not something it can come to, whatever
+                    # its arguments: `A = B//B` refuses `A = 24.332` rather
+                    # than solving it for B.
+                    if (ok_lhs and v_lhs != int(v_lhs)
+                            and _get_sym(b_d) == '//'):
+                        return False
                     if ok_lhs and len(vars_in_expr) == 1:
                         x_var = vars_in_expr[0].deref()
                         coeffs = _get_linear_coeff(b_d, x_var, eng)
@@ -7132,6 +7166,9 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
                             # v_lhs = a_coeff * x + b_const  →  x = (v_lhs - b_const) / a_coeff
                             if a_coeff != 0.0:
                                 x_val = (v_lhs - b_const) / a_coeff
+                                if x_val != 0.0 and _has_int_div(b_d):
+                                    coeffs = None   # leave it waiting
+                            if coeffs is not None and a_coeff != 0.0:
                                 x_term = _make_number(eng, x_val)
                                 solved = True
                                 result = _unify(eng, x_var, x_term)
@@ -7182,10 +7219,14 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
                                     if not result:
                                         return False
                                     return True
-                    # Case 1c: v = A/B with both A,B free vars
+                    # Case 1c: v = A/B with both A,B free vars.  An integer
+                    # division is read the same way where the answer it
+                    # forces is nothing at all: `0 = A//B` says A is 0
+                    # whatever B is, while `3 = A//2` leaves A waiting,
+                    # since 6 and 7 both divide to 3.
                     if ok_lhs and len(vars_in_expr) == 2:
                         b_d_sym2 = b_d.type.keyword.symbol if b_d.type and b_d.type.keyword else ''
-                        if b_d_sym2 == '/':
+                        if b_d_sym2 in ('/', '//'):
                             ba1, ba2 = _get_two_args(b_d)
                             if ba1 is not None and ba2 is not None:
                                 ba1_d = ba1.deref()
