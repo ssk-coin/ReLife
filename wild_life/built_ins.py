@@ -970,8 +970,21 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         s = _term_to_display_string(a1, eng)
         return _make_string(eng, s)
 
+    elif sym == 'current_module':
+        # current_module -> the name of the module being read, as a string.
+        # std_expander.lf builds the name of the predicate it generates with
+        # `str2psi(strcon(psi2str(Name),"_traverse"), current_module)`, so a
+        # name left unanswered here files that predicate in whatever module
+        # the call happens to run in rather than the one that asked for it.
+        if t.attr_list or eng is None:
+            return None
+        _cm = eng.wl.current_module
+        if _cm is None:
+            return None
+        return _make_string(eng, _cm.module_name)
+
     elif sym == 'str2psi':
-        # str2psi(S) -> atom from string S
+        # str2psi(S[, M]) -> atom from string S, named in module M
         a1 = t.attr_list.get('1')
         if a1 is None:
             return None
@@ -987,6 +1000,24 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             name = a1.type.keyword.symbol
         else:
             name = _term_to_display_string(a1, eng)
+        # The second argument says which module the name belongs to: the
+        # reader supplies the one the call was written in, and a program may
+        # name another.
+        _mod = None
+        _a2 = t.attr_list.get('2')
+        if _a2 is not None and eng is not None:
+            _a2d = _a2.deref()
+            _a2e = _try_eval_string_func(_a2d, eng)
+            if _a2e is not None:
+                _a2d = _a2e.deref()
+            _mname = None
+            if (_a2d.type is not None and _a2d.type is eng.wl.quoted_string
+                    and _a2d.value is not None):
+                _mname = str(_a2d.value)
+            if _mname:
+                _mod = eng.wl.module_table.get(_mname)
+        if _mod is not None:
+            return eng.wl.make_atom(name, _mod)
         return _make_atom(eng, name)
 
     elif sym == 'strcon':
