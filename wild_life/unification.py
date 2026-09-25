@@ -1452,6 +1452,12 @@ class Unifier:
                 self._wakeup_resid(u, v)
             # Sort narrowing for terms with attributes
             _u_canon = u.deref()
+            # The sorts named inside the bound term get their prototypes, as
+            # they do when the variable is on the other side: a call written
+            # `machine_contient(Contenu:list)` is answered with a list whose
+            # every item carries what its sort promises.
+            if _u_canon.attr_list:
+                self.apply_prototypes_deep(_u_canon)
             # Fire global delay rules for the sort of the term being bound to.
             if WL.delay_rules and self.engine is not None and _u_canon.type is not None and _u_canon.type is not WL.top:
                 # Fire sub-terms first (bottom-up / post-order, matching C Wild Life behaviour).
