@@ -925,6 +925,19 @@ def _proper_list_elems(t: PsiTerm, eng) -> Optional[list]:
         cur = t2.deref()
 
 
+# The string comparisons built_ins.lf defines in LIFE.  They read a string
+# one character at a time by ASCII code, which is what comparing the two
+# Python strings does.
+_STRING_CMP_OPS = {
+    '$==':   lambda a, b: a == b,
+    '$\\==': lambda a, b: a != b,
+    '$=<':   lambda a, b: a <= b,
+    '$<':    lambda a, b: a < b,
+    '$>':    lambda a, b: a > b,
+    '$>=':   lambda a, b: a >= b,
+}
+
+
 def _choice_stamp(eng) -> int:
     """The number that stands for where the choice point stack is now."""
     from wild_life.data_structures import ChoicePoint as _CP_cs
@@ -1570,6 +1583,30 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if val is None:
             return None
         return val.deref()
+
+    elif sym in _STRING_CMP_OPS:
+        # `$==` and the rest compare two strings character by character,
+        # which is what built_ins.lf spells out in LIFE: `S1:string $== S2
+        # :string -> …`.  Only strings have a rule, so anything else is left
+        # as the call it was written as.
+        _sc1 = t.attr_list.get('1')
+        _sc2 = t.attr_list.get('2')
+        if _sc1 is None or _sc2 is None:
+            return None
+        _s1d = _sc1.deref()
+        _s2d = _sc2.deref()
+        _e1 = _try_eval_any_func(_s1d, eng)
+        if _e1 is not None:
+            _s1d = _e1.deref()
+        _e2 = _try_eval_any_func(_s2d, eng)
+        if _e2 is not None:
+            _s2d = _e2.deref()
+        _qs = eng.wl.quoted_string
+        if not (_s1d.type is _qs and _s2d.type is _qs
+                and _s1d.value is not None and _s2d.value is not None):
+            return None
+        _ans_sc = _STRING_CMP_OPS[sym](str(_s1d.value), str(_s2d.value))
+        return PsiTerm(type_def=(eng.wl.true if _ans_sc else eng.wl.false))
 
     elif sym == 'exists_choice':
         # exists_choice(A,B) — whether a choice point was made after A and no
@@ -3604,6 +3641,13 @@ def _get_str_val(t: PsiTerm, eng) -> Optional[str]:
     # Atom: a plain atom has a keyword symbol and no children/value
     if t.type is not None and t.type.keyword is not None and not t.attr_list:
         return t.type.keyword.symbol
+    # A call stands for what it answers, and it is that which is compared:
+    # files.lf asks `substr(File,L,1) $== "/"` about the character, not about
+    # the substr.
+    if eng is not None and t.attr_list:
+        _ev_sv = _try_eval_any_func(t, eng)
+        if _ev_sv is not None and _ev_sv.deref() is not t:
+            return _get_str_val(_ev_sv, eng)
     # Anything else (variable, compound term): cannot compare
     return None
 
