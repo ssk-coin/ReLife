@@ -573,6 +573,8 @@ def _simplify_arith(t: 'PsiTerm', eng) -> 'Optional[PsiTerm]':
         X * 0  →  0        (right-zero / annihilator for *)
         1 * X  →  X        (left-identity for *)
         X * 1  →  X        (right-identity for *)
+        X / 1  →  X        (right-identity for /)
+        X // 1 →  X        (right-identity for //)
 
     Returns a PsiTerm on success, None if no simplification applies.
     """
@@ -615,6 +617,12 @@ def _simplify_arith(t: 'PsiTerm', eng) -> 'Optional[PsiTerm]':
             return arg2.deref()           # 1 * X = X
         if ok2 and v2 == 1.0 and arg1 is not None:
             return arg1.deref()           # X * 1 = X
+    elif sym in ('/', '//'):
+        # Dividing by one leaves the term as it was, and that is the whole
+        # of it: `A = B//1` answers `B = A` rather than waiting on B, and
+        # what B turns out to be is not asked to be a whole number.
+        if ok2 and v2 == 1.0 and arg1 is not None:
+            return arg1.deref()           # X // 1 = X
 
     return None
 
@@ -2246,8 +2254,15 @@ def bi_write_canonical(goal: PsiTerm, eng) -> bool:
         # the arithmetic structure is preserved correctly.
         # For non-backtick terms, evaluate arithmetic first so that
         # e.g. write_canonical(1+2) prints 3 as expected.
-        is_backtick = (arg.type is not None and arg.type.keyword is not None
-                       and arg.type.keyword.symbol == '`')
+        # A term that came in under a backquote is written as it stands.
+        # The backquote itself is gone once the term has been through a
+        # variable -- `B = `(1+2)` leaves B the sum, marked as one not to be
+        # worked out -- so the mark counts for as much as the backquote:
+        # `write_canonical(B)` writes `+(1,2)`, not 3.
+        from wild_life.data_structures import NON_STRICT_TERM as _NST_wc
+        is_backtick = ((arg.type is not None and arg.type.keyword is not None
+                        and arg.type.keyword.symbol == '`')
+                       or bool(arg.flags & (_NST_wc | QUOTED_TRUE)))
         if not is_backtick:
             try:
                 t_eval = _try_eval_arith_to_term(arg, eng)
@@ -7346,15 +7361,6 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
                         # instead of suspending on its remaining free vars.
                         if _report_division_problem(b_d, eng):
                             return False
-                        # `0 // X` is zero for every divisor that divides at
-                        # all, so a free left side takes that value rather than
-                        # suspending on the divisor.
-                        if a_d_is_free and _get_sym(b_d) == '//':
-                            _zd = b_d.attr_list.get('1')
-                            _zd_ok, _zd_v = (_eval_arith(_zd, eng) if _zd is not None
-                                             else (False, 0.0))
-                            if _zd_ok and _zd_v == 0:
-                                return _unify(eng, a_d_final, _make_number(eng, 0.0))
                         # Integer division answers an integer, so a side
                         # that is a number with a fraction cannot be what it
                         # comes to: `A = B//C` refuses `A = 24.332` rather
@@ -7369,6 +7375,20 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
                                     _lv = None
                                 if _lv is not None and _lv != int(_lv):
                                     return False
+                        # `A = 0 // A` answers 0: a division whose divisor is
+                        # the very term it is equated with has nothing left to
+                        # wait for, and no other divisor would make it another
+                        # number.  `A = 0 // B` is a different matter and does
+                        # wait, since B may yet be a zero.
+                        if _get_sym(b_d) == '//':
+                            _zd = b_d.attr_list.get('1')
+                            _zv = b_d.attr_list.get('2')
+                            _zd_ok, _zd_v = (_eval_arith(_zd, eng) if _zd is not None
+                                             else (False, 0.0))
+                            if (_zd_ok and _zd_v == 0 and _zv is not None
+                                    and _zv.deref() is a_d_final.deref()):
+                                return _unify(eng, a_d_final,
+                                              _make_number(eng, 0.0))
                         # `0.5 = sin(B)` says what B is: a function with one
                         # free argument and a known result is read backwards.
                         _inv = _invert_unary_call(a_d, b_d, eng)
