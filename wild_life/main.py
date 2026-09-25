@@ -474,7 +474,7 @@ def run_repl(
             # If this line does not end with '.' or '?', it is the start
             # of a multi-line fact/rule/query.  Read continuation lines,
             # showing '|    ' for each one, until the buffer ends with '.'
-            # or '?', or until EOF / a blank line terminates the input.
+            # or '?', or until EOF.
             _stripped_r = _without_line_comment(line_stripped).rstrip()
             if _stripped_r and not (_stripped_r.endswith('.') or _stripped_r.endswith('?')):
                 _buf = line_stripped
@@ -492,9 +492,11 @@ def run_repl(
                     _cont_s = _cont.strip()
                     if _cont_s:
                         _buf = _buf + '\n' + _cont_s
-                    else:
-                        # Blank continuation line: stop accumulation
-                        break
+                    # A blank line inside a term that has not closed yet is
+                    # whitespace and nothing more: chapla writes its program
+                    # out with a blank line between each group of positions,
+                    # and reading stops at the first of them where C reads on
+                    # to the `?`.
                 line_stripped = _buf
 
             # ---- Parse the input ------------------------------------------
