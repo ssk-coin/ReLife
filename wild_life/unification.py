@@ -414,6 +414,35 @@ def _delay_rules_by_specificity(wl) -> list:
     return result
 
 
+def _sort_prototype(defn) -> Optional[dict]:
+    """The features a sort promises, its own and those of the sorts above it.
+
+    A prototype is inherited: machine.lf says `:: boisson(prix => 5)` and
+    `gini <| boisson`, so every gini has a prix, and `:: objet(quantite =>
+    N:int, prix => real)` reaches both through `boisson <| objet`.  What a
+    sort says of itself wins over what a sort above it says.
+    """
+    if defn is None:
+        return None
+    _own = getattr(defn, 'prototype_attrs', None)
+    if not WL.proto_sorts:
+        return _own
+    merged: dict = dict(_own) if _own else {}
+    seen: set = {id(defn)}
+    queue = list(getattr(defn, 'parents', ()) or ())
+    while queue:
+        _d = queue.pop(0)
+        if _d is None or id(_d) in seen:
+            continue
+        seen.add(id(_d))
+        _p = getattr(_d, 'prototype_attrs', None)
+        if _p:
+            for _k, _v in _p.items():
+                merged.setdefault(_k, _v)
+        queue.extend(getattr(_d, 'parents', ()) or ())
+    return merged or None
+
+
 class Unifier:
     """LIFE言語の単一化エンジン
     C版の global_unify(), global_unify_attr() などに対応 (login.c)
@@ -511,7 +540,7 @@ class Unifier:
         for node in nodes:
             if node.type is None or node.type is WL.top:
                 continue
-            proto = getattr(node.type, 'prototype_attrs', None)
+            proto = _sort_prototype(node.type)
             if not proto:
                 continue
             # A sort under delay_check holds its prototype back while the
@@ -529,6 +558,28 @@ class Unifier:
             for _pk in missing:
                 self.set_attr(node, _pk, copies[_pk])
                 self._settle_disjunction(copies[_pk])
+
+    def _sort_takes_prototype(self, defn) -> bool:
+        """Whether a sort, or one above it, has a `:: Sort(attrs)` prototype.
+
+        A prototype is inherited, so a sort with none of its own still takes
+        the features of the sorts it is under: machine.lf says
+        `:: boisson(prix => 5)` and `gini <| boisson`, and every gini has a
+        prix.
+        """
+        if defn is None or not WL.proto_sorts:
+            return False
+        seen: set = set()
+        queue = [defn]
+        while queue:
+            _d = queue.pop(0)
+            if _d is None or id(_d) in seen:
+                continue
+            seen.add(id(_d))
+            if getattr(_d, 'prototype_attrs', None):
+                return True
+            queue.extend(getattr(_d, 'parents', ()) or ())
+        return False
 
     def _apply_prototype_attrs(self, t: PsiTerm) -> bool:
         """Constrain t's features by the `:: Sort(attrs).` prototype of its sort.
@@ -1227,8 +1278,8 @@ class Unifier:
                 if (not _v_defers and not self._skip_prototypes
                         and _v_canon.type is not None
                         and _v_canon.type is not WL.top
-                        and getattr(_v_canon.type, 'prototype_attrs', None)):
-                    _proto = _v_canon.type.prototype_attrs
+                        and _sort_prototype(_v_canon.type)):
+                    _proto = _sort_prototype(_v_canon.type)
                     # Create fresh copies of ALL prototype attrs using a single
                     # shared var_map so variables shared across attrs (e.g. L in
                     # both length=>L and area=>L*S) remain consistently shared.
@@ -1759,7 +1810,7 @@ class Unifier:
                 if (_side.attr_list and _side.type is not None
                         and _side.type is not WL.top
                         and not getattr(_side, '_proto_applied', False)
-                        and getattr(_side.type, 'prototype_attrs', None)):
+                        and self._sort_takes_prototype(_side.type)):
                     if not self._apply_prototype_attrs(_side):
                         return False
             u = u.deref()
