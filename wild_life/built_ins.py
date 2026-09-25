@@ -2784,6 +2784,10 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         '>>': lambda a, b: float(int(a) >> int(b)),
         '<<': lambda a, b: float(int(a) << int(b)),
     }
+    # `mod` counts whole remainders, so a side with a fraction is not
+    # something it can be asked about: C answers No to `2 mod 1.5`.
+    if sym == 'mod' and ((ok1 and v1 != int(v1)) or (ok2 and v2 != int(v2))):
+        return False, 0.0
     if sym in ('//', '/') and (ok1 or ok2):
         # Dividing by zero, and for integer division a non-integer argument,
         # leave the expression unevaluated and are reported by the caller (see
@@ -7351,6 +7355,20 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
                                              else (False, 0.0))
                             if _zd_ok and _zd_v == 0:
                                 return _unify(eng, a_d_final, _make_number(eng, 0.0))
+                        # Integer division answers an integer, so a side
+                        # that is a number with a fraction cannot be what it
+                        # comes to: `A = B//C` refuses `A = 24.332` rather
+                        # than waiting on B and C for ever.
+                        if _get_sym(b_d) == '//':
+                            _lhs_num = a_d.deref()
+                            if (_lhs_num.value is not None
+                                    and not _lhs_num.attr_list):
+                                try:
+                                    _lv = float(_lhs_num.value)
+                                except (TypeError, ValueError):
+                                    _lv = None
+                                if _lv is not None and _lv != int(_lv):
+                                    return False
                         # `0.5 = sin(B)` says what B is: a function with one
                         # free argument and a known result is read backwards.
                         _inv = _invert_unary_call(a_d, b_d, eng)
