@@ -9762,6 +9762,16 @@ def _resolve_life_file(filename: str) -> str:
     return filename if filename.endswith('.lf') else filename + '.lf'
 
 
+def _announce_load(filename: str) -> None:
+    """Say which file is being read, the way built_ins.lf's load_2 does.
+
+    The line goes out where the reader's prompt was last written, so the
+    prompt and the announcement share a line exactly as they do in the C
+    interpreter.
+    """
+    sys.stdout.write('*** Loading File "%s"\n' % filename)
+
+
 def bi_load(goal: PsiTerm, eng) -> bool:
     """load(File) — load a LIFE source file."""
     arg = _get_one_arg(goal)
@@ -9770,6 +9780,7 @@ def bi_load(goal: PsiTerm, eng) -> bool:
     filename = str(arg.value) if arg.value else (
         arg.type.keyword.symbol if arg.type and arg.type.keyword else '')
     filename = _resolve_life_file(filename)
+    _announce_load(filename)
 
     wl = eng.wl
     delay_count_before = len(wl.delay_rules)
@@ -12902,7 +12913,9 @@ def register_all(wl) -> None:
         if not names:
             return False
         for _n in names:
-            if not eng.load_file(_resolve_life_file(_n)):
+            _path = _resolve_life_file(_n)
+            _announce_load(_path)
+            if not eng.load_file(_path):
                 return False
         _open_defn = wl.update_symbol(wl.bi_module, 'open')
         for _n in names:
