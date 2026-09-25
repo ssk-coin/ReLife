@@ -10222,7 +10222,7 @@ def _sort_decl_to_string(defn, attrs: dict, wl) -> str:
     return ps.take()
 
 
-def _bi_listing_one(defn, wl, imported: bool = False) -> None:
+def _bi_listing_one(defn, wl, imported: bool = False, eng=None) -> None:
     """Helper: list clauses for a single Definition.
 
     imported=True  : 別モジュールからインポートされた述語。
@@ -10249,6 +10249,12 @@ def _bi_listing_one(defn, wl, imported: bool = False) -> None:
         # dynamic(p)? / dynamic(f)? がその例)。宣言のない long.lf の q は
         # ヘッダなしで列挙される。
         print(f"dynamic({func_name})?")
+    # list_special writes back every declaration the definition carries, so a
+    # predicate whose arguments are left as they are written lists with the
+    # `non_strict(P)?` that says so.
+    _ns_lst = getattr(eng, 'non_strict_set', None) if eng is not None else None
+    if _ns_lst and defn in _ns_lst:
+        print(f"non_strict({func_name})?")
 
     for h, b in active_rules:
         head_str, body_str = _rule_to_string(h, b, wl)
@@ -10275,7 +10281,7 @@ def _bi_listing_all(eng, wl) -> None:
             continue
         seen.add(id(defn))
         if defn.rule and defn.type in (DefType.PREDICATE, DefType.FUNCTION):
-            _bi_listing_one(defn, wl)
+            _bi_listing_one(defn, wl, eng=eng)
 
 
 def bi_listing(goal: PsiTerm, eng) -> bool:
@@ -10310,7 +10316,7 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
     def flush_imported():
         """collected imported entries を出力してリセット"""
         for d in imported_pending:
-            _bi_listing_one(d, wl, imported=True)
+            _bi_listing_one(d, wl, imported=True, eng=eng)
         imported_pending.clear()
 
     i = 1
@@ -10359,7 +10365,8 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
                     print(f"% '{func_name}' is a user-defined {_kind_empty} "
                           f"with an empty definition.")
                 else:
-                    _bi_listing_one(defn, wl, imported=False)
+                    _bi_listing_one(defn, wl, imported=False,
+                                    eng=eng)
         elif defn is not None and defn.type == DefType.TYPE:
             # A sort lists as its membership condition, if it was defined with
             # one, followed by the sorts it sits under.
