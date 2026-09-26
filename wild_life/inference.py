@@ -4034,8 +4034,13 @@ class Engine:
         self.goal_stack = None
         self.push_goal(GoalType.PROVE, _call, _DEFRULES, None)
         _ok_before = self.main_loop_ok
-        _ok = self.run(cs_barrier=(_cs_before if _cs_before is not None
-                                   else _INNER_RUN_BARRIER))
+        _xp_before = getattr(self, '_expanding_clause', False)
+        self._expanding_clause = True
+        try:
+            _ok = self.run(cs_barrier=(_cs_before if _cs_before is not None
+                                       else _INNER_RUN_BARRIER))
+        finally:
+            self._expanding_clause = _xp_before
         self.main_loop_ok = _ok_before
         self.choice_stack = _cs_before
         self.goal_stack = _gs_before

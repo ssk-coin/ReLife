@@ -5424,6 +5424,12 @@ def _eval_embedded_user_funcs(
     # not come to yet.
     if (td.flags & QUOTED_TRUE) and td.type is eng.wl.disjunction:
         return
+    # The clause an expander is looking over is data, whatever it holds:
+    # tokenizer.lf's `call_once(read_new_token(Tok, Chars)) = TT` is a goal
+    # the rule will run once it is called, and working it out while the file
+    # is merely being read calls a predicate the file has not defined yet.
+    if (td.flags & QUOTED_TRUE) and getattr(eng, '_expanding_clause', False):
+        return
     # Check if this term is a non-strict-first-arg built-in (e.g. setq, assert).
     # For these, skip evaluating argument '1' — it is a function/predicate NAME
     # that should be looked up, not evaluated as a value.
