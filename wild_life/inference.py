@@ -162,7 +162,10 @@ def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
     if t.type in non_strict:
         from wild_life.data_structures import QUOTED_TRUE as _QT_ns
         for arg in t.attr_list.values():
-            _mark_arith_non_strict(arg)
+            # A sum a non-strict call is handed keeps the calls written in
+            # it: the profiler is given `N * fact(N-1)` as the text of a
+            # rule, not as something to work out.
+            _mark_arith_non_strict(arg, force=True)
             # A call handed to a non-strict predicate is the call, not what
             # it answers: comp_struct's `test(tata +>= toto)` is given the
             # comparison to write out, and asks for its value separately
@@ -222,7 +225,29 @@ def _arith_is_settled(t: PsiTerm, _seen: set = None) -> bool:
     return all(_arith_is_settled(_v, _seen) for _v in t.attr_list.values())
 
 
-def _mark_arith_non_strict(t: PsiTerm, visited: set = None, eng=None) -> None:
+def _arith_holds_user_call(t: PsiTerm, _seen: set = None) -> bool:
+    """Whether a user function's call is written inside an arithmetic term.
+
+    `V1 + V2 * 10^(-L2)` is waiting only on its variables and is worked out
+    the moment they are known, so nothing is gained by holding it.
+    `N * fact(N-1)` is the text of a rule the profiler is rewriting: working
+    it out runs fact and narrows N to a real, and the rule it then asserts
+    reads `fact(real) -> real`.
+    """
+    from wild_life.built_ins import _is_user_function as _iuf_ahc
+    if _seen is None:
+        _seen = set()
+    t = t.deref()
+    if id(t) in _seen:
+        return False
+    _seen.add(id(t))
+    if _iuf_ahc(t):
+        return True
+    return any(_arith_holds_user_call(_v, _seen) for _v in t.attr_list.values())
+
+
+def _mark_arith_non_strict(t: PsiTerm, visited: set = None, eng=None,
+                           force: bool = False) -> None:
     """Recursively mark arithmetic operator psiterms with NON_STRICT_TERM.
 
     Called after head unification for a non-strict predicate so that
@@ -249,12 +274,13 @@ def _mark_arith_non_strict(t: PsiTerm, visited: set = None, eng=None) -> None:
     visited.add(tdid)
     sym = td.type.keyword.symbol if (td.type and td.type.keyword) else ''
     if (sym in _ARITH_OPS_NON_STRICT and td.value is None
-            and _arith_is_settled(td)):
+            and (_arith_is_settled(td)
+                 or (force and _arith_holds_user_call(td)))):
         if eng is not None and not (td.flags & NON_STRICT_TERM):
             eng.trail.trail_psi(td, 'flags')
         td.flags |= NON_STRICT_TERM
     for v in td.attr_list.values():
-        _mark_arith_non_strict(v, visited, eng)
+        _mark_arith_non_strict(v, visited, eng, force)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3949,6 +3975,15 @@ class Engine:
         _vm: dict = {}
         rule_head = copy_term(h0, _vm)
         rule_body = copy_term(b0, _vm)
+        # The copy is quoted, as clause_aim's quote_copy makes it: what
+        # clause/1 and retract/1 hand back is the rule as it is written.
+        # Left unquoted, retracting `fact(N) -> N*fact(N-1)` meets the
+        # stored sum with the one just copied, and two open sums suspend an
+        # equation that narrows N to a real — so the rule the profiler
+        # writes back reads `fact(real) -> real`.
+        from wild_life.built_ins import _bk_mark_quote as _bkq_ca
+        _bkq_ca(rule_head, self)
+        _bkq_ca(rule_body, self)
         self.push_goal(GoalType.UNIFY, body, rule_body, None)
         self.push_goal(GoalType.UNIFY, head, rule_head, None)
         return True

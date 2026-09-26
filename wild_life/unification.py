@@ -1762,7 +1762,8 @@ class Unifier:
         # Neither side is a number yet, so the evaluation above passed them by;
         # compare what they come to instead of their shape.
         if self.engine is not None:
-            from wild_life.data_structures import NON_STRICT_TERM as _NST_AA
+            from wild_life.data_structures import (
+                NON_STRICT_TERM as _NST_AA, QUOTED_TRUE as _QT_AA)
             from wild_life.built_ins import (_ARITH_OPS_SET as _AOS_AA,
                                              _eval_arith as _ea_aa,
                                              _make_number as _mn_aa)
@@ -1781,9 +1782,13 @@ class Unifier:
                 # `+` is not arithmetic at all: what the two sides come to is
                 # not a number, and asking for it matches the rule's head,
                 # which brings two of them together again for ever.
+                # A sum held as it is written is not an equation to suspend
+                # either: clause/1 hands back `N * fact(N-1)` as the text of
+                # a rule, and meeting it with the stored copy would narrow N
+                # to a real.
                 return (sym in _AOS_AA and sym not in _AA_EFFECTFUL
                         and t.value is None and bool(t.attr_list)
-                        and not (t.flags & _NST_AA)
+                        and not (t.flags & (_NST_AA | _QT_AA))
                         and not _iuf_aa(t))
 
             def _is_plain_atom(x):

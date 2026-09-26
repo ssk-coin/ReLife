@@ -7293,7 +7293,10 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
     # predicate — the expression should remain as data, not be evaluated).
     from wild_life.data_structures import NON_STRICT_TERM as _BI_NST
     _b_is_user_fn = (b_d.type is not None and b_d.type.type == DefType.FUNCTION)
-    _b_is_non_strict = bool(b_d.flags & _BI_NST)
+    # A sum held as it is written is not one to work out: clause/1 hands
+    # back `N * fact(N-1)` as the text of a rule, and marking its variables
+    # real makes the profiler write `fact(real) -> real` back.
+    _b_is_non_strict = bool(b_d.flags & (_BI_NST | QUOTED_TRUE))
     # Evaluate 0-arity user functions (global variables like `result`) directly.
     # _eval_user_func_sync makes trailed side-effects (unifying the function atom
     # with its rule head copy).  We save a trail mark, call eval, undo the side
@@ -7370,7 +7373,7 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
         # arithmetic expression (handles  eval(A) = B  or  3+4 = X  style).
         if not _b_is_user_fn:
             _a_sym_lhs = a_d.type.keyword.symbol if (a_d.type and a_d.type.keyword) else ''
-            _a_is_nst_lhs = bool(a_d.flags & _BI_NST)
+            _a_is_nst_lhs = bool(a_d.flags & (_BI_NST | QUOTED_TRUE))
             _a_is_ufn_lhs = (a_d.type is not None and a_d.type.type == DefType.FUNCTION)
             _a_could_eval_lhs = (_a_sym_lhs == 'eval' or
                                  (_a_sym_lhs in _ARITH_OPS_SET
@@ -9062,6 +9065,7 @@ def bi_retract(goal: PsiTerm, eng) -> bool:
       retract(head)             for facts / any rule
     """
     from wild_life.data_structures import GoalType as _GT
+    _bk_mark_quote(goal, eng)
     arg = _get_one_arg(goal)
     if arg is None:
         return False
@@ -9384,6 +9388,37 @@ def bi_setq(goal: PsiTerm, eng) -> bool:
     return True
 
 
+def _bk_mark_quote(t: PsiTerm, eng) -> None:
+    """Hold a whole term as it is written, the way C's bk_mark_quote does.
+
+    clause/1, retract/1 and assert/1 mark their argument before they go
+    looking, so the rule they match against is read as text.  Without it,
+    retracting `fact(N) -> N*fact(N-1)` unifies the stored body with the
+    copy clause/1 just made, and two open sums meeting each other suspend
+    an equation that narrows N to a real — the rule the profiler then
+    writes back reads `fact(real) -> real`.
+
+    The flag is trailed, so a backtrack hands the term back as it was.
+    """
+    if t is None:
+        return
+    _seen: set = set()
+    stack = [t]
+    while stack:
+        node = stack.pop()
+        if node is None:
+            continue
+        node = node.deref()
+        if id(node) in _seen:
+            continue
+        _seen.add(id(node))
+        if not (node.flags & QUOTED_TRUE):
+            if eng is not None:
+                eng.trail.trail_psi(node, 'flags')
+            node.flags |= QUOTED_TRUE
+        stack.extend(node.attr_list.values())
+
+
 def bi_clause(goal: PsiTerm, eng) -> bool:
     """clause(Head) / clause(Head, Body) — non-deterministically match clauses.
 
@@ -9392,6 +9427,7 @@ def bi_clause(goal: PsiTerm, eng) -> bool:
     For clause(Head, Body), unifies Head and Body with each matching clause.
     """
     from wild_life.data_structures import GoalType as _GT
+    _bk_mark_quote(goal, eng)
     args_raw = list(goal.attr_list.values()) if goal.attr_list else []
     if not args_raw:
         return False
