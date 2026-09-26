@@ -835,15 +835,18 @@ def _normalize_arith_in_term(t: PsiTerm, eng, _seen=None) -> PsiTerm:
 
     Used by assert/asserta so that storing ``mynum(N+1)`` where N=31
     stores ``mynum(32)`` (an integer) rather than the expression tree.
-    Avoids infinite loops on cyclic terms via the _seen set.
+
+    What a term reaches twice it reaches twice in the copy: share.lf asserts
+    `spair(X,X)` and reads it back as the one node under two features, and a
+    term that reaches itself is copied once and pointed back at.
     """
     if _seen is None:
-        _seen = set()
+        _seen = {}
     t = t.deref()
     tid = id(t)
-    if tid in _seen:
-        return t
-    _seen.add(tid)
+    _done = _seen.get(tid)
+    if _done is not None:
+        return _done
 
     # If the whole term is an arithmetic expression, evaluate it.  An
     # expression a tag names — the `1+2` of `X:(1+2)` — is not one to work
@@ -853,13 +856,18 @@ def _normalize_arith_in_term(t: PsiTerm, eng, _seen=None) -> PsiTerm:
     if not (t.flags & _NST_NORM):
         arith = _try_eval_arith_to_term(t, eng)
         if arith is not None:
+            _seen[tid] = arith
             return arith
 
     # Otherwise, walk attrs and normalize each child
     if not t.attr_list:
+        _seen[tid] = t
         return t
-    # Build a shallow copy of the compound term with normalized children
+    # Build a shallow copy of the compound term with normalized children.
+    # It goes into the map before the children are walked, so a term that
+    # reaches itself finds the copy rather than walking round again.
     new_t = PsiTerm()
+    _seen[tid] = new_t
     new_t.type = t.type
     new_t.value = t.value
     new_t.flags = t.flags
