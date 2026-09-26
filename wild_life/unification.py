@@ -148,6 +148,25 @@ class Trail:
 
 # ==================== 型の GLB (最大下限) 計算 ====================
 
+def _bare_name_of_function(t: PsiTerm) -> bool:
+    """Whether a function written with no arguments stands for itself.
+
+    `ran -> random(100)` can be asked for a value with nothing written after
+    it, so `X:ran` is a call waiting to become a number.  `fact`, whose every
+    rule is written as `fact(N) -> …`, cannot: the profiler passes it to
+    `private_profile(What, Level)` as the name of the function it is about to
+    rewrite, and a name is not a variable — it does not match `[]`.
+    """
+    _defn = t.type
+    _rules = getattr(_defn, 'rule', None)
+    if not isinstance(_rules, list) or not _rules:
+        return False
+    for _h, _b in _rules:
+        if _h is not None and not _h.deref().attr_list:
+            return False
+    return True
+
+
 def compute_lub(d1: Definition, d2: Definition) -> Optional[Definition]:
     """後方互換のため残す — compute_glb() を使うこと。"""
     return compute_glb(d1, d2)
@@ -1136,14 +1155,16 @@ class Unifier:
             elif (u.value is None and not u.attr_list and not u.resid and
                     not (u.flags & _QUOTED_TRUE) and
                     u.type is not None and u.type.type == DefType.FUNCTION and
-                    u.type._builtin_func is None):
+                    u.type._builtin_func is None
+                    and not _bare_name_of_function(u)):
                 u_is_var = True
             if v.flags & _SORT_VAR and not v.attr_list:
                 v_is_var = True
             elif (v.value is None and not v.attr_list and not v.resid and
                     not (v.flags & _QUOTED_TRUE) and
                     v.type is not None and v.type.type == DefType.FUNCTION and
-                    v.type._builtin_func is None):
+                    v.type._builtin_func is None
+                    and not _bare_name_of_function(v)):
                 v_is_var = True
 
         # A variable meeting a sum is given what the sum comes to, whichever

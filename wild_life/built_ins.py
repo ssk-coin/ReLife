@@ -6070,6 +6070,38 @@ def _expand_disjunctions_in_place(lhs: PsiTerm, rhs: PsiTerm, eng,
     return True
 
 
+def _rules_may_yield_disjunction(defn, wl, _depth: int = 0) -> bool:
+    """Whether a function's rules could hand back a disjunction.
+
+    `sgn -> {1;-1}` can, so `3 * sgn` is worth reducing before the
+    alternatives are spread out.  `fact(N) -> N*fact(N-1)` cannot, and
+    asking it anyway runs the function to find out — which, while the
+    profiler is halfway through replacing fact's own rules, never ends.
+    """
+    if _depth > 3:
+        return False
+    rules = getattr(defn, 'rule', None)
+    if not isinstance(rules, list) or not rules:
+        return False
+    for _h, _b in rules:
+        if _b is None:
+            continue
+        _bd = _b.deref()
+        if _bd.type is wl.such_that and '1' in _bd.attr_list:
+            _bd = _bd.attr_list['1'].deref()
+        if _bd.type is wl.disjunction or _bd.type is wl.life_or:
+            return True
+        # A value that is a call of its own stands for whatever that call
+        # comes to, a choice among alternatives included.
+        _sub_defn = _bd.type
+        if (_sub_defn is not None and _sub_defn is not defn
+                and _sub_defn.type == DefType.FUNCTION
+                and _sub_defn._builtin_func is None
+                and _rules_may_yield_disjunction(_sub_defn, wl, _depth + 1)):
+            return True
+    return False
+
+
 def _inline_disjunctive_funcs(t: PsiTerm, eng, depth: int = 0,
                              visited: set = None) -> bool:
     """Replace sub-terms of t that are functions reducing to a disjunction.
@@ -6080,6 +6112,12 @@ def _inline_disjunctive_funcs(t: PsiTerm, eng, depth: int = 0,
     the coref linking the function atom to its rule-head copy.
     """
     if depth > 20 or not t.attr_list:
+        return False
+    # A term held as it is written is not asked what it comes to, not even
+    # to find out whether it is a disjunction: the profiler is handed
+    # `N * fact(N-1)` as the text of a rule it is rewriting, and fact's own
+    # rules are half replaced while it does so.
+    if t.flags & (QUOTED_TRUE | _NST_SWAP):
         return False
     # A term whose parts point at one another — matrix's grid of squares —
     # is walked once, not once per path that reaches each square.
@@ -6092,7 +6130,14 @@ def _inline_disjunctive_funcs(t: PsiTerm, eng, depth: int = 0,
     changed = False
     for key in list(t.attr_list.keys()):
         sub = t.attr_list[key].deref()
-        if _is_user_function(sub):
+        # A call held as it is written is not asked what it comes to, not
+        # even to find out whether it is a disjunction: the profiler is
+        # handed `N * fact(N-1)` as the text of a rule it is rewriting, and
+        # fact's own rules are half replaced while it does so.
+        if sub.flags & (QUOTED_TRUE | _NST_SWAP):
+            continue
+        if _is_user_function(sub) and _rules_may_yield_disjunction(
+                sub.type, wl):
             # Reduce a copy: _eval_user_func_sync rewrites its argument's
             # features in place, which is not undone by the trail.
             probe = PsiTerm(type_def=sub.type, value=sub.value,
