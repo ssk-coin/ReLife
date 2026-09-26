@@ -8736,9 +8736,17 @@ def _collect_solutions(template: PsiTerm, g: PsiTerm, eng) -> list:
     eng.goal_stack = None
     eng.push_goal(GoalType.PROVE, goal_copy, _DEFRULES_SENTINEL, None)
 
+    # The collection runs against a barrier of its own: without one, the run
+    # that finds no more solutions undoes the whole trail — the bindings the
+    # caller made before the bagof among them — and leaves the engine with
+    # main_loop_ok false, so the goals after the bagof never run.
+    from wild_life.inference import _INNER_RUN_BARRIER as _IRB_cs
+    _barrier_cs = cp_save if cp_save is not None else _IRB_cs
+    _ok_save = eng.main_loop_ok
+
     collected = []
     while True:
-        result = eng.run()
+        result = eng.run(cs_barrier=_barrier_cs)
         if result:
             # Copy template_copy with current bindings resolved.  A template
             # written as a call through a functor variable — `bagof(F(5),q(F))`
@@ -8789,6 +8797,7 @@ def _collect_solutions(template: PsiTerm, g: PsiTerm, eng) -> list:
     eng.trail.undo_to(mark)
     eng.choice_stack = cp_save
     eng.goal_stack = gs_save
+    eng.main_loop_ok = _ok_save
     # C Wild Life collects solutions via LIFO (last-in-first-out) internally,
     # yielding results in reverse exploration order.  Reverse here to match.
     collected.reverse()
