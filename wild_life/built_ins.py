@@ -1942,6 +1942,51 @@ def _eval_and_conjunction(t: PsiTerm, eng) -> Optional[PsiTerm]:
     return _r
 
 
+def _hoist_arith_calls(t: PsiTerm, goal: PsiTerm, eng) -> bool:
+    """Run the calls written inside a sum as goals of their own.
+
+    `_B = _A * fact(_A - 1)` is a number once fact has answered.  Reducing
+    the call on the spot works while its rules are simple, but the profiler
+    rewrites fact into a rule whose guard counts through persistent cells,
+    and that only runs on the goal stack.  Each call is put in a variable,
+    an eval goal is pushed for it, and the equation is proved again once
+    the variables hold numbers.
+
+    Returns whether anything was hoisted.
+    """
+    _calls: list = []
+
+    def _find(n, _seen):
+        n = n.deref()
+        if id(n) in _seen:
+            return
+        _seen.add(id(n))
+        if _get_sym(n) in _ARITH_OPS_SET and n.attr_list:
+            for _k in ('1', '2'):
+                _sub = n.attr_list.get(_k)
+                if _sub is None:
+                    continue
+                _sd = _sub.deref()
+                if _is_user_function(_sd) and _sd.attr_list:
+                    _calls.append((n, _k, _sd))
+                else:
+                    _find(_sd, _seen)
+
+    _find(t, set())
+    if not _calls:
+        return False
+    for _host, _key, _call in _calls:
+        _slot = PsiTerm(type_def=eng.wl.top)
+        eng.unifier.set_attr(_host, _key, _slot)
+    # The equation is proved again after the calls have answered, so it is
+    # pushed first and they go on top of it.
+    eng.push_goal(GoalType.PROVE, goal, _DEFRULES_SENTINEL, None)
+    for _host, _key, _call in reversed(_calls):
+        eng.push_goal(GoalType.EVAL, _call, _host.attr_list[_key].deref(),
+                      _call.type.rule)
+    return True
+
+
 def _has_concrete_non_numeric_arg(t: PsiTerm, eng) -> bool:
     """Return True if any immediate argument of arithmetic term t is a
     concrete non-numeric atom (i.e. not an unbound variable, not a number).
@@ -7675,6 +7720,16 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
                     # Re-suspension is correct even for is_resid_refiring cases:
                     # drop only when truly cyclic (a_coeff==1 with no const solution).
                     if not vars_in_expr:
+                        # A call written inside a sum is not a non-numeric
+                        # argument: it is a call, and the number it answers
+                        # is what the sum works on.  C evaluates the
+                        # arguments of `*` before the multiplication, and
+                        # the profiler's `_B = _A * fact(_A - 1)` only comes
+                        # out as a number because it does.  A call whose
+                        # rules are too involved to work out on the spot is
+                        # put in a variable and run as a goal of its own.
+                        if _hoist_arith_calls(b_d, goal, eng):
+                            return True
                         # Concrete but unevaluable (e.g. division by zero,
                         # non-numeric atom argument).  Check if any immediate
                         # arg is a concrete non-numeric atom — if so, emit the
