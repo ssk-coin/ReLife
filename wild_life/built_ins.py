@@ -7935,6 +7935,11 @@ def _sort_compare_args(goal, eng):
         _ev = _try_eval_any_func(_d, eng)
         if _ev is None:
             _ev = _try_eval_string_func(_d, eng)
+        if _ev is None and _get_sym(_d) == '.' and _d.attr_list:
+            # A feature written on a term is the feature's value here too:
+            # the profiler asks `profile_old_clauses.What.type :== function`
+            # to tell a function's rules from a predicate's clauses.
+            _ev = _resolve_dot_feat(_d, eng)
         if _ev is not None:
             _d = _strip_backtick(_ev.deref())
         if _d.type is None:
@@ -9152,7 +9157,15 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         _dot_cell = _resolve_dot_feat(lhs, eng)
         if _dot_cell is None:
             return False
-        lhs = _dot_cell.deref()
+        # A name written on the cell reads the cell: `T:(st.g.tries) <<- T+1`
+        # counts up from what is stored, so T has to be the stored value
+        # before the right-hand side is worked out — not the `st.g.tries`
+        # the rule was written with, which would be stored back as itself.
+        _dot_cell_d = _dot_cell.deref()
+        if lhs is not _dot_cell_d and lhs.coref is None:
+            eng.trail.trail_psi(lhs, 'coref')
+            lhs.coref = _dot_cell_d
+        lhs = _dot_cell_d
 
     # `<-` writes something the query may take back, and what is in
     # persistent store is not the query's to take back.
@@ -9222,6 +9235,16 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         rhs_term.value = val
     else:
         rhs_term = a2.deref()
+        # A meet written in is the term the two sides meet at: the profiler
+        # files `Stats & clauses` under a function's name and reads the
+        # stats back off it, so the `&` itself must not be what is stored.
+        if (rhs_term.type is eng.wl.and_sym and '1' in rhs_term.attr_list
+                and '2' in rhs_term.attr_list
+                and not (rhs_term.flags & (QUOTED_TRUE | _NST_SWAP))):
+            _rhs_meet = _eval_and_conjunction(rhs_term, eng)
+            if _rhs_meet is None:
+                return False
+            rhs_term = _rhs_meet.deref()
         # What is written in is a value, so a call is asked for the one it
         # answers: `V <<- term_explore(X, Seen)` stores the count, not the
         # call.  A call nothing can work out yet is stored as it stands.
