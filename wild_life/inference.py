@@ -121,6 +121,72 @@ def _freeze_calls_deep(t: PsiTerm, quoted_flag: int,
         stack.extend(node.attr_list.values())
 
 
+def _eval_copy_thaw(t: PsiTerm) -> bool:
+    """Let a filed rule's calls go when it is copied to be run.
+
+    C copies a rule for execution with EVAL_FLAG, and copy() gives a node
+    that is a function status 0 — that is, not quoted — however it was
+    quoted when the clause was filed; a term holding such a node anywhere
+    below it comes out unquoted too.
+
+    Only a term with a call written in it is let go here.  A sum of numbers
+    is left as it was filed, so `assert(f2 -> X)` with `X:(1+2)` still reads
+    as `1 + 2` everywhere; but the `N * fact(N-1)` the profiler writes into
+    the rule it builds is a sum to work out once the rule is running, not
+    the text of one.
+
+    Returns whether the node holds a call.
+    """
+    from wild_life.data_structures import (QUOTED_TRUE as _QT_ct,
+                                           NON_STRICT_TERM as _NST_ct,
+                                           DefType as _DT_ct)
+    _seen: dict = {}
+
+    def _walk(n):
+        n = n.deref()
+        _id = id(n)
+        if _id in _seen:
+            return _seen[_id]
+        _seen[_id] = False          # a cycle counts as holding nothing
+        _sym = (n.type.keyword.symbol
+                if (n.type is not None and n.type.keyword is not None) else '')
+        if _sym == '`':
+            # The quote holds its term as written; nothing under it is let go.
+            _seen[_id] = False
+            return False
+        # Read structurally: _is_user_function refuses a term held as
+        # written, and that is exactly what is being looked at here.
+        _defn_ct = n.type
+        _holds = bool(
+            n.attr_list and _defn_ct is not None
+            and _defn_ct.type == _DT_ct.FUNCTION
+            and getattr(_defn_ct, '_builtin_func', None) is None
+            and isinstance(getattr(_defn_ct, 'rule', None), list)
+            and _defn_ct.rule)
+        for _sub in n.attr_list.values():
+            if _walk(_sub):
+                _holds = True
+        if _holds:
+            _clear(n, set())
+        _seen[_id] = _holds
+        return _holds
+
+    def _clear(n, _done):
+        n = n.deref()
+        if id(n) in _done:
+            return
+        _done.add(id(n))
+        if (n.type is not None and n.type.keyword is not None
+                and n.type.keyword.symbol == '`'):
+            return
+        if n.flags & (_QT_ct | _NST_ct):
+            n.flags &= ~(_QT_ct | _NST_ct)
+        for _sub in n.attr_list.values():
+            _clear(_sub, _done)
+
+    return _walk(t)
+
+
 def _thaw_non_strict_freeze(t: PsiTerm, visited: set = None) -> None:
     """Let go of the calls a non-strict argument was frozen for."""
     from wild_life.data_structures import QUOTED_TRUE as _QT_th
@@ -2633,6 +2699,7 @@ class Engine:
         _vm: dict = {}
         head = copy_term(head_orig, _vm)
         body = copy_term(body_orig, _vm)
+        _eval_copy_thaw(body)
         _link_head_globals(head, head_orig, self)
         # A call written into a clause head's argument is there for its value:
         # `p_a(pair(foo_a(Y:titi_a), …))` matches against pair(t(Y), …), which
@@ -3313,6 +3380,7 @@ class Engine:
         _vm: dict = {}
         head = copy_term(head_orig, _vm)
         body = copy_term(body_orig, _vm)
+        _eval_copy_thaw(body)
         _patch_eval_cut_barriers(self, body, body_orig, _eval_cut_barrier)
         _link_head_globals(head, head_orig, self)
 

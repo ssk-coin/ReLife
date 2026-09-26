@@ -2827,6 +2827,8 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
             _vm: dict = {}
             head = copy_term(h0, _vm)
             body = copy_term(b0, _vm)
+            from wild_life.inference import _eval_copy_thaw as _ect_a
+            _ect_a(body)
             body_d = body.deref()
             # Skip sort-constrained rules: head is a bare variable (no attrs)
             # AND the call term itself has arguments. These rules are
@@ -4125,6 +4127,8 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
         _vm: dict = {}
         head = copy_term(h0, _vm)
         body = copy_term(b0, _vm)
+        from wild_life.inference import _eval_copy_thaw as _ect_sync
+        _ect_sync(body)
         body_d = body.deref()
 
         # A rule whose head asks for features the call does not supply belongs
@@ -9156,7 +9160,24 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         # the sieve keeps what was written under M.
         _dot_cell = _resolve_dot_feat(lhs, eng)
         if _dot_cell is None:
-            return False
+            # The left of an assignment names a cell, so the dot chain is
+            # read even where it is held as written: the profiler's rules
+            # count through `` `(profile_stats.(`Function)) ``, and the
+            # quote is there to keep the clause it was built in from
+            # reading it, not to stop the clause that runs.
+            _unq: list = []
+            _probe = lhs
+            while (_probe is not None and _get_sym(_probe) == '.'
+                   and '1' in _probe.attr_list):
+                if _probe.flags & QUOTED_TRUE:
+                    eng.trail.trail_psi(_probe, 'flags')
+                    _probe.flags &= ~QUOTED_TRUE
+                    _unq.append(_probe)
+                _probe = _probe.attr_list['1'].deref()
+            if _unq:
+                _dot_cell = _resolve_dot_feat(lhs, eng)
+            if _dot_cell is None:
+                return False
         # A name written on the cell reads the cell: `T:(st.g.tries) <<- T+1`
         # counts up from what is stored, so T has to be the stored value
         # before the right-hand side is worked out — not the `st.g.tries`
