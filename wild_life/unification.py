@@ -518,46 +518,62 @@ class Unifier:
         does.  A rule head is left out of this: it is a pattern, and a
         prototype is a consequence of narrowing rather than a bar to it.
 
-        The nodes are collected before any of them is given its features, so
-        a prototype that names its own sort — `:: P:married_person(spouse =>
-        person(spouse => P))` — does not walk into what it just added.
+        What a prototype names carries its own prototype too: with
+        `:: student(advisor => faculty)` and `:: faculty(secretary =>
+        staff)`, the advisor comes out a faculty with a secretary.  The
+        nodes are collected before any of them is given its features, and
+        what a round adds is the next round's starting point, so a prototype
+        that names its own sort — `:: P:married_person(spouse =>
+        person(spouse => P))` — is not walked round for ever.
         """
         if t is None or self._skip_prototypes or not WL.proto_sorts:
             return
-        nodes: list = []
-        seen: set = set()
-        queue = [t]
-        while queue:
-            node = queue.pop()
-            if node is None:
-                continue
-            node = node.deref()
-            if id(node) in seen:
-                continue
-            seen.add(id(node))
-            nodes.append(node)
-            queue.extend(node.attr_list.values())
-        for node in nodes:
-            if node.type is None or node.type is WL.top:
-                continue
-            proto = _sort_prototype(node.type)
-            if not proto:
-                continue
-            # A sort under delay_check holds its prototype back while the
-            # term carries no features, the same as it does when bound.
-            if not node.attr_list and defers_check(node.type):
-                continue
-            missing = [_pk for _pk in proto if _pk not in node.attr_list]
-            if not missing:
-                # What the sort promises is already there.  Unifying it with
-                # the prototype again would walk a prototype that names its
-                # own sort round for ever.
-                continue
-            var_map: dict = {}
-            copies = {_pk: copy_term(_pv, var_map) for _pk, _pv in proto.items()}
-            for _pk in missing:
-                self.set_attr(node, _pk, copies[_pk])
-                self._settle_disjunction(copies[_pk])
+        _roots: list = [t]
+        _done: set = set()
+        for _round in range(8):
+            nodes: list = []
+            seen: set = set()
+            queue = list(_roots)
+            while queue:
+                node = queue.pop()
+                if node is None:
+                    continue
+                node = node.deref()
+                if id(node) in seen:
+                    continue
+                seen.add(id(node))
+                nodes.append(node)
+                queue.extend(node.attr_list.values())
+            _added: list = []
+            for node in nodes:
+                if id(node) in _done:
+                    continue
+                _done.add(id(node))
+                if node.type is None or node.type is WL.top:
+                    continue
+                proto = _sort_prototype(node.type)
+                if not proto:
+                    continue
+                # A sort under delay_check holds its prototype back while the
+                # term carries no features, the same as it does when bound.
+                if not node.attr_list and defers_check(node.type):
+                    continue
+                missing = [_pk for _pk in proto if _pk not in node.attr_list]
+                if not missing:
+                    # What the sort promises is already there.  Unifying it
+                    # with the prototype again would walk a prototype that
+                    # names its own sort round for ever.
+                    continue
+                var_map: dict = {}
+                copies = {_pk: copy_term(_pv, var_map)
+                          for _pk, _pv in proto.items()}
+                for _pk in missing:
+                    self.set_attr(node, _pk, copies[_pk])
+                    self._settle_disjunction(copies[_pk])
+                    _added.append(copies[_pk])
+            if not _added:
+                break
+            _roots = _added
 
     def _sort_takes_prototype(self, defn) -> bool:
         """Whether a sort, or one above it, has a `:: Sort(attrs)` prototype.
@@ -650,6 +666,10 @@ class Unifier:
                     self.set_attr(t, key, copy)
                     if existing is None:
                         _fresh_arith.append(key)
+                        # What the prototype names carries its own prototype:
+                        # `:: student(advisor => faculty)` with `:: faculty(
+                        # secretary => staff)` gives the advisor a secretary.
+                        self.apply_prototypes_deep(copy)
                 # A prototype feature written as a sum — `:: person(age => A,
                 # yob => Y, today => A + Y)` — is what a person's today comes
                 # to, not an expression the term carries around.  The term is
@@ -2156,10 +2176,16 @@ class Unifier:
             elif u_val is not None:
                 # u だけに特性がある -> v に追加
                 self.set_attr(v, key, u_val)
+                # A feature that only one side carried has not been through a
+                # narrowing, so the sorts it names take their prototypes here
+                # instead: `X:stu = emp` carries emp's `helper => simon(…)`
+                # over, and a simon is a student with an advisor.
+                self.apply_prototypes_deep(u_val)
 
             else:
                 # v だけに特性がある -> u に追加
                 self.set_attr(u, key, v_val)
+                self.apply_prototypes_deep(v_val)
 
         return True
 
