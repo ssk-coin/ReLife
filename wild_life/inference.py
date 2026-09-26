@@ -2117,15 +2117,33 @@ class Engine:
                     # would, and `write(length(X))` over a list that builds
                     # itself would read it at the wrong moment.  An equation
                     # is not a call of that kind — it is the shape the term
-                    # was written in — so what stands inside it is written
-                    # as its value: `write(a = f(1))` prints what f answers.
+                    # was written in — so each side of it is written as its
+                    # value: `write(a = f(1))` prints what f answers.  A side
+                    # that was written under a backquote is not worked out:
+                    # it is there as the term it was written as.
                     _a_w_sym = (_a_w.type.keyword.symbol
                                 if (_a_w.type is not None
                                     and _a_w.type.keyword is not None) else '')
-                    if (_a_w.attr_list and not _iuf_w(_a_w)
+                    if _a_w_sym == '=' and _a_w.attr_list:
+                        from wild_life.built_ins import (
+                            _try_eval_any_func as _teaf_w)
+                        from wild_life.data_structures import (
+                            QUOTED_TRUE as _QT_w,
+                            NON_STRICT_TERM as _NST_w)
+                        for _eq_k in list(_a_w.attr_list.keys()):
+                            _eq_v = _a_w.attr_list[_eq_k].deref()
+                            if (not _eq_v.attr_list
+                                    or (_eq_v.flags & (_QT_w | _NST_w))):
+                                continue
+                            _eq_ev = _teaf_w(_eq_v, self)
+                            if (_eq_ev is not None
+                                    and _eq_ev.deref() is not _eq_v):
+                                self.unifier.set_attr(_a_w, _eq_k, _eq_ev)
+                            else:
+                                _eeuf_w(_eq_v, self, 0, set())
+                    elif (_a_w.attr_list and not _iuf_w(_a_w)
                             and _a_w.type is not None
-                            and (_a_w.type._builtin_func is None
-                                 or _a_w_sym == '=')):
+                            and _a_w.type._builtin_func is None):
                         _eeuf_w(_a_w, self, 0, set())
             self.goal_stack = aim.next
             self.goal_count += 1
