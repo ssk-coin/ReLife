@@ -5175,6 +5175,27 @@ def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
     return body_d
 
 
+def eval_bagof_call(t: PsiTerm, eng) -> Optional[PsiTerm]:
+    """The list of solutions a two-argument bagof/findall/setof stands for.
+
+    Returns None when t is not such a call, so a caller can go on reading it
+    as the term it is.
+    """
+    if t is None or eng is None:
+        return None
+    t = t.deref()
+    _ty = t.type
+    if (_ty is None or _ty._builtin_func is None or _ty.keyword is None
+            or _ty.keyword.symbol not in ('bagof', 'findall', 'setof')):
+        return None
+    if ('1' not in t.attr_list or '2' not in t.attr_list
+            or '3' in t.attr_list):
+        return None
+    _coll = _collect_solutions(t.attr_list['1'].deref(),
+                               t.attr_list['2'].deref(), eng)
+    return eng.wl.make_list(_coll)
+
+
 def _try_eval_any_func(t: PsiTerm, eng,
                        _depth: int = 0) -> Optional[PsiTerm]:
     """Try to evaluate t as any functional form (user-defined or built-in).
@@ -5206,6 +5227,13 @@ def _try_eval_any_func(t: PsiTerm, eng,
     _td_type = td.type
     if _td_type is eng.wl.alist or _td_type is eng.wl.nil:
         return None
+
+    # `bagof(T,G)` standing where a value belongs is asked for one, wherever
+    # it stands: z_comb writes `collapse(A, bagof(Term, …), Forcing)`, and
+    # collapse is handed the list of solutions, not the call that makes it.
+    _bag_ev = eval_bagof_call(td, eng)
+    if _bag_ev is not None:
+        return _bag_ev
 
     # A call written through a functor variable is the call the functor
     # names, once something has named it: `[F(E)|L]` in lrmap's value is

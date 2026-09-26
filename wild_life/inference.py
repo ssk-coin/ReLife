@@ -2530,8 +2530,17 @@ class Engine:
             )
             from wild_life.data_structures import (
                 NON_STRICT_TERM as _NST_pa)
+            from wild_life.built_ins import (
+                eval_bagof_call as _ebc_pa)
             for _k_pa, _a_pa in list(thegoal.attr_list.items()):
                 _a_pa_d = _a_pa.deref()
+                # A bagof written into a call is the list it collects:
+                # z_comb hands `collapse(A, bagof(Term, …), Forcing)` the
+                # solutions, and collapse matches a list head against them.
+                _bag_pa = _ebc_pa(_a_pa_d, self)
+                if _bag_pa is not None:
+                    self.unifier.set_attr(thegoal, _k_pa, _bag_pa)
+                    continue
                 _ev_pa = _tesf_pa(_a_pa_d, self)
                 if _ev_pa is not None and _ev_pa is not _a_pa_d:
                     # Trailed: `X.nom` is whatever X has now, and a backtrack
