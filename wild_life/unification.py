@@ -2522,7 +2522,25 @@ class Unifier:
             _barrier = _cp_save if _cp_save is not None else _IRB
             _goal_ok = _eng.run(cs_barrier=_barrier)
             _eng.main_loop_ok = _old_main_ok
-            _eng.choice_stack = _cp_save
+            # What the goal left to come back to is kept: `:: P:person(
+            # friends => F) | friendly(F)` with `friendly({mathew;mark;…})`
+            # gives the term a first friend and the rest to ask for.  The
+            # alternatives were made while the goal stack held only the goal,
+            # so each one is given the rest of the computation to carry on
+            # with once it has been taken.
+            _left_dl = _eng.choice_stack
+            if _goal_ok and _left_dl is not _cp_save and _gs_save is not None:
+                _cp_dl = _left_dl
+                while _cp_dl is not None and _cp_dl is not _cp_save:
+                    _g_dl = _cp_dl.goal_stack
+                    if _g_dl is not None:
+                        while _g_dl.next is not None:
+                            _g_dl = _g_dl.next
+                        if _g_dl is not _gs_save:
+                            _g_dl.next = _gs_save
+                    _cp_dl = _cp_dl.next
+            else:
+                _eng.choice_stack = _cp_save
             _eng.goal_stack = _gs_save
 
             if not _goal_ok:
