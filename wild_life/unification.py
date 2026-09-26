@@ -2709,11 +2709,19 @@ _ARITH_OP_SYMS = frozenset(('+', '-', '*', '/', '//', 'mod', '^',
 
 
 def _is_dot_access(t: PsiTerm) -> bool:
-    """Whether t is a `T.F` projection rather than a bare `.` atom."""
+    """Whether t is a `T.F` projection to read rather than a term to keep.
+
+    A bare `.` atom is a name like any other, and a projection written under
+    a backquote — `` `(profile_stats.Function) `` — is the reading written
+    out, which a program hands on rather than performs.
+    """
     _ty = t.type
-    return (_ty is not None and _ty.keyword is not None
-            and _ty.keyword.symbol == '.'
-            and t.attr_list.get('1') is not None)
+    if (_ty is None or _ty.keyword is None or _ty.keyword.symbol != '.'
+            or t.attr_list.get('1') is None):
+        return False
+    from wild_life.data_structures import (
+        NON_STRICT_TERM as _NST_da)
+    return not (t.flags & (_QUOTED_TRUE | _NST_da))
 
 
 def copy_term(t: PsiTerm, var_map: Optional[Dict[int, PsiTerm]] = None) -> PsiTerm:

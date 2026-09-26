@@ -1576,7 +1576,12 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
                                  for _c in _rf_text])
 
     elif sym == '.':
-        # T.F — feature access: get feature F of term T
+        # T.F — feature access: get feature F of term T.  A projection under
+        # a backquote is the term it was written as, not a reading to make.
+        from wild_life.data_structures import (QUOTED_TRUE as _QT_df,
+                                               NON_STRICT_TERM as _NST_df)
+        if t.flags & (_QT_df | _NST_df):
+            return None
         a1 = t.attr_list.get('1')  # T
         a2 = t.attr_list.get('2')  # F (feature label)
         if a1 is None or a2 is None:
@@ -5732,6 +5737,13 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
         return None
     if dot_term.type.keyword.symbol != '.':
         return None
+    # A projection written under a backquote is the reading written out, not
+    # a reading to make now: `` `(profile_stats.Function) `` is handed on as
+    # the term it is.
+    from wild_life.data_structures import (QUOTED_TRUE as _QT_rd,
+                                           NON_STRICT_TERM as _NST_rd)
+    if dot_term.flags & (_QT_rd | _NST_rd):
+        return None
     a1 = dot_term.attr_list.get('1')  # T
     a2 = dot_term.attr_list.get('2')  # F (feature label)
     if a1 is None or a2 is None:
@@ -6191,7 +6203,14 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
         and working it out would ask `a` as a goal.
         """
         from wild_life.data_structures import QUOTED_TRUE as _QT_bq
-        if _is_user_function(td) or _is_cond_builtin_local(td):
+        _td_sym_bq = (td.type.keyword.symbol
+                      if (td.type is not None and td.type.keyword is not None)
+                      else '')
+        # A feature access is a call too: `` `(profile_stats.Function) `` is
+        # the reading written out, which the profiler puts into the clause it
+        # builds rather than the feature's value now.
+        if (_is_user_function(td) or _is_cond_builtin_local(td)
+                or (_td_sym_bq == '.' and td.attr_list)):
             eng.trail.trail_psi(td, 'flags')
             td.flags |= _QT_bq
 
@@ -7751,12 +7770,18 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
     if _a_mr is not None:
         a_d = _a_mr.deref()
 
-    b_str = _try_eval_string_func(b_d, eng)
-    a_str = _try_eval_string_func(a_d, eng)
-    if b_str is not None:
-        b_d = b_str
-    if a_str is not None:
-        a_d = a_str
+    # A side written under a backquote is the term it was written as, not a
+    # call to work out: `X = ` (profile_stats.Function)` hands X the feature
+    # access itself, which the profiler then writes into the clause it builds.
+    from wild_life.data_structures import QUOTED_TRUE as _QT_eq
+    if not (b_d.flags & (_QT_eq | _NST_eq)):
+        b_str = _try_eval_string_func(b_d, eng)
+        if b_str is not None:
+            b_d = b_str
+    if not (a_d.flags & (_QT_eq | _NST_eq)):
+        a_str = _try_eval_string_func(a_d, eng)
+        if a_str is not None:
+            a_d = a_str
 
     return _unify(eng, a_d, b_d)
 
