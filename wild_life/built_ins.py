@@ -8227,6 +8227,10 @@ def bi_not(goal: PsiTerm, eng) -> bool:
     mark = eng.trail.mark()
     cp_save = eng.choice_stack
     gs_save = eng.goal_stack
+    # Only the negated goal is proved here.  Left on the stack, the goals
+    # that come after it would be proved inside the negation as well —
+    # `\\+ X=Y, write(r)` wrote its r while asking whether X was Y.
+    eng.goal_stack = None
     eng.push_goal(GoalType.PROVE, arg, _DEFRULES_SENTINEL, None)
     old_main_loop_ok = eng.main_loop_ok
     # Use _INNER_RUN_BARRIER so run() does not undo trail to position 0 on failure;
