@@ -55,7 +55,8 @@ def title(quiet: bool = False) -> None:
 #   bindings_str - formatted variable bindings string (e.g. "A = 1, B = 2.")
 #   cs_before    - choice_stack BEFORE proving (for restoring on pop)
 #   var_tree     - the variable tree for this query (to merge at deeper levels)
-Frame = namedtuple('Frame', ['pre_mark', 'bindings_str', 'cs_before', 'var_tree', 'saved_pd'])
+Frame = namedtuple('Frame', ['pre_mark', 'bindings_str', 'cs_before',
+                            'var_tree', 'saved_pd', 'cs_after'])
 
 
 def _without_line_comment(text: str) -> str:
@@ -313,6 +314,38 @@ def run_repl(
     # again rather than to leave it.
     after_comment = False
 
+    def _frame_was_cut(frame) -> bool:
+        """Whether a cut has taken the alternatives this level stood on.
+
+        A level with no alternatives of its own was never standing on one,
+        so it is left alone; one whose newest choice point is no longer on
+        the stack was cut away along with it.
+        """
+        _after = frame.cs_after
+        if _after is None or _after is frame.cs_before:
+            return False
+        _cur = engine.choice_stack
+        _cur_serial = _cur.serial if _cur is not None else 0
+        return _after.serial > _cur_serial
+
+    def _restore_choices(saved):
+        """The choice stack a level goes back to, once cuts are accounted for.
+
+        A `!` proved at a deeper level reaches back through the levels above
+        it — `A = !, B = {1;2}?` then `call_once(A)?` takes the disjunction's
+        alternative with it — so a level that has been cut away is not
+        brought back when the deeper level closes.  Choice points are
+        numbered in the order they were made, so a saved one newer than what
+        is left on the stack is one a cut has already taken away.
+        """
+        if saved is None:
+            return None
+        _cur = engine.choice_stack
+        _cur_serial = _cur.serial if _cur is not None else 0
+        if saved.serial > _cur_serial:
+            return _cur
+        return saved
+
     def _pop_frame() -> str:
         """Pop one depth level: undo trail, restore choice_stack, return parent bindings.
 
@@ -324,9 +357,17 @@ def run_repl(
             return ""
         frame = frame_stack.pop()
         engine.trail.undo_to(frame.pre_mark)
-        engine.choice_stack = frame.cs_before
+        engine.choice_stack = _restore_choices(frame.cs_before)
         engine.goal_stack = None
         depth -= 1
+        # A level a cut reached past is gone with its alternatives: C keeps a
+        # level as a choice point of its own, so `A = !, B = {1;2}?` then
+        # `call_once(A)?` leaves nothing to come back to and closes both.
+        while frame_stack and _frame_was_cut(frame_stack[-1]):
+            frame = frame_stack.pop()
+            engine.trail.undo_to(frame.pre_mark)
+            engine.choice_stack = _restore_choices(frame.cs_before)
+            depth -= 1
         # Return parent frame's bindings (if any)
         return frame_stack[-1].bindings_str if frame_stack else ""
 
@@ -336,7 +377,7 @@ def run_repl(
         if frame_stack:
             root_frame = frame_stack[0]
             engine.trail.undo_to(root_frame.pre_mark)
-            engine.choice_stack = root_frame.cs_before
+            engine.choice_stack = _restore_choices(root_frame.cs_before)
             engine.goal_stack = None
             frame_stack.clear()
         depth = 0
@@ -641,7 +682,10 @@ def run_repl(
                         bindings_str = _format_bindings(var_tree, engine,
                                                         extra_var_trees=parent_var_trees)
                         saved_pd = engine.wl.print_depth
-                        frame_stack.append(Frame(pre_mark, bindings_str, cs_before, var_tree, saved_pd))
+                        frame_stack.append(Frame(pre_mark, bindings_str,
+                                                 cs_before, var_tree,
+                                                 saved_pd,
+                                                 engine.choice_stack))
                         depth += 1
                         # TRUE MODEL: write *** Yes + bindings + prompt immediately on frame push.
                         sys.stdout.write("\n*** Yes\n")
