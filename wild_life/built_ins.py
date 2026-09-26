@@ -4195,7 +4195,8 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
                 ok_a, val = _eval_arith(val_d, eng)
                 if ok_a:
                     return _make_number(eng, val)
-                _eval_embedded_user_funcs(val_d, eng, _depth + 1, set())
+                if val_d.type is not eng.wl.alist:
+                    _eval_embedded_user_funcs(val_d, eng, _depth + 1, set())
                 return val_d
             else:
                 eng.trail.undo_to(mark)
@@ -5452,7 +5453,8 @@ def _eval_embedded_user_funcs(
             # the value with them — or the term is left holding a call whose
             # arguments have gone back to being variables.
             eng.unifier.set_attr(td, key, evaled)
-            _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited)
+            if evaled.deref().type is not eng.wl.alist:
+                _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited)
             # What the call handed back can itself be worked out once the
             # calls inside it have been: `X \== Y` answers `not(X == Y)`,
             # and that is false once the `==` has said true.
