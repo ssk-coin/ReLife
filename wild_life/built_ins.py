@@ -4816,7 +4816,16 @@ def _apply_and_conjunction_to_var(conj_t: 'PsiTerm', target: 'PsiTerm', eng) -> 
 
     # Unify target with first GLB
     first_psi = PsiTerm(type_def=glbs[0])
-    return _unify(eng, target, first_psi)
+    if not _unify(eng, target, first_psi):
+        return False
+    # The meet is the term both sides were narrowed into, not a third term
+    # standing beside them: `X = b & A` answers `A = b, X = A`, and babel's
+    # `artificial_intelligence = programming_language & A` names the sort
+    # where the two meet rather than leaving A at @.
+    _meet_r = target.deref()
+    if not _unify(eng, _meet_r, t1):
+        return False
+    return _unify(eng, _meet_r.deref(), t2)
 
 
 def _apply_glb_to_var(t: 'PsiTerm', target: 'PsiTerm', eng) -> bool:
