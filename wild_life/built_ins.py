@@ -1741,7 +1741,15 @@ def _eval_and_conjunction(t: PsiTerm, eng) -> Optional[PsiTerm]:
         s = s.deref()
         if s.type is not None and s.type is wl.and_sym:
             return _eval_and_conjunction(s, eng)
-        s = _strip_bq(s)
+        # A side written with a backquote is the term itself, not something
+        # to work out: the profiler meets `CondForFailOccurence` with
+        # `` `cond(profile_fail_occured) `` to build the goal it is about to
+        # assert, and asking that cond for a value answers a question the
+        # rewritten clause has not come to yet.
+        _s_bq = _strip_bq(s)
+        if _s_bq is not s:
+            return _s_bq
+        s = _s_bq
         # A name declared with `global` stands for its cell, and it is the
         # cell the meet narrows: eratosthenes reads its limit with
         # `read_token(limit & int)`.
@@ -5108,14 +5116,18 @@ def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
         cond_ok = _prove_cond(cond_g, eng)
 
         if cond_ok:
-            branch = then_g.deref()
+            branch = then_g
         else:
             eng.trail.undo_to(mark_c)
-            if else_g is None:
-                return None
-            branch = else_g.deref()
+            branch = else_g
+        # A branch the call leaves out is worth `true`: c_cond looks the
+        # branch up by feature and, finding none, unifies the result with
+        # true, so `Stats = cond(Level :== goal, StatsForClause.goals)` is
+        # true at the call level rather than a failure.
+        if branch is None:
+            return PsiTerm(type_def=eng.wl.true)
 
-        return _eval_body_sync(branch, eng, _depth + 1)
+        return _eval_body_sync(branch.deref(), eng, _depth + 1)
 
     # Disjunction body {a; b; ...}: evaluate each element recursively.
     # This handles function bodies like {1; 1+posint_stream_to(N-1)} where
