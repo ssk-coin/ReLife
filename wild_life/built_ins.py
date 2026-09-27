@@ -9295,6 +9295,13 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
                        or _try_eval_any_func(rhs_d, eng))
             if _rhs_sc is not None and _rhs_sc.deref() is not rhs_d:
                 rhs_d = _rhs_sc.deref()
+        # What `<<-` writes into a name stays written, features and all: a
+        # counter kept under `ps <<- data(tries => 0)` is counted up with
+        # `T:(ps.tries) <<- T+1` and has to survive the `fail` the clause
+        # doing the counting ends on.
+        if not _backtrackable:
+            eng.persistent_store_touched = True
+            _mark_persistent_deep(rhs_d, set())
         defn.rule = []          # clear existing rules
         defn.type = DefType.FUNCTION
         _vm: dict = {}
