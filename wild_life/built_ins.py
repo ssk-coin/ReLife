@@ -5871,6 +5871,17 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
         _host_cell = _persistent_cell(host, eng)
     if _host_cell is not None:
         host = _host_cell.deref()
+    # A feature written on a meet belongs to the term the two sides meet at:
+    # accumulators.lf builds its accumulator as `strip(A) & @(AIn, Out.A)`
+    # and reads the pair back off it with `.1` and `.2`, and those have to be
+    # the very variables the meet was made of.
+    if (host.type is not None and host.type is eng.wl.and_sym
+            and '1' in host.attr_list and '2' in host.attr_list
+            and not (host.flags & (_QT_rd | _NST_rd))):
+        _meet_host = _eval_and_conjunction(host, eng)
+        if _meet_host is None:
+            return None
+        host = _meet_host.deref()
     # If the host is itself a dot-access expression (nested chain like A.a.b.c.d),
     # resolve it recursively to get the actual psi-term that holds the feature.
     if (host.type is not None and host.type.keyword is not None
