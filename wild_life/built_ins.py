@@ -822,7 +822,8 @@ def _try_eval_arith_to_term(t: PsiTerm, eng) -> Optional[PsiTerm]:
     # This propagates the evaluated value through the variable chain:
     # after evaluation, any variable that pointed to this expression will deref to
     # the concrete number.  We trail the old coref so backtracking can undo this.
-    if eng is not None and t.coref is None and t.value is None and t.attr_list:
+    if (eng is not None and t.coref is None and t.value is None and t.attr_list
+            and not _arith_reads_a_cell(t)):
         eng.trail.trail_psi(t, 'coref')
         t.coref = result
     if _fire_here:
@@ -2288,6 +2289,32 @@ def note_persistent_use(defn, eng) -> None:
 
 
 _IUF_SKIP_FLAGS = QUOTED_TRUE | REDUCED
+
+
+def _arith_reads_a_cell(t: PsiTerm) -> bool:
+    """Whether an expression reads a global or persistent cell.
+
+    A sum of ordinary terms comes to the same number however often it is
+    asked, so the number may be kept on it.  `gi + 1` may not: the cell gi
+    names is written to between one reading and the next, and glob_gc counts
+    a loop up by handing `c_equal(i, i+1)` back to `execute` each time round.
+    """
+    _seen: set = set()
+    _stack = [t]
+    while _stack:
+        _n = _stack.pop()
+        if _n is None:
+            continue
+        _n = _n.deref()
+        if id(_n) in _seen:
+            continue
+        _seen.add(id(_n))
+        _d = _n.type
+        if _d is not None and (_d.type is DefType.GLOBAL
+                               or getattr(_d, 'is_persistent', False)):
+            return True
+        _stack.extend(_n.attr_list.values())
+    return False
 
 
 def _global_cell(t: PsiTerm, eng) -> Optional[PsiTerm]:
@@ -5513,6 +5540,15 @@ def _eval_embedded_user_funcs(
                 eng.unifier.set_attr(td, key, _cell_d)
                 _eval_embedded_user_funcs(_cell_d, eng, _depth + 1, visited)
                 continue
+        # A term that reads a cell is not rewritten into what it came to:
+        # the cell is read again every time the term is, and glob_gc counts
+        # a loop up by handing `c_equal(i, i+1)` back to `execute` each time
+        # round.  Writing the reading in leaves `ce(gi,1)` behind, which
+        # comes to 1 however far the loop gets.
+        if (_global_cell(child, eng) is not None
+                or (_get_sym(child) in _ARITH_OPS_SET
+                    and child.attr_list and _arith_reads_a_cell(child))):
+            continue
         evaled = _try_eval_any_func(child, eng)
         if evaled is not None and evaled is not child:
             # An expression asked for its value is worth that value from then
@@ -5521,7 +5557,8 @@ def _eval_embedded_user_funcs(
             # and the `vr(X)` it hands back is that same number rather than a
             # fresh count of a varcount that has since moved on.
             if (_get_sym(child) in _ARITH_OPS_SET and child.attr_list
-                    and child.value is None and child.coref is None):
+                    and child.value is None and child.coref is None
+                    and not _arith_reads_a_cell(child)):
                 eng.trail.trail_psi(child, 'coref')
                 child.coref = evaled.deref()
             # Trailed: what the call worked out holds only under the bindings
@@ -9214,6 +9251,10 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
 
     # Deref LHS
     lhs = a1.deref()
+    while (lhs.type is not None and lhs.type.keyword is not None
+           and lhs.type.keyword.symbol in ('eval', 'evalin')
+           and list(lhs.attr_list.keys()) == ['1']):
+        lhs = lhs.attr_list['1'].deref()
     # A name declared with `global` stands for a cell every reference reads,
     # so writing to the name writes into that cell: eratosthenes's
     # `limit <- 20` has to be visible to the `M < limit` that follows.

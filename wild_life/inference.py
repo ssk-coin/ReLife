@@ -326,6 +326,7 @@ def _mark_arith_non_strict(t: PsiTerm, visited: set = None, eng=None,
     that X, and the next X finds `3+X` ready to be worked out again.
     """
     from wild_life.data_structures import NON_STRICT_TERM
+    from wild_life.built_ins import _arith_reads_a_cell
     if visited is None:
         visited = set()
     if t is None:
@@ -341,6 +342,7 @@ def _mark_arith_non_strict(t: PsiTerm, visited: set = None, eng=None,
     sym = td.type.keyword.symbol if (td.type and td.type.keyword) else ''
     if (sym in _ARITH_OPS_NON_STRICT and td.value is None
             and (_arith_is_settled(td)
+                 or _arith_reads_a_cell(td)
                  or (force and _arith_holds_user_call(td)))):
         if eng is not None and not (td.flags & NON_STRICT_TERM):
             eng.trail.trail_psi(td, 'flags')
