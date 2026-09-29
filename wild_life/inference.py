@@ -151,7 +151,22 @@ def _eval_copy_thaw(t: PsiTerm) -> bool:
         _sym = (n.type.keyword.symbol
                 if (n.type is not None and n.type.keyword is not None) else '')
         if _sym == '`':
-            # The quote holds its term as written; nothing under it is let go.
+            # A quoted feature reading is let go: the profiler writes
+            # `` `(profile_stats.Function) `` into the rule it builds to keep
+            # the reading whole while the rule is being assembled, and
+            # running the rule is when the record is read.  Everything else
+            # a quote holds stays as it was written.
+            _in_q = n.attr_list.get('1')
+            _in_d = _in_q.deref() if _in_q is not None else None
+            _in_sym = (_in_d.type.keyword.symbol
+                       if (_in_d is not None and _in_d.type is not None
+                           and _in_d.type.keyword is not None) else '')
+            if (_in_sym == '.' and '1' in _in_d.attr_list
+                    and '2' in _in_d.attr_list):
+                n.coref = _in_d
+                _clear(_in_d, set())
+                _seen[_id] = True
+                return True
             _seen[_id] = False
             return False
         # Read structurally: _is_user_function refuses a term held as
@@ -163,6 +178,12 @@ def _eval_copy_thaw(t: PsiTerm) -> bool:
             and getattr(_defn_ct, '_builtin_func', None) is None
             and isinstance(getattr(_defn_ct, 'rule', None), list)
             and _defn_ct.rule)
+        # A feature reading is a call too: the `profile_stats.`fact`` the
+        # profiler writes into the rule it builds names the record to count
+        # in when the rule runs, not the text of a reading.
+        if (not _holds and _sym == '.'
+                and '1' in n.attr_list and '2' in n.attr_list):
+            _holds = True
         for _sub in n.attr_list.values():
             if _walk(_sub):
                 _holds = True

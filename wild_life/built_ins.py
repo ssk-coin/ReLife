@@ -5938,6 +5938,12 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
         return None
     host = a1.deref()
     feat = a2.deref()
+    # A label written under a backquote is that label: the profiler files
+    # its records under `` profile_stats.`Function ``, where the quote is
+    # there to keep the name from being read as a call.
+    if (feat.type is not None and feat.type.keyword is not None
+            and feat.type.keyword.symbol == '`' and '1' in feat.attr_list):
+        feat = feat.attr_list['1'].deref()
     # A name declared with `global` stands for a cell, and the feature
     # belongs to the cell: `sieve.M` reads and writes what sieve holds.
     _host_cell = _global_cell(host, eng)
@@ -6393,6 +6399,54 @@ def _snapshot_moved(shot) -> bool:
     return False
 
 
+def _make_var_feature_dots(t: PsiTerm, eng, _depth: int = 0,
+                           _seen: Optional[set] = None) -> None:
+    """Make the features a term being built names on its own variables.
+
+    `NewBody = (T:(Stats.tries) <<- T + 1, ...)` is a goal term the profiler
+    is assembling, and the C interpreter gives Stats its `tries` feature
+    while the term is built, so the clause it goes into holds that very
+    cell.  Only a reading off a variable is made here -- everything else in
+    the term is what was written, not a question to ask.
+    """
+    if _depth > 100:
+        return
+    td = t.deref()
+    if _seen is None:
+        _seen = set()
+    if id(td) in _seen:
+        return
+    _seen.add(id(td))
+    from wild_life.data_structures import (QUOTED_TRUE as _QT_mv,
+                                           NON_STRICT_TERM as _NST_mv)
+    if td.flags & (_QT_mv | _NST_mv):
+        return
+    _kw_mv = td.type.keyword if td.type is not None else None
+    if _kw_mv is not None and _kw_mv.symbol == '`':
+        return
+    for _k_mv in list(td.attr_list.keys()):
+        _c_mv = td.attr_list[_k_mv].deref()
+        _ckw = _c_mv.type.keyword if _c_mv.type is not None else None
+        if (_ckw is not None and _ckw.symbol == '.'
+                and '1' in _c_mv.attr_list and '2' in _c_mv.attr_list
+                and not (_c_mv.flags & (_QT_mv | _NST_mv))):
+            _h_mv = _c_mv.attr_list['1'].deref()
+            _f_mv = _c_mv.attr_list['2'].deref()
+            if (_h_mv.value is None and _h_mv.type is eng.wl.top
+                    and _f_mv.type is not None
+                    and _f_mv.type is not eng.wl.top):
+                _cell_mv = _resolve_dot_feat(_c_mv, eng)
+                if _cell_mv is not None and _cell_mv.deref() is not _c_mv:
+                    eng.unifier.set_attr(td, _k_mv, _cell_mv)
+                    # Whatever else was written for this reading -- the tag
+                    # on it, above all -- is that cell too.
+                    if _c_mv.coref is None:
+                        eng.trail.trail_psi(_c_mv, 'coref')
+                        _c_mv.coref = _cell_mv.deref()
+                    continue
+        _make_var_feature_dots(_c_mv, eng, _depth + 1, _seen)
+
+
 def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
     a, b = _get_two_args(goal)
     if a is None or b is None:
@@ -6430,6 +6484,12 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
                     a_d = _val_cv.deref()
                 else:
                     b_d = _val_cv.deref()
+
+    # A term being built names features on its own variables, and the
+    # features are made here: the profiler asserts a clause that counts in
+    # `T:(Stats.tries)`, and the clause has to hold that cell.
+    _make_var_feature_dots(a_d, eng)
+    _make_var_feature_dots(b_d, eng)
 
     # Handle T.F = V and V = T.F (dot feature access / creation).
     # When T.F does not yet exist as an attribute, a fresh variable is
