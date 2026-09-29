@@ -9388,8 +9388,13 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
 
     # Deref LHS
     lhs = a1.deref()
+    # The left of an assignment names a cell, so a quote on it is read
+    # through: the profiler builds `` `profile_backtracking <<- false ``
+    # into the rules it asserts, and the quote is there to keep the clause
+    # it was built in from reading the name, not to stop the clause that
+    # runs from writing to it.
     while (lhs.type is not None and lhs.type.keyword is not None
-           and lhs.type.keyword.symbol in ('eval', 'evalin')
+           and lhs.type.keyword.symbol in ('eval', 'evalin', '`')
            and list(lhs.attr_list.keys()) == ['1']):
         lhs = lhs.attr_list['1'].deref()
     # A name declared with `global` stands for a cell every reference reads,
