@@ -2335,7 +2335,6 @@ def _global_cell(t: PsiTerm, eng) -> Optional[PsiTerm]:
         t = t.coref
     if t.attr_list or t.type is None or t.type.type is not DefType.GLOBAL:
         return None
-    _note_global_used(eng, t.type)
     return t.type.global_value
 
 
@@ -2833,7 +2832,6 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         _ns_ea = getattr(eng, 'non_strict_set', None)
         if _ns_ea and t.type in _ns_ea:
             return False, 0.0
-        note_persistent_use(t.type, eng)
         active = [(h, b) for (h, b) in t.type.rule if h is not None and b is not None]
         from wild_life.unification import copy_term
         # Pre-evaluate built-in function calls in args (e.g. features(X)) so

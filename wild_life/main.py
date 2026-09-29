@@ -86,14 +86,19 @@ def _without_line_comment(text: str) -> str:
 
 
 def _names_a_persistent(term, engine) -> bool:
-    """True when the query as written names a `persistent` global.
+    """True when the query as written names a global that already existed.
 
     The cell such a name stands for is not the query's to undo, so a query
     that reaches for one keeps what it did and answers at a level of its own.
     A global a predicate reads on its way to an answer is not that: power_4
     passes `result` around inside foo_4 and still answers at the top level,
-    which is why this asks the query text rather than the reading.
+    and write_stats reads the profiler's own titles and column widths on its
+    way to the table it prints, which is why this asks the query text rather
+    than the reading.  A name declared `global` counts as much as a
+    `persistent` one -- `write(q,a)` reaches for both alike -- while a global
+    the query itself declares is new, and leaves nothing behind.
     """
+    from wild_life.data_structures import DefType as _DT_np
     defs = getattr(engine.wl, 'global_defs', None)
     if not defs:
         return False
@@ -109,8 +114,9 @@ def _names_a_persistent(term, engine) -> bool:
             continue
         seen.add(id(t))
         d = t.type
-        if (d is not None and getattr(d, 'is_persistent', False)
-                and id(d) in pre):
+        if (d is not None and id(d) in pre
+                and (getattr(d, 'is_persistent', False)
+                     or getattr(d, 'type', None) is _DT_np.GLOBAL)):
             return True
         if t.attr_list:
             stack.extend(t.attr_list.values())
