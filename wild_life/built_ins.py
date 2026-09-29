@@ -5935,10 +5935,37 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
         _hv = _eval_user_func_sync(host, eng, 0)
         if _hv is not None and _hv.deref() is not host:
             _hv_d = _hv.deref()
+            # A call is not its own answer: `cnl(A, ctxt => C).1` reads the
+            # first feature of what cnl works out, and meeting the call into
+            # that answer would put the call's own arguments in it.  That is
+            # how accumulators.lf's `(Aacc:create_acc(A, ...)).1` came back
+            # holding A itself, and left peep's rewrite rules looking for a
+            # list of sort `in`.  The call still becomes the answer, so the
+            # tag on it and a second reading of it find the one term.
+            if host.attr_list:
+                # What the rules answer with may itself be a meet, and the
+                # feature belongs to the term the two sides meet at:
+                # accumulators.lf answers `strip(A) & @(In.A, Out.A)` and
+                # reads the pair back off it with `.1` and `.2`.
+                if (_hv_d.type is not None and _hv_d.type is eng.wl.and_sym
+                        and '1' in _hv_d.attr_list and '2' in _hv_d.attr_list
+                        and not (_hv_d.flags & (_QT_rd | _NST_rd))):
+                    _meet_v = _eval_and_conjunction(_hv_d, eng)
+                    if _meet_v is None:
+                        return None
+                    _hv_d = _meet_v.deref()
+                _hd_cl = host.deref()
+                if _hd_cl is not _hv_d and _hd_cl.coref is None:
+                    eng.trail.trail_psi(_hd_cl, 'coref')
+                    _hd_cl.coref = _hv_d
+                host = _hv_d
+                _hv_d = None
             # The name becomes the term its rules make of it, so everything
             # else pointing at the name reads that term too.
             try:
-                if eng.unifier.unify(host, _hv_d):
+                if _hv_d is None:
+                    _hv_d = host
+                elif eng.unifier.unify(host, _hv_d):
                     host = host.deref()
                 else:
                     # The name and the term its rules make of it are sorts
