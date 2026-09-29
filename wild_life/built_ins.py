@@ -4001,6 +4001,26 @@ def _eval_user_function_deferred(t: PsiTerm, eng, result: PsiTerm) -> bool:
     return True
 
 
+def _bare_curried_name(t: PsiTerm) -> bool:
+    """Whether a function written with no arguments is still waiting for them.
+
+    `ran -> 7` can be asked for a value with nothing written after it, but
+    `fact`, which also has `fact(N) -> N*fact(N-1)`, cannot: until it is
+    given an argument the name stands for the function itself.  The profiler
+    hands `fact` to write_stats that way, and a name read as a call there
+    counts a try for every mention of it.
+    """
+    if t.attr_list or t.value is not None:
+        return False
+    _rules_bc = getattr(t.type, 'rule', None)
+    if not isinstance(_rules_bc, list) or not _rules_bc:
+        return False
+    for _h_bc, _b_bc in _rules_bc:
+        if _h_bc is not None and _h_bc.deref().attr_list:
+            return True
+    return False
+
+
 def _is_user_function(t: PsiTerm) -> bool:
     """Return True if t is a user-defined function call (has -> rules)."""
     if t is None:
@@ -4011,6 +4031,8 @@ def _is_user_function(t: PsiTerm) -> bool:
     if defn is None or defn.type != DefType.FUNCTION:
         return False
     if defn._builtin_func is not None or not defn.rule:
+        return False
+    if _bare_curried_name(t):
         return False
     # Backtick-quoted terms (QUOTED_TRUE) are sort references, not function
     # calls.  A call being reduced is the value its own rule body sees:
