@@ -1345,6 +1345,12 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             return _inner_ev
         # eval hands back a value, not the term it read: `A = eval(X:a(X))`
         # gives A a cyclic term of its own rather than making A and X one.
+        # evalin reads the term where it stands, so what it hands back is
+        # that very term: the tokenizer threads its character stream through
+        # `` `evalin(D) = Ys ``, and a copy of D would leave the rest of the
+        # stream unreachable from the clause the grammar expander builds.
+        if sym == 'evalin':
+            return arg
         return copy_term(arg, {})
 
     elif sym in ('var', 'nonvar', 'is_function', 'is_predicate', 'is_sort'):
@@ -6544,8 +6550,13 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
         # A feature access is a call too: `` `(profile_stats.Function) `` is
         # the reading written out, which the profiler puts into the clause it
         # builds rather than the feature's value now.
+        # `` `evalin(D) `` is the call written out, the same as any other:
+        # the tokenizer's `token_C([A],false,Xs,Ys) -> (Xs = [A|D],
+        # `evalin(D) = Ys)` hands the grammar expander that term to put in
+        # the clause it builds, and reading it here asks the stream for a
+        # character the rule has not come to yet.
         if (_is_user_function(td) or _is_cond_builtin_local(td)
-                or (_td_sym_bq == '.' and td.attr_list)):
+                or (_td_sym_bq in ('.', 'eval', 'evalin') and td.attr_list)):
             eng.trail.trail_psi(td, 'flags')
             td.flags |= _QT_bq
 
