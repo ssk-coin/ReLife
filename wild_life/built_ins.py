@@ -5548,8 +5548,23 @@ def _eval_embedded_user_funcs(
         td.type.keyword is not None and
         td.type.keyword.symbol in _NON_STRICT_ARG1_BUILTINS
     )
+    _store_arrow = (td.type is not None and td.type.keyword is not None
+                    and td.type.keyword.symbol in ('<-', '<<-'))
     for key in list(td.attr_list.keys()):
         if _skip_arg1 and key == '1':
+            # A feature written where the value goes names a place too, and
+            # the place is the cell: the profiler builds
+            # `T:(Stats.tries) <<- T + 1` into the clause it asserts, and the
+            # clause has to hold the cell Stats keeps at `tries` rather than
+            # the reading of it, or the count is made and thrown away.
+            if _store_arrow:
+                _a1_sa = td.attr_list[key].deref()
+                if (_a1_sa.type is not None and _a1_sa.type.keyword is not None
+                        and _a1_sa.type.keyword.symbol == '.'):
+                    _cell_sa = _resolve_dot_feat(_a1_sa, eng)
+                    if (_cell_sa is not None
+                            and _cell_sa.deref() is not _a1_sa):
+                        eng.unifier.set_attr(td, key, _cell_sa)
             continue  # do not eagerly evaluate function/predicate name arguments
         child = td.attr_list[key].deref()
         # A `T.F` written into a term stands for the feature, not for the
@@ -5943,8 +5958,12 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
         host = _meet_host.deref()
     # If the host is itself a dot-access expression (nested chain like A.a.b.c.d),
     # resolve it recursively to get the actual psi-term that holds the feature.
+    # Unless it was written under a backquote: `` `(profile_stats.Function) ``
+    # is the reading written out, a term of sort `.` like any other, and a
+    # feature put on it belongs to that term.
     if (host.type is not None and host.type.keyword is not None
-            and host.type.keyword.symbol == '.'):
+            and host.type.keyword.symbol == '.'
+            and not (host.flags & (_QT_rd | _NST_rd))):
         host = _resolve_dot_feat(host, eng)
         if host is None:
             return None
