@@ -3019,7 +3019,7 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     # here — otherwise none of them would ever be reached.
     _arith_late_syms = frozenset(('strlen', 'asc', 'int', 'real', 'random',
                                   'cpu_time', 'real_time', 'genint',
-                                  'get_choice'))
+                                  'get_choice', 'length'))
     if sym not in _arith_binary_syms and sym not in _arith_late_syms:
         return False, 0.0
     arg1, arg2 = _get_two_args(t)
@@ -3079,6 +3079,20 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
             return True, float(ops1[sym](v1))
         except Exception:
             return False, 0.0
+
+    # length(L) — how many elements the list has, as a number: `1 =< length(L)`
+    # compares against the count, which is how the profiler counts out the
+    # clauses of the predicate it is reporting on.
+    if sym == 'length' and len(t.attr_list) == 1:
+        _len_ea = _try_eval_string_func(t, eng) if eng is not None else None
+        if _len_ea is not None:
+            _len_d_ea = _len_ea.deref()
+            if _len_d_ea.value is not None and not _len_d_ea.attr_list:
+                try:
+                    return True, float(_len_d_ea.value)
+                except (TypeError, ValueError):
+                    return False, 0.0
+        return False, 0.0
 
     # strlen(String) — length of string as integer
     if sym == 'strlen':
