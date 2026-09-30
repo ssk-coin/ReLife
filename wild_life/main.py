@@ -409,6 +409,10 @@ def run_repl(
             try:
                 line = input()
                 repl_line_number += 1
+                # `trace_input` writes the input out as it is read.
+                if WL.trace_input:
+                    sys.stdout.write(line + "\n")
+                    sys.stdout.flush()
             except EOFError:
                 # Print a final newline so the last prompt ends cleanly.
                 sys.stdout.write("\n")
@@ -536,6 +540,9 @@ def run_repl(
                     try:
                         _cont = input()
                         repl_line_number += 1
+                        if WL.trace_input:
+                            sys.stdout.write(_cont + "\n")
+                            sys.stdout.flush()
                     except EOFError:
                         break
                     _cont_s = _cont.strip()

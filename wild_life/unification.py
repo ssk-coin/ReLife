@@ -167,6 +167,16 @@ def _bare_name_of_function(t: PsiTerm) -> bool:
     return True
 
 
+def _persistent_held(t: PsiTerm) -> bool:
+    """Whether the persistent store holds this term.
+
+    Such a term lives where the query cannot undo it, and the C interpreter
+    unifies with it by matching: unify_body hands a term at or above the
+    heap pointer to global_unify, which puts no feature on it.
+    """
+    return t.__dict__.get('_wl_persistent_root', False)
+
+
 def compute_lub(d1: Definition, d2: Definition) -> Optional[Definition]:
     """後方互換のため残す — compute_glb() を使うこと。"""
     return compute_glb(d1, d2)
@@ -2200,6 +2210,13 @@ class Unifier:
                     self.set_attr(v, key, unified)
 
             elif u_val is not None:
+                # A term the persistent store holds is matched, not added to:
+                # global_unify_attr says every feature of the query's term has
+                # to appear in the stored one, so `a = @(hair => H, joke =>
+                # bad)` fails on a stored `a` that has no joke rather than
+                # opening one on it.
+                if _persistent_held(v):
+                    return False
                 # u だけに特性がある -> v に追加
                 self.set_attr(v, key, u_val)
                 # A feature that only one side carried has not been through a
@@ -2209,6 +2226,8 @@ class Unifier:
                 self.apply_prototypes_deep(u_val)
 
             else:
+                if _persistent_held(u):
+                    return False
                 # v だけに特性がある -> u に追加
                 self.set_attr(u, key, v_val)
                 self.apply_prototypes_deep(v_val)
@@ -2895,6 +2914,12 @@ def copy_term(t: PsiTerm, var_map: Optional[Dict[int, PsiTerm]] = None) -> PsiTe
     result.value = t.value
     result.flags = t.flags
     result.status = t.status
+    # What the persistent store holds stays persistent where it is read: the
+    # C interpreter hands out the heap term itself rather than a copy, and
+    # that is what makes `a = @(hair => H, joke => bad)` fail on a stored `a`
+    # that has no joke.
+    if t.__dict__.get('_wl_persistent_root', False):
+        result._wl_persistent_root = True
 
     _out = result.attr_list
     for key, val in _attrs.items():

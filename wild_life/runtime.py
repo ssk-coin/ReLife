@@ -122,6 +122,8 @@ class WildLifeRuntime:
         # display_persistent? で有効化: 永続項を ' $' 付きで表示
         self.display_persistent_mode: bool = False
         self.trace: bool = False        # トレースフラグ
+        # trace_input? で有効化: ストリームから読んだ文字をそのまま出力に写す
+        self.trace_input: bool = False
         self.types_done: bool = False   # 型エンコード完了フラグ
         self.types_modified: bool = False
         self.interrupted: bool = False

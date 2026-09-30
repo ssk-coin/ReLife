@@ -148,6 +148,14 @@ class TokenizerState:
         except Exception:
             return None
 
+        # `trace_input` writes out what is read, and only what is read: a
+        # character put back is handed over again above without passing
+        # here, which is why the statement after the first comes out a
+        # character short.
+        if WL.trace_input:
+            sys.stdout.write(c if c else " <EOF>\n")
+            sys.stdout.flush()
+
         if not c:  # EOF
             self.eof_flag = True
             return None

@@ -9510,6 +9510,11 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         if not _backtrackable:
             eng.persistent_store_touched = True
             _mark_persistent_deep(rhs_d, set())
+            # The term the name stands for is matched, not added to: an
+            # equation may read what `a` holds but not open a feature on it.
+            # Only the term itself, since what sits inside it is ordinary
+            # structure that the rest of a program builds on.
+            rhs_d._wl_persistent_root = True
         defn.rule = []          # clear existing rules
         defn.type = DefType.FUNCTION
         _vm: dict = {}
@@ -13643,6 +13648,37 @@ def register_all(wl) -> None:
         wl.display_modules_mode = True
         return True
     _reg('display_modules', _bi_display_modules)
+
+    def _bi_trace_input(goal, eng):
+        """trace_input(Bool) — write out the input as it is read.
+
+        With a boolean it is set, with nothing it is turned round.  Only
+        what is read from the stream is written: c_trace_input sets the
+        switch that get_char honours, and a character put back is handed
+        over again without going near it.
+        """
+        _a1_ti = goal.attr_list.get('1')
+        if _a1_ti is None:
+            wl.trace_input = not wl.trace_input
+            return True
+        _d_ti = _a1_ti.deref()
+        _sym_ti = (_d_ti.type.keyword.symbol
+                   if (_d_ti.type is not None
+                       and _d_ti.type.keyword is not None) else '')
+        if _sym_ti == 'true':
+            wl.trace_input = True
+            return True
+        if _sym_ti == 'false':
+            wl.trace_input = False
+            return True
+        import io as _io_ti
+        from wild_life.print_term import write_term as _wt_ti
+        _buf_ti = _io_ti.StringIO()
+        _wt_ti(goal, outfile=_buf_ti, quoted=True, wl=wl, max_col=1_000_000)
+        sys.stderr.write("*** Error: argument should be boolean in '"
+                         + _buf_ti.getvalue() + "'\n")
+        return False
+    _reg('trace_input', _bi_trace_input)
 
     def _bi_display_persistent(goal, eng):
         """display_persistent — write a ` $` in front of every persistent term."""
