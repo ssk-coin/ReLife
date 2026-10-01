@@ -10390,6 +10390,41 @@ def _resolve_life_file(filename: str) -> str:
     return filename if filename.endswith('.lf') else filename + '.lf'
 
 
+def _consult_key(filename: str) -> str:
+    """The name a file is remembered by, whichever way it was reached."""
+    import os as _os_ck
+    try:
+        return _os_ck.path.realpath(filename)
+    except Exception:
+        return filename
+
+
+def _consulted_once(filename: str, eng) -> bool:
+    """Whether this file has been read already, noting it if it has not.
+
+    built_ins.lf's `load_2` asks `has_feature(CF,consulted,Bool)` before it
+    reads anything and says so rather than reading the file again, and
+    `first_load` writes the entry *before* the read, so a file that imports
+    its way back to itself is covered too.  Without this, superlint reads
+    accumulators.lf a second time -- sl_parser.lf and c_parser.lf both
+    import it -- and the second copy of std_expander's clause builders turns
+    its failure-driven loop into thousands of solutions.
+    """
+    _seen = getattr(eng.wl, 'consulted_files', None)
+    if _seen is None:
+        _seen = eng.wl.consulted_files = set()
+    _key = _consult_key(filename)
+    if _key in _seen:
+        return True
+    _seen.add(_key)
+    return False
+
+
+def _announce_already_loaded(filename: str) -> None:
+    """Say the file is already read, the way built_ins.lf's load_2 does."""
+    sys.stdout.write('*** File "%s" is already loaded.\n' % filename)
+
+
 def _announce_load(filename: str) -> None:
     """Say which file is being read, the way built_ins.lf's load_2 does.
 
@@ -10408,6 +10443,9 @@ def bi_load(goal: PsiTerm, eng) -> bool:
     filename = str(arg.value) if arg.value else (
         arg.type.keyword.symbol if arg.type and arg.type.keyword else '')
     filename = _resolve_life_file(filename)
+    if _consulted_once(filename, eng):
+        _announce_already_loaded(filename)
+        return True
     _announce_load(filename)
 
     wl = eng.wl
@@ -13623,6 +13661,11 @@ def register_all(wl) -> None:
             return False
         for _n in names:
             _path = _resolve_life_file(_n)
+            # Read once, then say so -- and carry on to the opens below, which
+            # import owes every name whether or not the file was read now.
+            if _consulted_once(_path, eng):
+                _announce_already_loaded(_path)
+                continue
             _announce_load(_path)
             if not eng.load_file(_path):
                 return False
