@@ -1512,6 +1512,15 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         ctx_mod = None
         if a2 is not None:
             _mod_t = a2.deref()
+            # The module is named by what the second argument answers, not by
+            # how it is written: accumulators.lf asks
+            # `features(AllAccs, current_module)`, and read as the atom it
+            # stands for that names no module at all -- which filed every
+            # accumulator name under `user` and left superlint's pred_info
+            # looking for an accumulator it had just declared.
+            _mod_ev = _try_eval_string_func(_mod_t, eng)
+            if _mod_ev is not None:
+                _mod_t = _mod_ev.deref()
             _mod_name = None
             if _mod_t.value is not None and isinstance(_mod_t.value, str):
                 _mod_name = _mod_t.value
