@@ -12597,6 +12597,34 @@ def register_all(wl) -> None:
             return False
         return _unify(eng, a2.deref(), _make_string(eng, _v)) if a2 else True
     _reg('getenv', _bi_getenv)
+
+    def _bi_exists_file(goal, eng):
+        """exists_file(Name) — whether a file of that name can be read.
+
+        c_exists expands the name the way a shell would and answers whether
+        fopen for reading succeeds.  A directory opens that way too, so it
+        counts.  superlint asks this before running the C preprocessor over
+        a file.
+        """
+        _a1_ef = goal.attr_list.get('1')
+        if _a1_ef is None:
+            return False
+        _n_ef = _get_str_val(_a1_ef.deref(), eng)
+        if _n_ef is None:
+            import io as _io_ef
+            from wild_life.print_term import write_term as _wt_ef
+            _buf_ef = _io_ef.StringIO()
+            _wt_ef(goal, outfile=_buf_ef, quoted=True, wl=wl, max_col=1_000_000)
+            sys.stderr.write("*** Error: bad argument in %s.\n"
+                             % _buf_ef.getvalue())
+            return False
+        import os as _os_ef
+        _p_ef = _os_ef.path.expanduser(_os_ef.path.expandvars(_n_ef))
+        try:
+            return _os_ef.access(_p_ef, _os_ef.R_OK)
+        except Exception:
+            return False
+    _reg('exists_file', _bi_exists_file)
     _reg('op', bi_op)
     _reg('statistics', bi_statistics)
     _reg('current_prolog_flag', bi_current_prolog_flag)
