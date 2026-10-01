@@ -11538,6 +11538,28 @@ def bi_alias(goal: PsiTerm, eng) -> bool:
     mod1_name = mod1.module_name if mod1 else 'user'
     mod2_name = mod2.module_name if mod2 else 'user'
 
+    # c_alias looks the name up in the module doing the aliasing and says
+    # something only when the entry actually moves: `alias('.', 'sl_utils#.')`
+    # in a module whose `.` already is that one is a no-op, not a warning
+    # about a name overwriting itself.
+    _tab_al = wl.current_module.symbol_table if wl.current_module else None
+    if _tab_al is None:
+        return False
+    _entry_al = _tab_al.get(sym1)
+    if _entry_al is None:
+        sys.stderr.write(
+            "*** Error: module violation: cannot alias '%s#%s' from module"
+            " \"%s\"\n" % (mod1_name, sym1,
+                           wl.current_module.module_name))
+        return True
+    if _entry_al is defn2:
+        return True
+    defn1 = _entry_al
+    kw1 = defn1.keyword
+    sym1 = kw1.symbol if kw1 else sym1
+    mod1 = kw1.module if kw1 else None
+    mod1_name = mod1.module_name if mod1 else 'user'
+
     # Print warning to stderr (matches original C Wild Life behaviour)
     sys.stderr.write(
         f"*** Warning: alias: '{mod1_name}#{sym1}' has now been overwritten by '{mod2_name}#{sym2}'\n"
