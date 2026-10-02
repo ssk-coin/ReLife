@@ -270,7 +270,16 @@ def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
 # a choice standing in an argument is worked out before they see it.  The
 # ones that use deref_ptr instead -- mresiduate among them -- are handed the
 # choice as it stands, and are not listed here.
-_DEREF_EVAL_BUILTINS = frozenset(('=',))
+# A comparison reads a sort, so a choice written on either side of it is
+# settled the same way `=` settles one: c_parser asks
+# `Feature :== {tree; error_log; parse_mode; error_mode; error}` as a goal,
+# and the alternatives it comes back for are what makes that a membership
+# test rather than a test against the first of them.
+_DEREF_EVAL_BUILTINS = frozenset((
+    '=',
+    ':==', ':\==', ':<', ':>', ':=<', ':>=',
+    ':\<', ':\>', ':\=<', ':\>=', ':\><',
+))
 
 # Built-ins that print what they are given: their arguments are values.
 _WRITE_BUILTINS = frozenset((
