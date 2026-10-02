@@ -2418,7 +2418,7 @@ def _write_all_args(goal: PsiTerm, eng, quoted: bool, stream=None,
     """Write all positional arguments of goal, concatenated (no separator).
 
     In LIFE, write(a,b,c) writes each argument in order without separator.
-    If the goal has no positional args, write the goal's sort name.
+    A goal with no positional args writes nothing, the way c_write curries.
     compact=True disables line-wrapping (for write/1 which is always single-line).
     compact=False uses pretty-printing (for pretty_write/1).
     Returns False if any argument fails to write (e.g., bottom type, bad arithmetic).
@@ -2438,12 +2438,11 @@ def _write_all_args(goal: PsiTerm, eng, quoted: bool, stream=None,
             return False
         written_any = True
         i += 1
-    if not written_any:
-        # No positional args: treat as write of goal itself
-        try:
-            _write_term(goal, eng, stream=stream, quoted=quoted, compact=compact)
-        except _WriteFailure:
-            return False
+    # Nothing written where nothing was given: c_write asks for the first
+    # argument and curries when there is none, so a bare `write` writes
+    # nothing at all.  ex_tools.lf's `C:writeln :- write&strip(C), nl.` is
+    # called that way for a blank line, and writing the name instead put the
+    # word `write` in superlint's report.
     return True
 
 
