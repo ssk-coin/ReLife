@@ -11008,6 +11008,14 @@ def bi_listing(goal: PsiTerm, eng) -> bool:
                     else 'predicate')
             name = defn.keyword.symbol if defn.keyword else '?'
             print()
+            # list_special writes back every declaration the definition
+            # carries, commented out for a built-in along with the note
+            # that it is one: `listing(non_strict)` says
+            # `% non_strict(non_strict)?` before it says what non_strict is.
+            _ns_bi = (getattr(eng, 'non_strict_set', None)
+                      if eng is not None else None)
+            if _ns_bi and defn in _ns_bi:
+                print(f"% non_strict({name})?")
             print(f"% '{name}' is a built-in {kind}.")
         elif defn is not None and defn.type in (DefType.PREDICATE, DefType.FUNCTION):
             is_imported = (defn.keyword and defn.keyword.module is not None
