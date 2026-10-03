@@ -2693,13 +2693,6 @@ class Engine:
             from wild_life.data_structures import QUOTED_TRUE as _QT_pa
             for _k_pa, _a_pa in list(thegoal.attr_list.items()):
                 _a_pa_d = _a_pa.deref()
-                # An argument held as it is written is handed over as it
-                # stands: the grammar expander carries a rule's body around
-                # as the code of the clause it is building, and working out
-                # the `has_feature(K, void_table)` written in it — with K
-                # still a variable — leaves `false` in the clause.
-                if _a_pa_d.flags & _QT_pa:
-                    continue
                 # A bagof written into a call is the list it collects:
                 # z_comb hands `collapse(A, bagof(Term, …), Forcing)` the
                 # solutions, and collapse matches a list head against them.
@@ -2707,7 +2700,13 @@ class Engine:
                 if _bag_pa is not None:
                     self.unifier.set_attr(thegoal, _k_pa, _bag_pa)
                     continue
-                _ev_pa = _tesf_pa(_a_pa_d, self)
+                # A built-in call held as it is written is handed over as
+                # it stands: the grammar expander carries a rule's body
+                # around as the code of the clause it is building, and
+                # answering the `has_feature(K, void_table)` written in it —
+                # with K still a variable — leaves `false` in the clause.
+                _ev_pa = (None if (_a_pa_d.flags & _QT_pa)
+                          else _tesf_pa(_a_pa_d, self))
                 if _ev_pa is not None and _ev_pa is not _a_pa_d:
                     # Trailed: `X.nom` is whatever X has now, and a backtrack
                     # that gives X a different value must give the goal its
