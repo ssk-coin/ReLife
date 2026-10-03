@@ -2690,8 +2690,16 @@ class Engine:
                 NON_STRICT_TERM as _NST_pa)
             from wild_life.built_ins import (
                 eval_bagof_call as _ebc_pa)
+            from wild_life.data_structures import QUOTED_TRUE as _QT_pa
             for _k_pa, _a_pa in list(thegoal.attr_list.items()):
                 _a_pa_d = _a_pa.deref()
+                # An argument held as it is written is handed over as it
+                # stands: the grammar expander carries a rule's body around
+                # as the code of the clause it is building, and working out
+                # the `has_feature(K, void_table)` written in it — with K
+                # still a variable — leaves `false` in the clause.
+                if _a_pa_d.flags & _QT_pa:
+                    continue
                 # A bagof written into a call is the list it collects:
                 # z_comb hands `collapse(A, bagof(Term, …), Forcing)` the
                 # solutions, and collapse matches a list head against them.

@@ -516,9 +516,12 @@ class Unifier:
         # it.  Without this a library that fills a table from a predicate —
         # the tokenizer's `gen_char_table(simple_atom_table, …)` — writes
         # into a term the query takes back on its way out.
+        from wild_life.runtime import WL as _WL_bind
         if (var.__dict__.get('_wl_persistent_cell', False)
                 and val.coref is None and val.value is None
                 and not val.attr_list
+                and (val.type is None or val.type is _WL_bind.top)
+                and not var.__dict__.get('_wl_persistent_written', False)
                 and not val.__dict__.get('_wl_persistent_cell', False)):
             # Two variables made one, and one of them is what a `persistent`
             # name holds: it is the cell that stays, since the other side is
