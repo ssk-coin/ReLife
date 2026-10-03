@@ -509,6 +509,25 @@ class Unifier:
         """変数 var を val に束縛する (バックトラック可能)
         C版の push_ptr_value() / push_psi_ptr_value() に対応
         """
+        # What a persistent name holds keeps its place: when the cell a
+        # `persistent` declaration made is matched against a clause's own
+        # variable, it is that variable the name stands for from then on, so
+        # the mark that says "a feature opened here stays opened" goes with
+        # it.  Without this a library that fills a table from a predicate —
+        # the tokenizer's `gen_char_table(simple_atom_table, …)` — writes
+        # into a term the query takes back on its way out.
+        if (var.__dict__.get('_wl_persistent_cell', False)
+                and val.coref is None and val.value is None
+                and not val.attr_list
+                and not val.__dict__.get('_wl_persistent_cell', False)):
+            # Two variables made one, and one of them is what a `persistent`
+            # name holds: it is the cell that stays, since the other side is
+            # a clause's own variable that goes when the query does.  Bound
+            # the other way round the name would point at that variable, the
+            # pointer would be taken back with the rest of the query, and
+            # what was written through it — the tokenizer filling
+            # `simple_atom_table` from `gen_char_table` — would be lost.
+            var, val = val, var
         # coref フィールドをトレイルに記録してから変更
         self.trail.trail_psi(var, 'coref')
         var.coref = val

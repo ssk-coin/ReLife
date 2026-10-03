@@ -121,7 +121,7 @@ def _freeze_calls_deep(t: PsiTerm, quoted_flag: int,
         stack.extend(node.attr_list.values())
 
 
-def _eval_copy_thaw(t: PsiTerm) -> bool:
+def _eval_copy_thaw(t: PsiTerm, thaw_evalin: bool = False) -> bool:
     """Let a filed rule's calls go when it is copied to be run.
 
     C copies a rule for execution with EVAL_FLAG, and copy() gives a node
@@ -161,6 +161,16 @@ def _eval_copy_thaw(t: PsiTerm) -> bool:
             _in_sym = (_in_d.type.keyword.symbol
                        if (_in_d is not None and _in_d.type is not None
                            and _in_d.type.keyword is not None) else '')
+            # A quoted `evalin` is let go the same way: a grammar's
+            # terminal rule carries `` `evalin(D) = Ys `` so that the
+            # reading is written into the clause rather than made while the
+            # clause is built, and running the clause is when it is made.
+            if (thaw_evalin and _in_sym in ('evalin', 'eval')
+                    and '1' in _in_d.attr_list):
+                n.coref = _in_d
+                _clear(_in_d, set())
+                _seen[_id] = True
+                return True
             if (_in_sym == '.' and '1' in _in_d.attr_list
                     and '2' in _in_d.attr_list):
                 n.coref = _in_d
@@ -1458,6 +1468,18 @@ def _collect_embedded_func_goals(t: 'PsiTerm', eng, visited: set) -> list:
             # Lazy: the alternatives wait until one of them is chosen.
             continue
 
+        # A term held as it is written is not worked out here, and neither
+        # is anything under it: the `` `evalin(D) = Ys `` a grammar's
+        # terminal rule carries is the code of the clause being built, to
+        # be run when that clause runs.  Working it out while the clause is
+        # made leaves `D = Ys` behind and the character stream never
+        # advances.
+        from wild_life.data_structures import QUOTED_TRUE as _QT_cefg
+        if (child.flags & _QT_cefg) or (
+                child.type is not None and child.type.keyword is not None
+                and child.type.keyword.symbol == '`'):
+            continue
+
         # A `T.F` written into a body stands for the feature: `f(A,X) ->
         # @(A, X.A)` hands back the feature X has at A, and waits on A while
         # it is still a variable.
@@ -2546,10 +2568,22 @@ class Engine:
             from wild_life.data_structures import REDUCED as _RED_pa0
             _call_arg = None
             _call_key = None
+            from wild_life.built_ins import (
+                _persistent_cell as _pc_pa, _global_cell as _gc_pa)
             for _k_pa, _av_pa in list(thegoal.attr_list.items()):
                 _ad_pa = _av_pa.deref()
                 if not (_iuf_pa(_ad_pa)
                         and not getattr(_ad_pa.type, 'is_dynamic', False)):
+                    continue
+                # A name declared `persistent` or `global` stands for one
+                # term that every reading finds, so a predicate is handed
+                # that very term and not a reduction of it.  The pass below
+                # puts the cell itself in the argument; reducing it here
+                # would hand over a copy, and what the predicate writes into
+                # it — the tokenizer's `gen_char_table(simple_atom_table, …)`
+                # — would be written into the copy.
+                if (_gc_pa(_ad_pa, self) is not None
+                        or _pc_pa(_ad_pa, self) is not None):
                     continue
                 if not _ad_pa.attr_list:
                     _call_arg = _ad_pa
@@ -2731,7 +2765,7 @@ class Engine:
         _vm: dict = {}
         head = copy_term(head_orig, _vm)
         body = copy_term(body_orig, _vm)
-        _eval_copy_thaw(body)
+        _eval_copy_thaw(body, thaw_evalin=True)
         _link_head_globals(head, head_orig, self)
         # A call written into a clause head's argument is there for its value:
         # `p_a(pair(foo_a(Y:titi_a), …))` matches against pair(t(Y), …), which

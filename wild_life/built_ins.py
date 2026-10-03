@@ -339,6 +339,64 @@ def _is_proper_bool_expr(t: 'PsiTerm') -> bool:
     return False
 
 
+def _evalin_force(arg: 'PsiTerm', eng, _seen=None) -> None:
+    """Spend the quotes inside a term and work the calls they held out, in place.
+
+    This is C's `mark_eval`, which `evalin` runs over its argument before
+    handing the argument itself back: a quote that was keeping a call from
+    being made is dropped, the call is made, and the node that was the call
+    becomes its answer.  The tokenizer's character stream is read this way —
+    `next_char` answers `[C|`next_char]`, and `evalin` on that list turns the
+    tail into the next cell — so without the write-back the stream is read
+    from the start at every look.
+
+    The answer's own quotes are left alone, which is what keeps the stream
+    lazy: one `evalin` uncovers one more character, not the whole file.
+    """
+    if arg is None or eng is None:
+        return
+    _ns_ef = getattr(eng, 'non_strict_set', None) or ()
+    seen: set = set()
+    stack = [arg]
+    while stack:
+        n = stack.pop()
+        if n is None:
+            continue
+        n = n.deref()
+        if id(n) in seen:
+            continue
+        seen.add(id(n))
+        # A backquote spends itself here: the node stands for the term it
+        # was written in front of, and it is that term the reading goes on
+        # with.  Left in place it is not a list cell, and the `[A,B|_]` the
+        # tokenizer matches its saved characters against finds nothing.
+        if (n.type is not None and n.type.keyword is not None
+                and n.type.keyword.symbol == '`'
+                and list(n.attr_list.keys()) == ['1']):
+            _in_ef = n.attr_list['1'].deref()
+            if _in_ef is not n and n.coref is None:
+                eng.trail.trail_psi(n, 'coref')
+                n.coref = _in_ef
+                stack.append(_in_ef)
+            continue
+        if n.flags & QUOTED_TRUE:
+            eng.trail.trail_psi(n, 'flags')
+            n.flags &= ~QUOTED_TRUE
+        if _is_user_function(n) and n.coref is None:
+            _v_ef = _eval_user_func_sync(n, eng, 0)
+            if _v_ef is not None:
+                _vd_ef = _v_ef.deref()
+                if _vd_ef is not n and n.coref is None:
+                    eng.trail.trail_psi(n, 'coref')
+                    n.coref = _vd_ef
+            continue
+        # A non-strict call holds its arguments as they are written, so
+        # there is nothing of them to work out here either.
+        if n.type is not None and n.type in _ns_ef:
+            continue
+        stack.extend(n.attr_list.values())
+
+
 def _is_settled_value(t: 'PsiTerm', origin) -> bool:
     """Whether t is an answer in itself, rather than something still waiting.
 
@@ -367,7 +425,15 @@ def _is_settled_value(t: 'PsiTerm', origin) -> bool:
         if id(n) in seen:
             continue        # a cycle is as settled as it will get
         if n.type is origin:
-            return False    # it stands for itself, so it says nothing
+            # A mention of the call held as it is written is part of the
+            # answer, not the answer waiting on itself: the tokenizer's
+            # `next_char -> L | get(X), …, T = `next_char` answers a list
+            # whose tail is the next call, to be made when something asks
+            # for it.  Reading that as unsettled leaves the name standing
+            # for itself and the stream is read from the start every time.
+            if not (n is not _td and (n.flags & QUOTED_TRUE)):
+                return False    # it stands for itself, so it says nothing
+            continue
         # A sum still waiting on its variables is not a value: a global's
         # stored `@ + 1` says nothing yet.  A psi-term with variables in it
         # is a different matter — `stu` is worth `student(roommate =>
@@ -1307,6 +1373,14 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             # so the quote goes for good rather than coming back on
             # backtracking.
             arg.flags &= ~QUOTED_TRUE
+        if sym == 'evalin':
+            # evalin reads the term where it stands: the quotes inside it are
+            # spent and the calls they held are made, each node becoming what
+            # it answers.  Reducing a copy instead would read the character a
+            # lazy stream's next cell holds and then throw the cell away, so
+            # the stream would skip a character at every look.
+            _evalin_force(arg, eng)
+            arg = arg.deref()
         _ok_ev, _v_ev = _eval_arith(arg, eng)
         if _ok_ev:
             return _make_number(eng, _v_ev)
@@ -2156,7 +2230,7 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
 
     # ── copy_term(X) functional use at top level ────────────────────────────
     if _is_copy_term_func(t):
-        t = _eval_copy_term_func(t)
+        t = _eval_copy_term_func(t, eng)
 
     # ── bottom type ({} / disj_nil): cannot be written ──────────────────────
     sym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
@@ -4525,9 +4599,19 @@ def _is_copy_term_func(t: 'PsiTerm') -> bool:
     return '1' in t.attr_list and '2' not in t.attr_list
 
 
-def _eval_copy_term_func(t: 'PsiTerm') -> 'PsiTerm':
-    """Evaluate copy_term(X) → fresh copy of X."""
+def _eval_copy_term_func(t: 'PsiTerm', eng=None) -> 'PsiTerm':
+    """Evaluate copy_term(X) → fresh copy of X.
+
+    A name declared `persistent` or `global` stands for what its cell holds,
+    so that is what is copied: the tokenizer reads the two characters it
+    saved with `copy_term(rest_chars) = [A,B]`, and a copy of the name alone
+    would leave A and B with nothing to match.
+    """
     arg = t.attr_list['1'].deref()
+    if eng is not None:
+        _cell_ct = _global_cell(arg, eng) or _persistent_cell(arg, eng)
+        if _cell_ct is not None:
+            arg = _cell_ct.deref()
     return copy_term(arg)
 
 
@@ -5224,7 +5308,7 @@ def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
 
     # Built-in copy_term(X) functional use — return a fresh copy
     if _is_copy_term_func(body_d):
-        return _eval_copy_term_func(body_d)
+        return _eval_copy_term_func(body_d, eng)
 
     # Built-in cond(C, T, E) — evaluate functionally
     if _is_cond_builtin_local(body_d):
@@ -5411,7 +5495,7 @@ def _try_eval_any_func(t: PsiTerm, eng,
 
     # Built-in copy_term
     if _is_copy_term_func(td):
-        return _eval_copy_term_func(td)
+        return _eval_copy_term_func(td, eng)
 
     # `strip(T)` is T's features under the top sort, and copy_pointer(T)
     # is T's features under T's own.  Read where a value belongs -- the
@@ -5939,6 +6023,27 @@ def _evaluate_result_for_display(t: PsiTerm, eng, _depth: int = 0) -> PsiTerm:
     return t
 
 
+def _keeps_persistently(t: 'PsiTerm') -> bool:
+    """Whether a term, or anything it now stands for, lives in persistent store.
+
+    `_persistent_cell` marks the term a persistent name holds, but the mark
+    sits on the node it marked: a clause head that matches the cell against
+    one of its own variables leaves the cell pointing at that variable, and
+    the variable carries no mark.  A feature opened on it there would be
+    trailed and taken back when the query that opened it ends — which is how
+    the tokenizer's `gen_char_table(simple_atom_table, …)` filled a table
+    that was empty again by the time the grammar read it.
+    """
+    seen: set = set()
+    while t is not None and id(t) not in seen:
+        seen.add(id(t))
+        if (t.__dict__.get('_wl_persistent_cell', False)
+                or t.__dict__.get('_wl_persistent_written', False)):
+            return True
+        t = t.coref
+    return False
+
+
 def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
                       create: bool = True) -> 'Optional[PsiTerm]':
     """Get (or create) the attribute cell for a T.F dot-access term.
@@ -5964,6 +6069,9 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
         return None
     host = a1.deref()
     feat = a2.deref()
+    # Whether what is written on the left lives in persistent store, read
+    # before any of the steps below move `host` along.
+    _entry_keeps = _keeps_persistently(a1)
     # A label written under a backquote is that label: the profiler files
     # its records under `` profile_stats.`Function ``, where the quote is
     # there to keep the name from being read as a call.
@@ -5976,6 +6084,7 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
     if _host_cell is None:
         _host_cell = _persistent_cell(host, eng)
     if _host_cell is not None:
+        _entry_keeps = _entry_keeps or _keeps_persistently(_host_cell)
         host = _host_cell.deref()
     # A feature written on a meet belongs to the term the two sides meet at:
     # accumulators.lf builds its accumulator as `strip(A) & @(AIn, Out.A)`
@@ -6147,7 +6256,10 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
     # What a `persistent` name holds is not the query's to undo: a table the
     # library files write into has to still be there on the next query, and
     # on the one after a failure.
-    _host_keeps = host.__dict__.get('_wl_persistent_cell', False)
+    _host_keeps = (host.__dict__.get('_wl_persistent_cell', False)
+                   or _entry_keeps)
+    if _host_keeps:
+        host._wl_persistent_cell = True
     if _host_keeps:
         fresh._wl_persistent_cell = True
         # A feature opened on a term that lives in persistent store lives
@@ -6748,10 +6860,10 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
 
     # Handle copy_term(X) functional use: Y = copy_term(X) → Y = fresh copy of X
     if _is_copy_term_func(b_d):
-        c = _eval_copy_term_func(b_d)
+        c = _eval_copy_term_func(b_d, eng)
         return _unify(eng, _stored_side(a_d, eng), c)
     if _is_copy_term_func(a_d):
-        c = _eval_copy_term_func(a_d)
+        c = _eval_copy_term_func(a_d, eng)
         return _unify(eng, _stored_side(b_d, eng), c)
 
     # Handle glb(X,Y) functional use: B = glb(X,Y) → B = GLB of X and Y
@@ -9517,6 +9629,15 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         # doing the counting ends on.
         if not _backtrackable:
             eng.persistent_store_touched = True
+            # What `<<-` puts away is a copy, as c_global_assign's
+            # `inc_heap_copy` makes one: the term may be built from the
+            # caller's variables — the tokenizer's `rest_chars <<- [A,B]`
+            # holds the two characters a `cond` just read off the stream —
+            # and left shared, the query takes its own bindings back out of
+            # the store on the way out and leaves `[@,@]` behind.
+            from wild_life.unification import copy_term as _ct_g1
+            if rhs_d.attr_list or rhs_d.coref is not None:
+                rhs_d = _ct_g1(rhs_d, {})
             _mark_persistent_deep(rhs_d, set())
             # The term the name stands for is matched, not added to: an
             # equation may read what `a` holds but not open a feature on it.
@@ -11624,13 +11745,16 @@ def bi_open_in(goal: PsiTerm, eng) -> bool:
     if a1 is None:
         return False
     a1d = a1.deref()
-    # Get filename string
-    if a1d.value is not None:
-        filename = str(a1d.value)
-    elif a1d.type and a1d.type.keyword:
-        filename = a1d.type.keyword.symbol
-    else:
-        return False
+    # Get filename string.  The name may be worked out rather than written:
+    # the tokenizer opens `strcon(File,"_toks")`.
+    filename = _get_str_val(a1d, eng)
+    if filename is None:
+        if a1d.value is not None:
+            filename = str(a1d.value)
+        elif a1d.type and a1d.type.keyword:
+            filename = a1d.type.keyword.symbol
+        else:
+            return False
     if filename == 'stdin':
         # `open_in(stdin, S)` names the standard input rather than a file.
         f = sys.__stdin__
@@ -11669,12 +11793,15 @@ def bi_open_out(goal: PsiTerm, eng) -> bool:
     if a1 is None:
         return False
     a1d = a1.deref()
-    if a1d.value is not None:
-        filename = str(a1d.value)
-    elif a1d.type and a1d.type.keyword:
-        filename = a1d.type.keyword.symbol
-    else:
-        return False
+    # As in open_in, the name may be worked out: `open_out(strcon(F,"_expr"))`.
+    filename = _get_str_val(a1d, eng)
+    if filename is None:
+        if a1d.value is not None:
+            filename = str(a1d.value)
+        elif a1d.type and a1d.type.keyword:
+            filename = a1d.type.keyword.symbol
+        else:
+            return False
     if filename in ('stdout', 'stderr'):
         # `open_out(stdout, S3)` names the standard stream, which is what
         # copy_file holds on to so that closing the target file puts the
