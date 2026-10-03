@@ -1123,6 +1123,14 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         a1e = _try_eval_string_func(a1, eng)
         if a1e is not None:
             a1 = a1e.deref()
+        # A name is made of a string, and a variable is not one yet: the
+        # tokenizer builds `str2psi(strcon(S,Z), current_module)` into the
+        # rule it generates for each operator character, and answering it
+        # there — with Z still to be read — would write the name `@` into
+        # the rule and every operator would come out as `@`.
+        if (eng is not None and a1.value is None and not a1.attr_list
+                and (a1.type is None or a1.type is eng.wl.top)):
+            return None
         if a1.type and a1.type is eng.wl.quoted_string and a1.value is not None:
             name = str(a1.value)
         elif a1.type and a1.type.keyword:
