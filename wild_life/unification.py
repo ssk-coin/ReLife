@@ -540,6 +540,20 @@ class Unifier:
         self.trail.trail_psi(t, 'type')
         t.type = new_type
 
+    def _mark_delay_fired(self, t: PsiTerm) -> None:
+        """Note that a term has had its delay rules run, undoably.
+
+        C keeps this in the term's status word and stacks the old value, so a
+        term the engine backtracks to is owed its rules again: inherit's
+        `:: P:person(sex => S, friends => F) | friendly(F)` has to hand out a
+        friend for every power supply the robot is tried with, not only the
+        first.
+        """
+        if '_delay_fired' not in t.__dict__:
+            t._delay_fired = False
+        self.trail.trail_psi(t, '_delay_fired')
+        t._delay_fired = True
+
     def _settle_disjunction(self, d: PsiTerm) -> bool:
         """Bind a disjunction node to one alternative, keeping the rest.
 
@@ -1324,7 +1338,7 @@ class Unifier:
                     if (_elem0_d is not None and WL.delay_rules and self.engine is not None
                             and _elem0_d.type is not None and _elem0_d.type is not WL.top
                             and not getattr(_elem0_d, '_delay_fired', False)):
-                        _elem0_d._delay_fired = True
+                        self._mark_delay_fired(_elem0_d)
                         self._fire_delay_rules(_elem0_d, _elem0_d.type)
                     return True
                 self.bind(u, v)
@@ -1415,7 +1429,7 @@ class Unifier:
                     # Fire sub-terms first (bottom-up / post-order, matching C Wild Life behaviour).
                     self._fire_delay_rules_for_subterms(_v_canon)
                     if not getattr(_v_canon, '_delay_fired', False):
-                        _v_canon._delay_fired = True
+                        self._mark_delay_fired(_v_canon)
                         self._fire_delay_rules(_v_canon, _v_canon.type)
                 if _v_canon.attr_list and _v_canon.type is not None and self.engine is not None:
                     self._try_sort_narrowing(_v_canon)
@@ -1530,7 +1544,7 @@ class Unifier:
                 if (_uelems0_d is not None and WL.delay_rules and self.engine is not None
                         and _uelems0_d.type is not None and _uelems0_d.type is not WL.top
                         and not getattr(_uelems0_d, '_delay_fired', False)):
-                    _uelems0_d._delay_fired = True
+                    self._mark_delay_fired(_uelems0_d)
                     self._fire_delay_rules(_uelems0_d, _uelems0_d.type)
                 return True
             self.bind(v, u)
@@ -1556,7 +1570,7 @@ class Unifier:
                 # Fire sub-terms first (bottom-up / post-order, matching C Wild Life behaviour).
                 self._fire_delay_rules_for_subterms(_u_canon)
                 if not getattr(_u_canon, '_delay_fired', False):
-                    _u_canon._delay_fired = True
+                    self._mark_delay_fired(_u_canon)
                     self._fire_delay_rules(_u_canon, _u_canon.type)
             if _u_canon.attr_list and _u_canon.type is not None and self.engine is not None:
                 self._try_sort_narrowing(_u_canon)
@@ -1682,7 +1696,7 @@ class Unifier:
                 if (WL.delay_rules and _e0_b.type is not None
                         and _e0_b.type is not WL.top
                         and not getattr(_e0_b, '_delay_fired', False)):
-                    _e0_b._delay_fired = True
+                    self._mark_delay_fired(_e0_b)
                     self._fire_delay_rules(_e0_b, _e0_b.type)
                 return True
             # A term meeting a disjunction takes one of its alternatives, and
@@ -1987,7 +2001,7 @@ class Unifier:
                 if not self._apply_prototype_attrs(u_canon):
                     return False
                 if WL.delay_rules and not getattr(u_canon, '_delay_fired', False):
-                    u_canon._delay_fired = True
+                    self._mark_delay_fired(u_canon)
                     self._fire_delay_rules(u_canon, u_canon.type)
             finally:
                 self._in_deferred_check = False
@@ -2546,7 +2560,6 @@ class Unifier:
             # earliest start is what latest([]) answers.  A feature the term
             # already stated is settled by the unification above and is no
             # longer a choice.
-            self._settle_pattern_disjunctions(pattern_d_copy)
 
             # Prove the goal itself, not a copy: it shares the pattern's
             # variables, and that sharing is how the proof reaches the term.
@@ -2567,7 +2580,7 @@ class Unifier:
                     for _lit in pre_unify_literals:
                         _lit_d = _lit.deref()
                         if not getattr(_lit_d, '_delay_fired', False):
-                            _lit_d._delay_fired = True
+                            self._mark_delay_fired(_lit_d)
                             self._fire_delay_rules(_lit_d, _lit_d.type)
                 finally:
                     self._literal_fire_depth -= 1
@@ -2585,6 +2598,13 @@ class Unifier:
             _gs_save = _eng.goal_stack
             _eng.goal_stack = None
             _eng.push_goal(_GT.PROVE, goal_materialized, _defrules_sentinel, None)
+            # The choices a pattern's disjunction leaves are taken with the
+            # rule's goal still to be proved, the way C's unify goal settles
+            # the feature while the goal that reads it is still on the stack:
+            # inherit's `:: R:robot(power_supply => S, cooling_fluid =>
+            # {air;oil;water}) | powerful(S)` owes a power supply to each
+            # cooling fluid, not only to the first.
+            self._settle_pattern_disjunctions(pattern_d_copy)
             _old_main_ok = _eng.main_loop_ok
             _barrier = _cp_save if _cp_save is not None else _IRB
             _goal_ok = _eng.run(cs_barrier=_barrier)
