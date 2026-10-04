@@ -8253,6 +8253,13 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
                 s_var.flags |= SORT_VAR
         return True  # successfully suspended
 
+    # A list built-in waits for its list the way C's rules for it do.
+    if eng is not None:
+        _r_lc = _list_call_delay(b_d, a_d, eng)
+        if _r_lc is None:
+            _r_lc = _list_call_delay(a_d, b_d, eng)
+        if _r_lc is not None:
+            return _r_lc
     # Check RHS first
     if _b_sym_str in _DELAY_STRING_FUNCS and eng is not None:
         _r = _str_func_delay(b_d, a_d, eng)
@@ -12176,6 +12183,88 @@ def _eval_map_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             break
 
     return wl.make_list(results)
+
+
+def _residuate_call(call: 'PsiTerm', blocking: list, eng) -> 'Optional[PsiTerm]':
+    """File a call that cannot answer yet on what it is waiting for.
+
+    This is C's `check_func` followed by `do_residuation`: the call is given
+    a fresh psi-term to fill in and hands that back, and the call itself is
+    put on the residuation list of each variable it is stuck on.  When one of
+    them is bound, `_wakeup_resid` pushes the goal and the call is made,
+    filling the term it handed back.
+
+    C writes most of its list functions in LIFE — `map(F,[H|T]) -> [F(H) |
+    map(F,T)]` and the rest live in built_ins.lf — so a call of one of them
+    on an unbound list simply fails to match any rule and residuates there.
+    They are built in here, so they say what they are waiting for themselves.
+
+    Returns the term the call will fill in, or None when nothing blocks it.
+    """
+    if eng is None or not blocking:
+        return None
+    from wild_life.data_structures import (
+        Goal as _ResG, Residuation as _ResR, SORT_VAR as _SV_RC)
+    wl_rc = eng.wl
+    _eq_defn = getattr(wl_rc, 'eqsym', None)
+    if _eq_defn is None and hasattr(wl_rc, 'syntax_module'):
+        _eq_defn = wl_rc.syntax_module.symbol_table.get('=')
+    if _eq_defn is None:
+        return None
+    _result = PsiTerm(type_def=wl_rc.top)
+    _eq = PsiTerm(type_def=_eq_defn)
+    _eq.attr_list['1'] = _result
+    _eq.attr_list['2'] = call
+    _eq._resid_marker = True
+    _pending = _ResG(GoalType.PROVE, _eq, None, None, pending=True)
+    for _v in blocking:
+        _v = _v.deref()
+        if _v.resid is None:
+            eng.trail.trail_psi(_v, 'resid')
+            _v.resid = [_ResR(goal=_pending)]
+        elif not any(_r.goal is _pending for _r in _v.resid):
+            eng.trail.trail_copy(_v, 'resid')
+            _v.resid.append(_ResR(goal=_pending))
+        if not (_v.flags & _SV_RC):
+            eng.trail.trail_psi(_v, 'flags')
+            _v.flags |= _SV_RC
+    return _result
+
+
+# Built-in functions C writes as LIFE rules over a list, with the argument
+# whose shape those rules match on.  A call of one of them waits where C's
+# rule matching would: `map(F,L)` says nothing until L is a list.
+_LIST_CALL_BLOCKERS = {
+    'map': ('2',), 'reduce': ('3',), 'length': ('1',),
+    # `project(A,B) -> B.A` reads a feature, and a reading waits for both
+    # the term and the name of the feature.
+    'project': ('1', '2'),
+}
+
+
+def _list_call_delay(call: 'PsiTerm', target: 'PsiTerm', eng):
+    """Work a list built-in out, or let it wait for the list it is given.
+
+    Returns True when the call was answered or filed, None when this is not
+    one of those calls or nothing is blocking it.
+    """
+    if eng is None or call is None:
+        return None
+    _sym_lc = _get_sym(call)
+    _keys_lc = _LIST_CALL_BLOCKERS.get(_sym_lc)
+    if _keys_lc is None or not all(_k in call.attr_list for _k in _keys_lc):
+        return None
+    _val_lc = _try_eval_any_func(call, eng)
+    if _val_lc is not None and _val_lc.deref() is not call:
+        return _unify(eng, target, _val_lc)
+    _blocked_lc = [call.attr_list[_k].deref() for _k in _keys_lc]
+    _blocked_lc = [_a for _a in _blocked_lc if _term_is_unbound(_a, eng)]
+    if not _blocked_lc:
+        return None
+    _res_lc = _residuate_call(call, _blocked_lc, eng)
+    if _res_lc is None:
+        return None
+    return _unify(eng, target, _res_lc)
 
 
 def _apply_func(f_term: PsiTerm, arg: PsiTerm, eng) -> Optional[PsiTerm]:
