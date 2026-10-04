@@ -2925,7 +2925,17 @@ def copy_term(t: PsiTerm, var_map: Optional[Dict[int, PsiTerm]] = None) -> PsiTe
 
     # 定数・アトム
     if not _attrs and t.value is not None:
+        # A number the term reaches twice is one number in the copy as well.
+        # C copies through a translation table that covers every node, and
+        # addtab turns on exactly that: `digits` files its table with the
+        # equal digits of a sum sharing one node, and `diff(X,X)` reads the
+        # sharing to tell which of them are the same.
+        tid = id(t)
+        result = var_map.get(tid)
+        if result is not None:
+            return result
         result = PsiTerm()
+        var_map[tid] = result
         result.type = t.type
         result.value = t.value
         result.flags = t.flags

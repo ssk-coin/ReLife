@@ -2517,6 +2517,12 @@ def _write_all_args(goal: PsiTerm, eng, quoted: bool, stream=None,
         if key not in attrs:
             break
         arg = attrs[key].deref()
+        # A `bagof` written out is the list it collects: `write(bagof(X,
+        # p(X)))` puts the solutions on the stream, not the call that finds
+        # them.
+        _bag_wa = eval_bagof_call(arg, eng)
+        if _bag_wa is not None:
+            arg = _bag_wa.deref()
         try:
             _write_term(arg, eng, stream=stream, quoted=quoted, compact=compact)
         except _WriteFailure:
