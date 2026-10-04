@@ -4388,6 +4388,10 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
             # back with the number it started from.
             from wild_life.inference import _leftmost_goal as _lmg_sync
             _cond_d = cond_part.deref()
+            if _st_call is None:
+                # The value is read before the goal is proved, the way
+                # c_such_that checks it out and hands it back first.
+                _eval_embedded_user_funcs(_vp_d, eng, _depth + 1, set())
             _eval_embedded_user_funcs(_lmg_sync(_cond_d, eng.wl), eng,
                                       _depth + 1, set())
             # Run the guard in an inner proof loop.

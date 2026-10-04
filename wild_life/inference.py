@@ -3568,6 +3568,19 @@ class Engine:
                     self.trail.trail_psi(_vp_d, 'coref')
                     _vp_d.coref = PsiTerm(type_def=wl.top)
                 _cond_d = cond_part.deref()
+                if _st_call is None:
+                    # Any other value is reduced up front: its sub-terms are
+                    # rewritten in place, which a later backtrack into the
+                    # guard would not undo.  Before the guard, as
+                    # c_such_that reads the value with i_check_out and hands
+                    # it back before it proves the goal: that order is what
+                    # `lrmap(F,[E|L]) -> [F(E)|L1] | L1 = lrmap(F,L)` is
+                    # written for, and reading the guard first walks the list
+                    # right to left.
+                    _eval_embedded_user_funcs(_vp_d, self, 0, set())
+                    _sv = _try_eval_string_func(_vp_d, self)
+                    if _sv is not None and _sv is not _vp_d:
+                        val_part = _sv
                 # Reduce calls embedded in the guard — `genChildren(children(X),
                 # A)` needs its children(X) argument reduced before the
                 # predicate runs.  A conjunction is proven left to right, so
@@ -3577,13 +3590,6 @@ class Engine:
                 # first solution.
                 _eval_embedded_user_funcs(_leftmost_goal(_cond_d, wl), self, 0, set())
                 if _st_call is None:
-                    # Any other value is reduced up front: its sub-terms are
-                    # rewritten in place, which a later backtrack into the
-                    # guard would not undo.
-                    _eval_embedded_user_funcs(_vp_d, self, 0, set())
-                    _sv = _try_eval_string_func(_vp_d, self)
-                    if _sv is not None and _sv is not _vp_d:
-                        val_part = _sv
                     self.push_goal(GoalType.UNIFY, val_part, result, None)
                 else:
                     self.push_goal(GoalType.SUCHTHAT_VAL, val_part, result, _st_call)
