@@ -6061,6 +6061,24 @@ def _keeps_persistently(t: 'PsiTerm') -> bool:
     return False
 
 
+def _dot_becomes_cell(dot_term: 'PsiTerm', cell: 'PsiTerm', eng) -> 'PsiTerm':
+    """Let the reading stand for the feature it read.
+
+    C reduces `T.F` where it is written, so a name tagged to one — wam's
+    `projete` writes `features(P:(T1.N))` and then hands P on — reads as the
+    feature from then on rather than as the reading.  Without this P stays a
+    term of sort `.` and `var(P)` answers false where C answers true.
+    """
+    if dot_term is None or cell is None or eng is None:
+        return cell
+    _cd = cell.deref()
+    if _cd is dot_term or dot_term.coref is not None:
+        return cell
+    eng.trail.trail_psi(dot_term, 'coref')
+    dot_term.coref = _cd
+    return cell
+
+
 def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
                       create: bool = True) -> 'Optional[PsiTerm]':
     """Get (or create) the attribute cell for a T.F dot-access term.
@@ -6246,7 +6264,7 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
         return None
     existing = host.attr_list.get(fkey)
     if existing is not None:
-        return existing  # caller will deref as needed
+        return _dot_becomes_cell(dot_term, existing, eng)
     if not create:
         # Asked only for what the term already holds.  A feature it may still
         # be given — by the prototype of its sort, say — is not read as an
@@ -6293,7 +6311,7 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
     # e.g. X.set = true? fires the daemon write(X) that was set by such_that.
     if host.resid and eng is not None and getattr(eng, 'unifier', None) is not None:
         eng.unifier._wakeup_resid(host, fresh)
-    return fresh
+    return _dot_becomes_cell(dot_term, fresh, eng)
 
 
 def _has_disjunctive_body(t: PsiTerm, wl, _seen: set = None,
@@ -8572,9 +8590,26 @@ def bi_compare(goal: PsiTerm, eng) -> bool:
 # Type testing
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _arg_for_var_test(goal: PsiTerm, eng):
+    """The term var/nonvar is asked about, with a feature reading read.
+
+    `var(Z.1)` asks about what Z holds at 1, which C reduces where it is
+    written; wam's `transarg` turns on the answer.
+    """
+    arg = _get_one_arg(goal)
+    if arg is None:
+        return None
+    if (_get_sym(arg) == '.' and '1' in arg.attr_list
+            and '2' in arg.attr_list and eng is not None):
+        _cell_vt = _resolve_dot_feat(arg, eng)
+        if _cell_vt is not None:
+            arg = _cell_vt.deref()
+    return arg
+
+
 def bi_var(goal: PsiTerm, eng) -> bool:
     """var(X) — true if X is an unbound variable."""
-    arg = _get_one_arg(goal)
+    arg = _arg_for_var_test(goal, eng)
     if arg is None:
         return False
     return _is_var(arg, eng)
@@ -8582,7 +8617,7 @@ def bi_var(goal: PsiTerm, eng) -> bool:
 
 def bi_nonvar(goal: PsiTerm, eng) -> bool:
     """nonvar(X)."""
-    arg = _get_one_arg(goal)
+    arg = _arg_for_var_test(goal, eng)
     if arg is None:
         return True
     return not _is_var(arg, eng)
