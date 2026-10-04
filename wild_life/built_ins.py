@@ -897,11 +897,14 @@ def _try_eval_arith_to_term(t: PsiTerm, eng) -> Optional[PsiTerm]:
     return result
 
 
-def _normalize_arith_in_term(t: PsiTerm, eng, _seen=None) -> PsiTerm:
-    """Return a copy of t with arithmetic sub-expressions evaluated.
+def _normalize_arith_in_term(t: PsiTerm, eng, _seen=None,
+                             evaluate: bool = True) -> PsiTerm:
+    """Return a copy of t, working out its arithmetic where asked to.
 
-    Used by assert/asserta so that storing ``mynum(N+1)`` where N=31
-    stores ``mynum(32)`` (an integer) rather than the expression tree.
+    `evaluate` is off for assert, which files the clause as it was written:
+    C marks the whole goal quoted before reading it, so `assert(q(N+1))`
+    with N worth 1 files `q(1 + 1)`.  smalltwente counts on that — the
+    retract that follows is meant to miss the sum it filed.
 
     What a term reaches twice it reaches twice in the copy: share.lf asserts
     `spair(X,X)` and reads it back as the one node under two features, and a
@@ -920,7 +923,7 @@ def _normalize_arith_in_term(t: PsiTerm, eng, _seen=None) -> PsiTerm:
     # out: assert stores what was written, and only a strict call asks the
     # expression for its value.
     from wild_life.data_structures import NON_STRICT_TERM as _NST_NORM
-    if not (t.flags & _NST_NORM):
+    if evaluate and not (t.flags & _NST_NORM):
         arith = _try_eval_arith_to_term(t, eng)
         if arith is not None:
             _seen[tid] = arith
@@ -940,7 +943,7 @@ def _normalize_arith_in_term(t: PsiTerm, eng, _seen=None) -> PsiTerm:
     new_t.flags = t.flags
     new_t.status = t.status
     for k, v in t.attr_list.items():
-        new_t.attr_list[k] = _normalize_arith_in_term(v, eng, _seen)
+        new_t.attr_list[k] = _normalize_arith_in_term(v, eng, _seen, evaluate)
     return new_t
 
 
@@ -9368,7 +9371,10 @@ def _normalize_clause_for_assert(arg: PsiTerm, eng) -> PsiTerm:
             _thaw_non_strict_freeze as _thaw_asrt)
         _thaw_asrt(arg)
         return arg
-    return _normalize_arith_in_term(arg, eng)
+    # A fact is filed as written too: the sum in it is part of the clause
+    # rather than one to work out, which `assert` says by marking the whole
+    # goal before it reads it.
+    return _normalize_arith_in_term(arg, eng, evaluate=False)
 
 
 def bi_assert(goal: PsiTerm, eng) -> bool:
