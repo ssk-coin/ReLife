@@ -2929,6 +2929,37 @@ def _apply_to_call(t: PsiTerm, eng) -> Optional[PsiTerm]:
     return call
 
 
+def _apply_functor_var(t: 'PsiTerm', eng) -> 'Optional[PsiTerm]':
+    """The variable an apply node is waiting on, or None if it is not waiting.
+
+    `F(A)` is read as apply(A, functor => F).  While F is a variable the node
+    stands for a call nobody can make yet, and this hands back F so the node
+    can be filed on it.
+    """
+    wl_fv = eng.wl if eng is not None else None
+    if wl_fv is None or getattr(wl_fv, 'apply', None) is None:
+        return None
+    if t is None or t.type is not wl_fv.apply:
+        return None
+    _k_fv = (wl_fv.functor.symbol
+             if (getattr(wl_fv, 'functor', None) is not None
+                 and wl_fv.functor and wl_fv.functor.keyword)
+             else 'functor')
+    _f_fv = t.attr_list.get(_k_fv)
+    if _f_fv is None:
+        return None
+    _f_fv = _f_fv.deref()
+    # A name handed on as a value keeps its backquote, and that is a name,
+    # not a variable to wait on.
+    while (_f_fv.type is not None and _f_fv.type.keyword is not None
+           and _f_fv.type.keyword.symbol == '`'
+           and list(_f_fv.attr_list) == ['1']):
+        _f_fv = _f_fv.attr_list['1'].deref()
+    if _f_fv.type is not None and not _term_is_unbound(_f_fv, eng):
+        return None
+    return _f_fv
+
+
 def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
     """Evaluate an arithmetic expression. Returns (ok, value)."""
     if t is None or _depth > 40:
@@ -5770,6 +5801,18 @@ def _eval_embedded_user_funcs(
                 or (_get_sym(child) in _ARITH_OPS_SET
                     and child.attr_list and _arith_reads_a_cell(child))):
             continue
+        # A call through a functor nobody has named yet is not an answer and
+        # not a term to leave standing: C works an argument out before the
+        # call, and working out `G(1)` with G unknown residuates, so what the
+        # term holds from here on is a fresh variable waiting on G.  Leaving
+        # the application in its place shows `apply(1,functor => @)` where C
+        # shows `@`, and never fills it in when G arrives.
+        _fv_ch = _apply_functor_var(child, eng)
+        if _fv_ch is not None:
+            _rv_ch = _residuate_call(child, [_fv_ch], eng)
+            if _rv_ch is not None:
+                eng.unifier.set_attr(td, key, _rv_ch)
+                continue
         evaled = _try_eval_any_func(child, eng)
         if evaled is not None and evaled is not child:
             # An expression asked for its value is worth that value from then
