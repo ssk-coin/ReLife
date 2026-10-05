@@ -232,11 +232,17 @@ def _remove_resid_for_goal(var: 'PsiTerm', goal_psi, eng) -> None:
         var.resid = new_r if new_r else []
 
 
-def _collect_arith_vars(t: 'PsiTerm', wl, result: list, seen: set) -> None:
+def _collect_arith_vars(t: 'PsiTerm', wl, result: list, seen: set,
+                        functor_vars: 'Optional[list]' = None) -> None:
     """Collect all unbound variables in an arithmetic expression.
 
     Collects both fresh top-sort variables and sort-constrained variables
     (e.g. type=real with SORT_VAR flag set by earlier arithmetic propagation).
+
+    A call through a functor nobody has named yet is something the expression
+    waits on too, but it is not a number the expression can be solved for, so
+    those variables are kept apart in *functor_vars* and only when a caller
+    asks for them.
     """
     from wild_life.data_structures import SORT_VAR
     if t is None:
@@ -264,7 +270,27 @@ def _collect_arith_vars(t: 'PsiTerm', wl, result: list, seen: set) -> None:
     sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
     if sym in _ARITH_OPS_SET:
         for val in t.attr_list.values():
-            _collect_arith_vars(val, wl, result, seen)
+            _collect_arith_vars(val, wl, result, seen, functor_vars)
+        return
+    # A call through a functor nobody has named yet is not a non-numeric
+    # argument: `F(1) + 10` is a number as soon as F arrives.  The sum waits
+    # on the functor, but F itself is a function, not one of the numbers the
+    # equation can be solved for, so it is kept out of *result*.
+    if (functor_vars is not None
+            and getattr(wl, 'apply', None) is not None and t.type is wl.apply):
+        _fk_cv = (wl.functor.symbol
+                  if (getattr(wl, 'functor', None) is not None
+                      and wl.functor and wl.functor.keyword)
+                  else 'functor')
+        _f_cv = t.attr_list.get(_fk_cv)
+        if _f_cv is not None:
+            _f_cv = _f_cv.deref()
+            if (not _f_cv.attr_list and _f_cv.value is None
+                    and _f_cv.coref is None
+                    and (_f_cv.type is wl.top or _f_cv.type is None
+                         or bool(_f_cv.flags & SORT_VAR))):
+                if _f_cv not in functor_vars:
+                    functor_vars.append(_f_cv)
 
 
 def _can_be_a_number(t: 'PsiTerm', wl) -> bool:
@@ -321,6 +347,33 @@ def _attach_arith_resid(var: 'PsiTerm', wl, pending_goal, eng=None) -> None:
         if eng is not None:
             eng.trail.trail_copy(var, 'resid')  # trail: save copy of list
         var.resid.append(Residuation(goal=pending_goal))
+
+
+def _attach_functor_resid(var: 'PsiTerm', pending_goal, eng=None) -> None:
+    """Attach a pending goal to a variable without making it a number.
+
+    _attach_arith_resid constrains what it waits on to sort real, which is
+    right for the numbers in an equation and wrong for the functor of a call
+    inside one: `F(1) + 10` waits on F, but F is a function, and narrowing it
+    to real would make `F = inc` fail.
+    """
+    from wild_life.data_structures import Residuation, SORT_VAR
+    var = var.deref()
+    if not (var.flags & SORT_VAR):
+        if eng is not None:
+            eng.trail.trail_psi(var, 'flags')
+        var.flags |= SORT_VAR
+    if var.resid is None:
+        if eng is not None:
+            eng.trail.trail_psi(var, 'resid')
+        var.resid = [Residuation(goal=pending_goal)]
+        return
+    for r in var.resid:
+        if r.goal is pending_goal:
+            return
+    if eng is not None:
+        eng.trail.trail_copy(var, 'resid')
+    var.resid.append(Residuation(goal=pending_goal))
 
 
 def _is_proper_bool_expr(t: 'PsiTerm') -> bool:
@@ -7853,7 +7906,9 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
             else:
                 # Gather free variables in the expression.
                 vars_in_expr: list = []
-                _collect_arith_vars(b_d, wl, vars_in_expr, set())
+                _functor_vars_ae: list = []
+                _collect_arith_vars(b_d, wl, vars_in_expr, set(),
+                                    _functor_vars_ae)
 
                 a_d_final = a_d.deref()
                 a_d_is_free = (a_d_final.value is None and not a_d_final.attr_list)
@@ -8077,6 +8132,28 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
                     # Can't solve now — suspend (re-suspend with tildes).
                     # Re-suspension is correct even for is_resid_refiring cases:
                     # drop only when truly cyclic (a_coeff==1 with no const solution).
+                    if not vars_in_expr and _functor_vars_ae:
+                        # Nothing numeric is missing — what the sum waits on
+                        # is which function to call.  `F(1) + 10` suspends on
+                        # F and is worked out once F is named, instead of
+                        # being reported as a non-numeric argument.
+                        from wild_life.data_structures import Goal as _G_fa
+                        _eq_fa = (getattr(wl, 'eqsym', None)
+                                  or wl.syntax_module.symbol_table.get('='))
+                        if _eq_fa is not None and _can_be_a_number(a_d, wl):
+                            _eqt_fa = PsiTerm(type_def=_eq_fa)
+                            _eqt_fa.attr_list['1'] = a_d
+                            _eqt_fa.attr_list['2'] = b_d
+                            _eqt_fa._resid_marker = True
+                            _pg_fa = _G_fa(GoalType.PROVE, _eqt_fa, None, None,
+                                           pending=True)
+                            for _fv_fa in _functor_vars_ae:
+                                _attach_functor_resid(_fv_fa, _pg_fa, eng)
+                            # The answer is a number, whichever function it
+                            # turns out to call, so the left side says so.
+                            if a_d_is_free:
+                                _attach_arith_resid(a_d_final, wl, _pg_fa, eng)
+                            return True
                     if not vars_in_expr:
                         # A call written inside a sum is not a non-numeric
                         # argument: it is a call, and the number it answers
@@ -12143,6 +12220,20 @@ def _eval_map_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
             if head_ref is None:
                 break
             head = head_ref.deref()
+            if _term_is_unbound(f_term, eng):
+                # Nothing has said yet what to map with.  C reads map as
+                # `map(F,[H|T]) -> [F(H)|map(F,T)]`, so the spine is built
+                # and each F(H) residuates on F: the answer is a list of
+                # fresh variables, filled in when F arrives.
+                _ap_mu = _apply_node_for_var(f_term, [head], eng)
+                _rv_mu = (None if _ap_mu is None
+                          else _residuate_call(_ap_mu, [f_term], eng))
+                if _rv_mu is None:
+                    return None
+                results.append(_rv_mu)
+                node = (tail_ref if tail_ref is not None
+                        else wl.make_atom('nil', wl.bi_module))
+                continue
             applied = _apply_func(f_term, head, eng)
             if applied is None:
                 return None
@@ -12267,6 +12358,29 @@ def _list_call_delay(call: 'PsiTerm', target: 'PsiTerm', eng):
     return _unify(eng, target, _res_lc)
 
 
+def _apply_node_for_var(f_var: PsiTerm, args: list, eng) -> 'Optional[PsiTerm]':
+    """Build the apply{...} node the reader makes for a call through a variable.
+
+    `F(A)` is read as apply(A, functor => F), and that node holds F itself,
+    so binding F later reaches the call.  _apply_func builds a copy of the
+    functor instead, which is what we want once the functor is known and
+    wrong while it is still a variable: the copy is severed from F and never
+    hears that it was bound.
+    """
+    wl_an = eng.wl if eng is not None else None
+    if wl_an is None or getattr(wl_an, 'apply', None) is None:
+        return None
+    _fk_an = (wl_an.functor.symbol
+              if (getattr(wl_an, 'functor', None) is not None
+                  and wl_an.functor and wl_an.functor.keyword)
+              else 'functor')
+    node_an = PsiTerm(type_def=wl_an.apply)
+    for _i_an, _a_an in enumerate(args):
+        node_an.attr_list[str(_i_an + 1)] = _a_an
+    node_an.attr_list[_fk_an] = f_var
+    return node_an
+
+
 def _apply_func(f_term: PsiTerm, arg: PsiTerm, eng) -> Optional[PsiTerm]:
     """Apply functor f_term to one argument, returning the result term.
 
@@ -12314,6 +12428,11 @@ def _eval_reduce_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     elems = _proper_list_elems(lst, eng)
     if elems is None:
         return None
+    if elems and _term_is_unbound(f_term, eng):
+        # `reduce(F,E,[H|T]) -> F(H,reduce(F,E,T))` is an application of F at
+        # the top, so with F unknown the whole fold residuates on it rather
+        # than handing back a tower of applications of a variable.
+        return _residuate_call(t, [f_term], eng)
     acc = a2.deref()
     for _h in reversed(elems):
         applied = _apply_func(f_term, _h.deref(), eng)
