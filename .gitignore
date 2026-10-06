@@ -10,6 +10,12 @@ tests_original/OUT/
 tests_original/ERR/
 tests_original/REFDIFF/
 tests_original/ERRDIFF/
+# Files the tests themselves write into the suite directory: makestr writes
+# and then removes lifebuff, copyfile redirects to stdout, and parser names
+# its output with a cond(...) the port has yet to work out.
+tests_original/cond
+tests_original/stdout
+tests_original/lifebuff
 
 # Virtual environments
 venv/
