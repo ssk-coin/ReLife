@@ -3825,13 +3825,33 @@ def _push_deferred_cmp(goal: PsiTerm, eng, a, b, oka, okb) -> bool:
             new_goal.attr_list = {'1': R, '2': other_arg}
         else:
             new_goal.attr_list = {'1': other_arg, '2': R}
-        # Push in LIFO order (goals execute in reverse push order):
-        #   1. EVAL(func → R)     — evaluate the function, binding R
-        #   2. UNIFY(func_arg, R) — bind the original arg to R so it's shared
-        #   3. PROVE(cmp(R, b))   — run the comparison with the now-known value
+        # Ask the call what it comes to the way `=` asks, and compare that.
+        #
+        # Evaluating the call and then binding the original argument to the
+        # answer sends the comparison round in a circle when the call has no
+        # answer yet: the binding makes R the call itself, so the comparison
+        # that is put back reaches the same call, finds it is still a function,
+        # and defers again for ever.  `1000 =< preced(LS,M)` -- the guard the
+        # parser's grammar opens every operator alternative with -- never
+        # comes back.
+        #
+        # `R = Call` is the one reduction that already waits properly: it
+        # answers real~ for a call whose value is an arithmetic expression
+        # over a free variable, and @ for one whose rule cannot be chosen yet,
+        # each carrying the residuation that re-runs it.  The comparison then
+        # suspends on R like any other unknown number, and fails on waking
+        # when the numbers that arrive do not hold -- which is what prunes the
+        # grammar.
+        _eq_defn_dc = (getattr(wl, 'eqsym', None)
+                       or wl.syntax_module.symbol_table.get('='))
+        if _eq_defn_dc is None:
+            return False
+        _eq_dc = PsiTerm(type_def=_eq_defn_dc)
+        _eq_dc.attr_list['1'] = R
+        _eq_dc.attr_list['2'] = func_d
+        # Pushed in LIFO order: `R = Call` runs first, then the comparison.
         eng.push_goal(GoalType.PROVE, new_goal, _DEFRULES, None)
-        eng.push_goal(GoalType.UNIFY, func_d, R, None)
-        eng.push_goal(GoalType.EVAL, func_d, R, func_d.type.rule)
+        eng.push_goal(GoalType.PROVE, _eq_dc, _DEFRULES, None)
         return True
 
     if not oka and a is not None:
