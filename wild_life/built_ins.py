@@ -9810,15 +9810,31 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         # Always destructive for global variables (global state is intentional)
         from wild_life.unification import copy_term as _copy_term
         rhs_d = a2.deref()
-        # Try arithmetic eval for numeric RHS
-        ok, val = _eval_arith(a2, eng)
+        # A quote on the right says to write the term in as it stands rather
+        # than what it would come to: the tokenizer files the token it has
+        # just read with `rest_token <<- `Tok`.  The quote is an instruction
+        # to the writing, not a part of the value, and C spends it here -- so
+        # the cell holds the token, and the list cell that reads it back
+        # holds a token rather than a quoted one.  Left on, the quote travels
+        # into the token list, where `R2 = ["."|LT]` no longer matches the
+        # `.` it is looking at and the parser reports a syntax error on a
+        # file it has just read correctly.
+        _rhs_quoted = False
+        while (rhs_d.type is not None and rhs_d.type.keyword is not None
+               and rhs_d.type.keyword.symbol == '`'
+               and list(rhs_d.attr_list.keys()) == ['1']):
+            rhs_d = rhs_d.attr_list['1'].deref()
+            _rhs_quoted = True
+        # Try arithmetic eval for numeric RHS -- but a quoted right side is
+        # not asked what it comes to at all, which is what the quote is for.
+        ok, val = (False, 0.0) if _rhs_quoted else _eval_arith(a2, eng)
         if ok:
             # Build a numeric psi-term as the new value
             new_val = PsiTerm()
             new_val.type = eng.wl.real
             new_val.value = val
             rhs_d = new_val
-        elif rhs_d.attr_list:
+        elif rhs_d.attr_list and not _rhs_quoted:
             # What is written in is a value, so a comparison written on the
             # right is the answer it gives: structures.lf's
             # `res <<- (S :== true)` stores true or false, not the question.
