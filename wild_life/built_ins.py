@@ -1310,6 +1310,10 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         _dot_defn = eng.wl.update_symbol(eng.wl.syntax_module, '.')
         _dot = PsiTerm(type_def=_dot_defn)
         _dot.attr_list = {'1': a2, '2': a1}
+        # Read-only: asking what a term holds must not give it a feature it
+        # does not have.  A `project` that is being unified goes through
+        # _bi_unify_inner instead, where `B.A` is made the way `T.F = V`
+        # makes it.
         return _resolve_dot_feat(_dot, eng, create=False)
 
     elif sym == 'combined_name':
@@ -6793,14 +6797,36 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
     _dot_sym_check = (lambda td: td.type is not None and td.type.keyword is not None
                       and td.type.keyword.symbol == '.'
                       and '1' in td.attr_list and '2' in td.attr_list)
-    if _dot_sym_check(a_d):
-        _attr_cell = _resolve_dot_feat(a_d, eng)
+
+    def _project_as_dot(td):
+        """`project(A,B)` is `B.A`, which is how C's built_ins.lf defines it.
+
+        Giving a term a feature is how a term is built -- the parser puts
+        `foo(a)` together out of the construct `foo` and the argument `a`
+        with `project(1,Term) = X` -- so a project being unified is the dot
+        term it stands for, and makes the feature the same way.  Asking a
+        project what it holds, somewhere no feature is being given, still
+        only reads.
+        """
+        if (td.type is None or td.type.keyword is None
+                or td.type.keyword.symbol != 'project'
+                or set(td.attr_list) != {'1', '2'}):
+            return td
+        _dd_pj = eng.wl.update_symbol(eng.wl.syntax_module, '.')
+        _dt_pj = PsiTerm(type_def=_dd_pj)
+        _dt_pj.attr_list = {'1': td.attr_list['2'], '2': td.attr_list['1']}
+        return _dt_pj
+
+    _a_pj = _project_as_dot(a_d)
+    _b_pj = _project_as_dot(b_d)
+    if _dot_sym_check(_a_pj):
+        _attr_cell = _resolve_dot_feat(_a_pj, eng)
         if _attr_cell is None:
             return False
         # If the right side is also a dot-term, resolve it too so that an
         # unbound label on the right also gets its pending residuation set up.
-        if _dot_sym_check(b_d):
-            _attr_cell_b = _resolve_dot_feat(b_d, eng)
+        if _dot_sym_check(_b_pj):
+            _attr_cell_b = _resolve_dot_feat(_b_pj, eng)
             if _attr_cell_b is None:
                 return False
             return _unify(eng, _attr_cell.deref(), _attr_cell_b.deref())
@@ -6808,8 +6834,8 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
         # puts one: `C.1 = root_sort(app)` gives the feature `app`, not the
         # call.  The cell goes back through `=` for that.
         return _unify_through_eq(eng, _attr_cell.deref(), b_d)
-    if _dot_sym_check(b_d):
-        _attr_cell = _resolve_dot_feat(b_d, eng)
+    if _dot_sym_check(_b_pj):
+        _attr_cell = _resolve_dot_feat(_b_pj, eng)
         if _attr_cell is None:
             return False
         return _unify_through_eq(eng, a_d, _attr_cell.deref())
