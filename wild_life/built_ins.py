@@ -1433,6 +1433,15 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if a1 is None or eng is None:
             return None
         arg = _strip_backtick(a1.deref())
+        # Nothing has said what to read yet, so there is nothing to read:
+        # the grammar's terminal rule is `Xs = [A|D], evalin(D) = Ys`, and
+        # a term around it being worked out reaches the reading before
+        # `Xs = [A|D]` has said which D that is.  Answering the variable
+        # itself spends the reading on nothing and loses the rest of the
+        # stream; answering nothing leaves it to be made when D is known.
+        if (arg.value is None and not arg.attr_list and arg.coref is None
+                and (arg.type is None or arg.type is eng.wl.top)):
+            return None
         if sym == 'evalin' and (arg.flags & QUOTED_TRUE):
             # Asking for the value spends the quote: a term a non-strict call
             # was handed is written as it stands once, and is worth its value
