@@ -4330,6 +4330,59 @@ def _settle_disj_body_sync(body_d, eng, _depth):
     return None
 
 
+def _calls_written_in(t: PsiTerm, eng) -> list:
+    """The places in a rule's value where the rule itself wrote a call.
+
+    Each is a (node, feature) pair whose value is a user-function call, found
+    in the value as the rule wrote it and not inside the arguments of such a
+    call, which the call works out for itself.
+    """
+    found = []
+    seen = set()
+    work = [t.deref()]
+    while work:
+        node = work.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if node.type is eng.wl.disjunction or (node.flags & QUOTED_TRUE):
+            continue
+        if (node.type is not None and node.type.keyword is not None
+                and node.type.keyword.symbol == '`'):
+            continue
+        for key, val in node.attr_list.items():
+            child = val.deref()
+            if _is_user_function(child):
+                found.append((node, key))
+            elif child.attr_list:
+                work.append(child)
+    return found
+
+
+def _retry_held_calls(held: list, eng, _depth: int) -> None:
+    """Work out the calls of a rule's value that had to wait for its guard.
+
+    C checks a value out before it proves the guard, and a call in it that
+    is missing what it needs waits on that variable and goes on the moment
+    the guard binds it.  wam's `expandequ(equ(V,T1)) -> [equ(V,T2)|
+    expand(Listequ)] | split(T1,T2,Listequ)` relies on it: every equation is
+    split before lrmap starts turning the first one into instructions.  The
+    call this side could not work out before the guard is asked again now,
+    in place; any call that still cannot be worked out stays as it was.
+    """
+    for node, key in held:
+        nd = node.deref()
+        val = nd.attr_list.get(key)
+        if val is None:
+            continue
+        child = val.deref()
+        if not _is_user_function(child):
+            continue
+        evaled = _try_eval_any_func(child, eng, _depth)
+        if evaled is not None and evaled.deref() is not child:
+            eng.unifier.set_attr(nd, key, evaled)
+
+
 def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
     """Synchronously evaluate a user-defined function call, cycles included.
 
@@ -4505,9 +4558,11 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
             # back with the number it started from.
             from wild_life.inference import _leftmost_goal as _lmg_sync
             _cond_d = cond_part.deref()
+            _held_calls = []
             if _st_call is None:
                 # The value is read before the goal is proved, the way
                 # c_such_that checks it out and hands it back first.
+                _held_calls = _calls_written_in(_vp_d, eng)
                 _eval_embedded_user_funcs(_vp_d, eng, _depth + 1, set())
             _eval_embedded_user_funcs(_lmg_sync(_cond_d, eng.wl), eng,
                                       _depth + 1, set())
@@ -4541,6 +4596,8 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
                     return _make_number(eng, val)
                 if val_d.type is not eng.wl.alist:
                     _eval_embedded_user_funcs(val_d, eng, _depth + 1, set())
+                else:
+                    _retry_held_calls(_held_calls, eng, _depth + 1)
                 return val_d
             else:
                 eng.trail.undo_to(mark)
