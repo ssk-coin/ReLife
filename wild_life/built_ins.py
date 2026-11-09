@@ -9115,12 +9115,23 @@ def bi_once(goal: PsiTerm, eng) -> bool:
     mark = eng.trail.mark()
     cp_save = eng.choice_stack
     gs_save = eng.goal_stack
+    _ok_save = eng.main_loop_ok
     eng.push_goal(GoalType.PROVE, arg, _DEFRULES_SENTINEL, None)
     _barrier = cp_save if cp_save is not None else _INNER_RUN_BARRIER
     result = eng.run(cs_barrier=_barrier)
     if not result:
         eng.trail.undo_to(mark)
         eng.choice_stack = cp_save
+        # The goal failing is this call failing, and nothing more: the run
+        # that found no proof leaves the engine marked as finished, and the
+        # loop that called us would stop there instead of backtracking into
+        # the alternatives the caller still has.  `(call_once(var(X)), …
+        # ; Else)` never reached Else, and a clause whose first goal is a
+        # failing call_once never let the next clause be tried — the
+        # variable namer in wambruno, `name_top_vars(X,…) :-
+        # call_once(var(X)), !, …`, failed outright on any structure.
+        eng.goal_stack = gs_save
+        eng.main_loop_ok = _ok_save
         return result
     # What the goal cut reaches past this call: `call_once(B)` with B the
     # cut atom takes the query's own alternatives with it.  Only the
