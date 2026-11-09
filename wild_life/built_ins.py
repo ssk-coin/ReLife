@@ -2547,6 +2547,63 @@ def _persistent_cell(t: PsiTerm, eng) -> Optional[PsiTerm]:
     return _cell
 
 
+def _store_copy(t: PsiTerm, eng, quoted: bool = False) -> PsiTerm:
+    """The copy `<<-` puts away, made the way c_global_assign makes it.
+
+    The right-hand side is read through first, so a persistent name written
+    in it stands for the term the store keeps under it rather than for the
+    bare name: after `a <<- p(b,c)`, a holds b's and c's own terms, and a
+    later `b <<- 5` shows through as `a = p(5,@)`.  inc_heap_copy then
+    copies only what is not in the store already -- a persistent term, or
+    anything written there before, is shared, not copied -- so
+    `c <<- letters(a,b,c)` leaves c pointing at itself.  A global name is
+    read for its value too, but that value lives with the query rather than
+    in the store, so it is copied in like the rest.  A quoted right-hand side
+    (`program <<- `(…)`), and anything under a quote, keeps its names as
+    written: deref_rec does not go through a term that is held as it is.
+    """
+    from wild_life.unification import copy_term as _ct_sc
+    seeds: dict = {}
+    globals_read: list = []
+    seen = set()
+    work = [(t, quoted)]
+    while work:
+        n, q = work.pop()
+        while n.coref is not None:
+            n = n.coref
+        if id(n) in seen:
+            continue
+        seen.add(id(n))
+        _nd = n.__dict__
+        if (_nd.get('_wl_persistent_cell', False)
+                or _nd.get('_wl_persistent_written', False)):
+            seeds[id(n)] = n
+            continue
+        if not q and not n.attr_list and n.value is None:
+            _pc_sc = _persistent_cell(n, eng)
+            if _pc_sc is not None:
+                seeds[id(n)] = _pc_sc.deref()
+                continue
+            _gc_sc = _global_cell(n, eng)
+            if _gc_sc is not None:
+                _gcd = _gc_sc.deref()
+                globals_read.append((n, _gcd))
+                work.append((_gcd, q))
+                continue
+        _q = q or bool(n.flags & QUOTED_TRUE) or (
+            n.type is not None and n.type.keyword is not None
+            and n.type.keyword.symbol == '`')
+        for _v in n.attr_list.values():
+            work.append((_v, _q))
+    for _gn, _gcd in globals_read:
+        if id(_gn) not in seeds:
+            seeds[id(_gn)] = _ct_sc(_gcd, seeds)
+    _td_sc = t.deref()
+    if id(_td_sc) in seeds:
+        return seeds[id(_td_sc)]
+    return _ct_sc(t, seeds)
+
+
 def _term_to_str(t: PsiTerm, eng, quoted=True) -> str:
     from wild_life.print_term import term_to_string
     # Pass the query's variables so a diagnostic names them as the user wrote
@@ -7921,6 +7978,19 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
     # A name on the left stands for what it answers too: `A:emp = stu` puts
     # school's two terms together, and reading only the right-hand one leaves
     # the answer half made.
+    # A persistent name stands for the term the store keeps, not for a copy
+    # of it: C's deref hands out the heap term itself, so `Y = a, Z = a,
+    # Y = Z` meets one term twice, and `e = a` with both persistent meets two
+    # stored terms, which global_unify refuses.
+    if not _a_was_backtick and not a_d.attr_list and not (a_d.flags & _BI_NST):
+        _a_pcell = _persistent_cell(a_d, eng)
+        if _a_pcell is not None:
+            a_d = _a_pcell.deref()
+    if not _b_was_backtick and not b_d.attr_list and not (b_d.flags & _BI_NST):
+        _b_pcell = _persistent_cell(b_d, eng)
+        if _b_pcell is not None:
+            b_d = _b_pcell.deref()
+            _b_is_user_fn = False
     _a_is_user_fn_0 = (a_d.type is not None and a_d.type.type == DefType.FUNCTION
                        and a_d.type.rule and not callable(a_d.type.rule))
     if (_a_is_user_fn_0 and not (a_d.flags & _BI_NST) and not a_d.attr_list
@@ -9960,15 +10030,32 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
             # holds the two characters a `cond` just read off the stream —
             # and left shared, the query takes its own bindings back out of
             # the store on the way out and leaves `[@,@]` behind.
-            from wild_life.unification import copy_term as _ct_g1
             if rhs_d.attr_list or rhs_d.coref is not None:
-                rhs_d = _ct_g1(rhs_d, {})
+                rhs_d = _store_copy(rhs_d, eng, quoted=_rhs_quoted)
             _mark_persistent_deep(rhs_d, set())
             # The term the name stands for is matched, not added to: an
             # equation may read what `a` holds but not open a feature on it.
             # Only the term itself, since what sits inside it is ordinary
             # structure that the rest of a program builds on.
             rhs_d._wl_persistent_root = True
+            # A persistent name already holding a term has that term written
+            # over in place, as c_global_assign's `*arg1 = *new` does: what
+            # another stored term holds of it is the same cell, and sees the
+            # new value.
+            if getattr(defn, 'is_persistent', False):
+                _old_cell = _persistent_cell(lhs, eng)
+                if _old_cell is not None:
+                    _oc = _old_cell.deref()
+                    if _oc is not rhs_d:
+                        _oc.value = rhs_d.value
+                        _oc.type = rhs_d.type
+                        _oc.attr_list = dict(rhs_d.attr_list)
+                        _oc.flags = rhs_d.flags
+                        _oc.coref = None
+                    _oc._wl_persistent_cell = True
+                    _oc._wl_persistent_written = True
+                    _oc._wl_persistent_root = True
+                    return True
         defn.rule = []          # clear existing rules
         defn.type = DefType.FUNCTION
         _vm: dict = {}
@@ -10050,9 +10137,8 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         # are the caller's variables — left shared, the query that made the
         # entry takes its own bindings back out of the store on the way out
         # and leaves `(@,@)` behind.
-        from wild_life.unification import copy_term as _ct_pers
         if rhs_term.attr_list or rhs_term.coref is not None:
-            rhs_term = _ct_pers(rhs_term, {})
+            rhs_term = _store_copy(rhs_term, eng)
         _mark_persistent_deep(rhs_term, set())
     else:
         eng.trail.trail_psi(lhs, 'value')

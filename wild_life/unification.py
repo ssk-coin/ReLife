@@ -177,6 +177,14 @@ def _persistent_held(t: PsiTerm) -> bool:
     return t.__dict__.get('_wl_persistent_root', False)
 
 
+def _in_store(t: PsiTerm) -> bool:
+    """Whether t lives in the persistent store (C's heap): a cell a name or
+    `<<-` keeps, or anything written into one."""
+    _d = t.__dict__
+    return bool(_d.get('_wl_persistent_cell', False)
+                or _d.get('_wl_persistent_written', False))
+
+
 def compute_lub(d1: Definition, d2: Definition) -> Optional[Definition]:
     """後方互換のため残す — compute_glb() を使うこと。"""
     return compute_glb(d1, d2)
@@ -1053,6 +1061,17 @@ class Unifier:
 
         if u is v:
             return True  # 同一オブジェクト
+
+        # Two terms the persistent store holds are not unified at all:
+        # global_unify only ever matches a query's term against a stored one,
+        # and meeting a stored term on both sides -- `e = a` with e and a
+        # both persistent -- it reports the error and aborts the query.
+        if (self.engine is not None
+                and _in_store(u) and _in_store(v)):
+            import sys as _sys_pu
+            _sys_pu.stderr.write(
+                "*** Error: cannot unify persistent values\n\n*** Abort\n")
+            raise AbortException(hook_called=True)
 
         # Cycle detection for rational-tree (cyclic) unification.
         # If we are already in the process of unifying this exact pair of
