@@ -232,6 +232,35 @@ def _remove_resid_for_goal(var: 'PsiTerm', goal_psi, eng) -> None:
         var.resid = new_r if new_r else []
 
 
+def _read_global_names_in_sum(t: 'PsiTerm', eng) -> None:
+    """Point each global's name standing as an operand of a sum at its cell.
+
+    Only operands of arithmetic operators are read, through any nesting of
+    them, and only names a quote has not held as written.  The rewrite is
+    trailed, as C's reading of a global name is.
+    """
+    stack = [t]
+    seen = set()
+    while stack:
+        node = stack.pop().deref()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if (_get_sym(node) not in _ARITH_OPS_SET or not node.attr_list
+                or node.value is not None):
+            continue
+        for key, val in list(node.attr_list.items()):
+            child = val.deref()
+            if (not child.attr_list and child.value is None
+                    and not child.__dict__.get('_wl_held_name')
+                    and not (child.flags & QUOTED_TRUE)):
+                cell = _global_cell(child, eng)
+                if cell is not None and cell.deref() is not child:
+                    eng.unifier.set_attr(node, key, cell)
+                    continue
+            stack.append(child)
+
+
 def _collect_arith_vars(t: 'PsiTerm', wl, result: list, seen: set,
                         functor_vars: 'Optional[list]' = None) -> None:
     """Collect all unbound variables in an arithmetic expression.
@@ -7031,6 +7060,42 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
             _freeze_call(_bq_inner_d)
             a_d = _bq_inner_d
             _a_was_backtick = True
+
+    # A global's name inside a sum is read for its cell, the way C's
+    # check-out reads it: `X = g + 1` with g not yet given a value waits on
+    # g's cell and comes to 5 once `g = 4`, rather than failing on a sum of
+    # a name and a number.  A name held under a quote stays the name.
+    for _gs_side in (a_d, b_d):
+        if (_get_sym(_gs_side) in _ARITH_OPS_SET and _gs_side.attr_list
+                and not (_gs_side.flags & (QUOTED_TRUE | _BI_BQ_NST))):
+            _read_global_names_in_sum(_gs_side, eng)
+    # `eval(T)` works out a fresh copy of T, quotes spent and names read,
+    # and the equation is with that copy: `Q = `(g + 1), X = eval(Q)` waits
+    # on g's cell just as `X = g + 1` does, and leaves Q the sum it was.
+    # Only a sum that cannot be worked out now goes this way; one that can
+    # is answered where it always was.
+    for _ev_side, _ev_other in ((b_d, a_d), (a_d, b_d)):
+        if (_get_sym(_ev_side) != 'eval' or list(_ev_side.attr_list) != ['1']
+                or (_ev_side.flags & QUOTED_TRUE)):
+            continue
+        _ev_in = _strip_backtick(_ev_side.attr_list['1'].deref())
+        if (_get_sym(_ev_in) not in _ARITH_OPS_SET or not _ev_in.attr_list
+                or _eval_arith(_ev_in, eng)[0]):
+            continue
+        _ev_copy = copy_term(_ev_in, {})
+        _thaw_seen = set()
+        _thaw_work = [_ev_copy]
+        while _thaw_work:
+            _tn = _thaw_work.pop().deref()
+            if id(_tn) in _thaw_seen:
+                continue
+            _thaw_seen.add(id(_tn))
+            _tn.flags &= ~(QUOTED_TRUE | _BI_BQ_NST)
+            _thaw_work.extend(_tn.attr_list.values())
+        _read_global_names_in_sum(_ev_copy, eng)
+        _ev_eq = PsiTerm(type_def=goal.type)
+        _ev_eq.attr_list = {'1': _ev_other, '2': _ev_copy}
+        return bi_unify(_ev_eq, eng)
 
     # Detect non-frozen arithmetic operator being applied via @(1,2)-style term.
     # Example: A=(+), A=@(1,2) — without backtick-freeze, `+` is an eager operator,
