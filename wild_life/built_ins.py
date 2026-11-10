@@ -2601,7 +2601,24 @@ def _store_copy(t: PsiTerm, eng, quoted: bool = False) -> PsiTerm:
     _td_sc = t.deref()
     if id(_td_sc) in seeds:
         return seeds[id(_td_sc)]
-    return _ct_sc(t, seeds)
+    _copy_sc = _ct_sc(t, seeds)
+    # A global's name still standing in the copy was under a quote, and it
+    # stays the name when the stored term is run: glob_gc runs the program
+    # it stored with `program <<- `(…)` and prints it unchanged afterwards.
+    _held_seen = set()
+    _held_work = [_copy_sc]
+    while _held_work:
+        _hn = _held_work.pop().deref()
+        if id(_hn) in _held_seen:
+            continue
+        _held_seen.add(id(_hn))
+        if (not _hn.attr_list and _hn.value is None and _hn.type is not None
+                and (_hn.type.type is DefType.GLOBAL
+                     or getattr(_hn.type, 'is_persistent', False))):
+            _hn._wl_held_name = True
+            continue
+        _held_work.extend(_hn.attr_list.values())
+    return _copy_sc
 
 
 def _term_to_str(t: PsiTerm, eng, quoted=True) -> str:
@@ -10119,10 +10136,42 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
     # fails back out of the counting to undo its marks, and still reads the
     # number it arrived at.  Writing over a term that already holds something
     # is an ordinary write, undone with everything else the query did.
+    _lhs_stored = lhs.__dict__.get('_wl_persistent_cell', False)
     _persistent = (not _backtrackable
-                   and (lhs.__dict__.get('_wl_persistent_cell', False)
+                   and (_lhs_stored
                         or (lhs.value is None and not lhs.attr_list
                             and (lhs.type is None or lhs.type is eng.wl.top))))
+    if _persistent and not _lhs_stored:
+        # A variable the query holds is not itself put away: it is pointed at
+        # the new stored term, and the pointing is undone like any other
+        # binding the query made, which is what c_global_assign does with a
+        # term below the heap.  So a global's `i <<- 0` inside a query leaves
+        # i a variable again once the query is over, while term_size's
+        # `V <<- @` still gives V a term that later `V <<- …` writes over in
+        # place and that a `fail` does not take back.
+        eng.persistent_store_touched = True
+        if ok_arith:
+            _new_st = _make_number(eng, float(val))
+        else:
+            _rt_d = rhs_term.deref()
+            _rt_dd = _rt_d.__dict__
+            if (_rt_dd.get('_wl_persistent_cell', False)
+                    or _rt_dd.get('_wl_persistent_written', False)):
+                _new_st = _rt_d
+            else:
+                if _rt_d.attr_list or _rt_d.coref is not None:
+                    _rt_d = _store_copy(_rt_d, eng)
+                _new_st = PsiTerm(type_def=_rt_d.type)
+                _new_st.value = _rt_d.value
+                _new_st.attr_list = dict(_rt_d.attr_list)
+                _new_st.flags = _rt_d.flags
+        _mark_persistent_deep(_new_st, set())
+        _new_st._wl_persistent_cell = True
+        if _new_st is not lhs:
+            eng.trail.trail_psi(lhs, 'coref')
+            lhs.coref = _new_st
+        eng.unifier._wakeup_resid(lhs, lhs)
+        return True
     if _persistent:
         eng.persistent_store_touched = True
         lhs._wl_persistent_cell = True

@@ -380,6 +380,18 @@ def _mark_arith_non_strict(t: PsiTerm, visited: set = None, eng=None,
         return
     visited.add(tdid)
     sym = td.type.keyword.symbol if (td.type and td.type.keyword) else ''
+    # A global's name held as it is written stays the name: C reads a name
+    # for its cell only in a term it has yet to go through, and a quoted
+    # term is one it has been through already.  glob_gc stores its program
+    # as `program <<- `(… less_than(i,n) …)` and runs it again and again;
+    # reading `i` into the stored goal the first time it runs leaves the
+    # program printing `less_than(400,400)`.  A copy made to run a clause
+    # does not carry this, as eval_copy hands back a term to go through.
+    if (not td.attr_list and td.value is None and td.type is not None
+            and (td.type.type is DefType.GLOBAL
+                 or getattr(td.type, 'is_persistent', False))):
+        td._wl_held_name = True
+        return
     if (sym in _ARITH_OPS_NON_STRICT and td.value is None
             and (_arith_is_settled(td)
                  or _arith_reads_a_cell(td)
@@ -2705,7 +2717,8 @@ class Engine:
                 # around as the code of the clause it is building, and
                 # answering the `has_feature(K, void_table)` written in it —
                 # with K still a variable — leaves `false` in the clause.
-                _ev_pa = (None if (_a_pa_d.flags & _QT_pa)
+                _ev_pa = (None if ((_a_pa_d.flags & _QT_pa)
+                                   or _a_pa_d.__dict__.get('_wl_held_name'))
                           else _tesf_pa(_a_pa_d, self))
                 if _ev_pa is not None and _ev_pa is not _a_pa_d:
                     # Trailed: `X.nom` is whatever X has now, and a backtrack
