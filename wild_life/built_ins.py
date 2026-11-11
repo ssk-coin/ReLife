@@ -1574,6 +1574,11 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         wl = eng.wl
         if a1.value is not None:
             return wl.make_list([wl.make_atom(defn.keyword.symbol, wl.bi_module)])
+        # @ is the parent of everything that names no parent of its own: a
+        # sort at the root of a hierarchy, a name nothing has defined yet,
+        # a built-in.  Only @ itself has none.
+        if defn is not wl.top and not getattr(defn, 'parents', None):
+            return wl.make_list([PsiTerm(type_def=wl.top)])
         parent_atoms = []
         for parent_defn in getattr(defn, 'parents', []):
             if parent_defn is None or parent_defn.keyword is None:
@@ -14151,6 +14156,9 @@ def register_all(wl) -> None:
             return _unify(eng, a2.deref(), wl.make_list([]))
         parent_defs = getattr(defn, 'parents', [])
         parent_terms = []
+        # @ is the parent of everything that names no parent of its own.
+        if defn is not wl.top and not parent_defs:
+            parent_terms.append(PsiTerm(type_def=wl.top))
         for pd in parent_defs:
             if pd is not None and pd.keyword is not None:
                 parent_terms.append(wl.make_atom(pd.keyword.symbol, wl.bi_module))
