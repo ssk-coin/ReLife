@@ -6096,6 +6096,21 @@ def _reduce_embedded_calls(t: PsiTerm, eng, _depth: int, visited: set) -> None:
         child = td.attr_list[key].deref()
         if not child.attr_list:
             continue
+        # A call whose value is a choice is worked out by the engine, which
+        # gives each alternative a choice point of its own: machine's
+        # `somme_egale([A|B],N) -> {[A|somme_egale(B,N-A)];somme_egale(B,N)}`
+        # builds its list one choice at a time and backtracks out of a
+        # choice whose tail fails.  Worked out here it would hand back the
+        # choice itself, to stand inside the list as a term.  The term holds
+        # a fresh variable, and the call runs as a goal of its own, just as
+        # a call written into a term is checked out onto the goal stack.
+        if (eng is not None and _is_user_function(child)
+                and _has_applicable_rule(child)
+                and _has_disjunctive_body(child, eng.wl)):
+            _rv_dj = PsiTerm(type_def=eng.wl.top)
+            eng.unifier.set_attr(td, key, _rv_dj)
+            eng.push_goal(GoalType.EVAL, child, _rv_dj, child.type.rule)
+            continue
         if (_is_user_function(child) and _has_applicable_rule(child)
                 and not _term_reaches_itself(child)):
             evaled = _eval_user_func_sync(child, eng, _depth)
@@ -12495,7 +12510,19 @@ def bi_read_token(goal: PsiTerm, eng) -> bool:
                 break
     eng._read_token_pending = pending
     if not pending:
-        return False
+        # The end of the input is read as a token once: machine's read_halt
+        # stops on `end_of_file`, and failing instead sends its `repeter`
+        # round for ever.  Reading on after that abandons the query.
+        if getattr(eng, '_read_token_eof_stream', None) is stream:
+            sys.stdout.flush()
+            sys.stderr.write("*** Error: attempt to read past end of file "
+                             f"(near line {getattr(eng.wl, 'line_count', 0)})."
+                             "\n\n*** Abort\n")
+            raise AbortException(hook_called=True)
+        eng._read_token_eof_stream = stream
+        if arg is None:
+            return True
+        return _unify(eng, arg.deref(), PsiTerm(type_def=eng.wl.eof))
     tok = pending.pop(0)
     if arg is None:
         return True

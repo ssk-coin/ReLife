@@ -3159,10 +3159,12 @@ class Engine:
         # not about the term `{}` itself -- a rule head may be written with
         # one, and accumulators.lf's `transLifeCode({})` is matched by it.
         from wild_life.data_structures import QUOTED_TRUE as _QT_ua
-        _v_d = v.deref()
-        if (_v_d.type is wl_disj_nil(self) and not _v_d.attr_list
-                and not (_v_d.flags & _QT_ua)):
-            return False
+        # Either side: eval_aim hands the body over first, so a rule whose
+        # value is `{}` -- somme_egale's `([],N) -> {}` -- arrives as aim.a.
+        for _nd_ua in (v.deref(), u.deref()):
+            if (_nd_ua.type is wl_disj_nil(self) and not _nd_ua.attr_list
+                    and not (_nd_ua.flags & _QT_ua)):
+                return False
         mark = self.trail.mark()
         ok = self.unifier.unify(u, v)
         if not ok:
