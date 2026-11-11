@@ -1138,6 +1138,28 @@ def wl_disj_nil(eng):
     return eng.wl.disj_nil
 
 
+def _supplied_args_never_match(head: 'PsiTerm', call: 'PsiTerm', eng) -> bool:
+    """Whether an argument the call supplies could never match the head's.
+
+    Each argument is matched on its own, the way the arguments of a call
+    that is about to be curried are: a variable the call writes twice --
+    `g(X,X)` against `g(a,b,c)` -- waits on both, and only an argument that
+    is already something else rules the head out.
+    """
+    if head is None or call is None:
+        return False
+    for _k in list(call.attr_list.keys()):
+        if _k not in head.attr_list:
+            continue
+        _h1 = PsiTerm(type_def=head.type)
+        _h1.attr_list = {_k: head.attr_list[_k]}
+        _c1 = PsiTerm(type_def=call.type)
+        _c1.attr_list = {_k: call.attr_list[_k]}
+        if _rule_match_status(_h1, _c1, eng) == 'never':
+            return True
+    return False
+
+
 def _rule_match_status(head: 'PsiTerm', call: 'PsiTerm', eng):
     """Whether this rule applies to the call, cannot, or is not settled yet.
 
@@ -3450,6 +3472,49 @@ class Engine:
         )
         self._preeval_funct_args(funct)
 
+        # An argument that is a call of its own and could not be worked out
+        # just now does not stand for a term this call can be matched against:
+        # it stands for whatever it will produce.  Put it in a variable, let
+        # it run as a goal of its own, and come back to this call once it
+        # has: `merge(mult_list(2,6,X),[9])` is matched against what
+        # mult_list makes, not against the mult_list call, whichever kind of
+        # rule merge has -- the profiler rewrites every rule into a guarded
+        # one.  Done once for the call, before any rule is tried, so a rule
+        # that does not match does not start the argument over.
+        # A call that asks for features its argument does not give yet is a
+        # partial application: it is its own value, not something to wait
+        # for -- compose's `comp(func1 => succ, func2 => succ)` is handed on
+        # as the function it is.  And the call is come back to once: if an
+        # argument is still a call after that, the rule matching below
+        # deals with it.
+        from wild_life.built_ins import _is_user_function as _iuf_hoist
+
+        def _is_partial_hoist(_c):
+            for _h_ph, _b_ph in (_c.type.rule or []):
+                if _h_ph is None or _b_ph is None:
+                    continue
+                return bool(set(_h_ph.deref().attr_list)
+                            - set(_c.attr_list))
+            return False
+
+        _ns_hoist = getattr(self, 'non_strict_set', None)
+        if (not (_ns_hoist and funct.type in _ns_hoist)
+                and not funct.__dict__.get('_wl_args_hoisted', False)):
+            _hoisted = []
+            for _hk in list(funct.attr_list.keys()):
+                _ha = funct.attr_list[_hk].deref()
+                if (_iuf_hoist(_ha) and _ha.attr_list
+                        and not _is_partial_hoist(_ha)):
+                    _hv = PsiTerm(type_def=wl.top)
+                    self.unifier.set_attr(funct, _hk, _hv)
+                    _hoisted.append((_ha, _hv))
+            if _hoisted:
+                funct._wl_args_hoisted = True
+                self.push_goal(GoalType.EVAL, funct, result, rules)
+                for _ha, _hv in reversed(_hoisted):
+                    self.push_goal(GoalType.EVAL, _ha, _hv, _ha.type.rule)
+                return True
+
         head_orig, body_orig = active[0]
         # Choice point level before the remaining-clause alternatives are
         # pushed.  A guarded rule (`f(X) -> Val | Guard`) commits to its clause
@@ -3613,23 +3678,6 @@ class Engine:
                 self.push_goal(GoalType.PROVE, _cond_d, _DEFRULES, None)
                 return True
 
-        # An argument that is a call of its own and could not be worked out
-        # just now does not stand for a term this call can be matched against:
-        # it stands for whatever it will produce.  Put it in a variable and
-        # let it run as a goal of its own, so `merge(mult_list(2,6,X),[9])`
-        # waits on that variable instead of matching a mult_list call against
-        # a list and failing.
-        from wild_life.built_ins import _is_user_function as _iuf_hoist
-        _hoisted = []
-        for _hk in list(funct.attr_list.keys()):
-            _ha = funct.attr_list[_hk].deref()
-            if _iuf_hoist(_ha) and _ha.attr_list:
-                _hv = PsiTerm(type_def=wl.top)
-                self.unifier.set_attr(funct, _hk, _hv)
-                _hoisted.append((_ha, _hv))
-        for _ha, _hv in _hoisted:
-            self.push_goal(GoalType.EVAL, _ha, _hv, _ha.type.rule)
-
         # Arity check: if head has feature keys not present in funct, this rule
         # requires arguments that the call doesn't provide.  Skip the rule —
         # adding extra features to a function call is wrong semantics (unlike
@@ -3644,8 +3692,14 @@ class Engine:
             # that says what two strings compare to.  A call that also
             # carries features of its own is a different matter, handled
             # below.
-            if (not (_funct_keys_set - set(_head_d_arity.attr_list.keys()))
-                    and len(active) > 1):
+            # What decides it is the arguments the call does supply: a rule
+            # they could never match is passed over, and the next one tried;
+            # one they match, or may yet match, takes the call as a partial
+            # application.  So a bare `merge` stands for the function even
+            # once the profiler has added a `merge -> @ | …` rule after the
+            # real ones -- the first rule wants two arguments, and the name
+            # gives none that could fail to match them.
+            if _supplied_args_never_match(_head_d_arity, funct, self):
                 return False
             # A rule asks for features the call does not carry, so the call is
             # a partial application: it may yet gain them, and which rule

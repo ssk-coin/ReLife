@@ -157,14 +157,31 @@ def _bare_name_of_function(t: PsiTerm) -> bool:
     `private_profile(What, Level)` as the name of the function it is about to
     rewrite, and a name is not a variable — it does not match `[]`.
     """
+    # The first rule still in place decides, as it does when the call is
+    # matched: a head that asks for arguments the name does not give makes
+    # the name a partial application, whatever rules come after it.  The
+    # profiler adds a `merge -> @ | …` rule behind merge's own, and `merge`
+    # is still the function's name rather than a call to that last rule.
+    # A rule that has been retracted is passed over.
+    # Once a name has been read as the function's name it stays one, the
+    # way C marks a call it has curried as evaluated and never reads it
+    # again: unprofile hands `merge` round its helpers while it retracts
+    # merge's rules one by one, and the name must not turn into a call to
+    # whichever rule happens to be left first.
+    if t.__dict__.get('_wl_curried_name', False):
+        return True
     _defn = t.type
     _rules = getattr(_defn, 'rule', None)
     if not isinstance(_rules, list) or not _rules:
         return False
     for _h, _b in _rules:
-        if _h is not None and not _h.deref().attr_list:
-            return False
-    return True
+        if _h is None or _b is None:
+            continue
+        if _h.deref().attr_list:
+            t._wl_curried_name = True
+            return True
+        return False
+    return False
 
 
 def _persistent_held(t: PsiTerm) -> bool:

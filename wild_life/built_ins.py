@@ -4357,9 +4357,18 @@ def _bare_curried_name(t: PsiTerm) -> bool:
     _rules_bc = getattr(t.type, 'rule', None)
     if not isinstance(_rules_bc, list) or not _rules_bc:
         return False
+    # The first rule still in place decides, as it does when the call is
+    # matched; a retracted rule is passed over.  A name once read as the
+    # function's name stays one (see _bare_name_of_function).
+    if t.__dict__.get('_wl_curried_name', False):
+        return True
     for _h_bc, _b_bc in _rules_bc:
-        if _h_bc is not None and _h_bc.deref().attr_list:
+        if _h_bc is None or _b_bc is None:
+            continue
+        if _h_bc.deref().attr_list:
+            t._wl_curried_name = True
             return True
+        return False
     return False
 
 
@@ -4624,8 +4633,17 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
         # to a partial application: `e5(F,A) -> F(A)` passes `p` as a value, and
         # reducing it against `p(X) -> …` here would both give `p` an argument
         # it was never called with and hand back p's body as the value of F.
+        # A rule that asks for features the call does not supply takes it as
+        # a partial application -- unless an argument the call does supply
+        # could never match, when the next rule is tried -- so the call is
+        # its own value.
         if set(head.deref().attr_list.keys()) - set(t.attr_list.keys()):
-            continue
+            from wild_life.inference import (
+                _supplied_args_never_match as _sanm_pa)
+            if _sanm_pa(head.deref(), t, eng):
+                continue
+            t.attr_list = t_copy_attrs
+            return t
 
         # Handle conditional rule: body = val_part | guard
         # Run the guard with an inner proof and return the value part.
@@ -4634,9 +4652,25 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
             cond_part = body_d.attr_list.get('2')
             if val_part is None or cond_part is None:
                 continue
-            # Bind head arguments first (for arity > 0 functions)
+            # Bind head arguments first (for arity > 0 functions).  Matching
+            # is one-way here as it is for an unguarded rule below: a call
+            # not yet specific enough for the head -- an argument that is
+            # still a call, as the profiler's guarded `merge` meets in a lazy
+            # list -- is left to the engine's own EVAL goal, which waits.
             mark = eng.trail.mark()
             if head.attr_list:
+                from wild_life.inference import (
+                    _rule_match_status as _rms_st, _call_is_curried as _cic_st)
+                if _cic_st(head.deref(), t):
+                    t.attr_list = t_copy_attrs
+                    return t
+                _st_sync = _rms_st(head.deref(), t, eng)
+                if _st_sync == 'never':
+                    t.attr_list = t_copy_attrs
+                    continue
+                if _st_sync != 'ready':
+                    t.attr_list = t_copy_attrs
+                    return None
                 ok_h = eng.unifier.unify(t, head)
                 if not ok_h:
                     eng.trail.undo_to(mark)
@@ -6092,6 +6126,12 @@ def _reduce_embedded_calls(t: PsiTerm, eng, _depth: int, visited: set) -> None:
     from wild_life.data_structures import NON_STRICT_TERM as _NST_rec
     if td.flags & _NST_rec:
         return
+    # What eval works out is a copy of its argument, so the argument itself
+    # is not worked out where it stands: `A = eval(X:f(X))` leaves X the
+    # call f(X).
+    if (td.type is not None and td.type.keyword is not None
+            and td.type.keyword.symbol in ('eval', 'evalin')):
+        return
     for key in list(td.attr_list.keys()):
         child = td.attr_list[key].deref()
         if not child.attr_list:
@@ -6111,12 +6151,38 @@ def _reduce_embedded_calls(t: PsiTerm, eng, _depth: int, visited: set) -> None:
             eng.unifier.set_attr(td, key, _rv_dj)
             eng.push_goal(GoalType.EVAL, child, _rv_dj, child.type.rule)
             continue
+        # A call that reaches itself through the term -- hamming's
+        # `S:[1|merge(mult_list(2,N,S),…)]` -- is not worked out here, which
+        # would go round the cycle, but it is still a call: it runs as a goal,
+        # and the fresh variable it leaves in the term is the tail the rest
+        # of the list waits on.
+        if (eng is not None and _is_user_function(child)
+                and _has_applicable_rule(child)
+                and _term_reaches_itself(child)
+                and not any(_a.deref() is child
+                            for _a in child.attr_list.values())):
+            _rv_cy = PsiTerm(type_def=eng.wl.top)
+            eng.unifier.set_attr(td, key, _rv_cy)
+            eng.push_goal(GoalType.EVAL, child, _rv_cy, child.type.rule)
+            continue
         if (_is_user_function(child) and _has_applicable_rule(child)
                 and not _term_reaches_itself(child)):
             evaled = _eval_user_func_sync(child, eng, _depth)
             if evaled is not None and evaled.deref() is not child:
                 eng.unifier.set_attr(td, key, evaled)
                 _reduce_embedded_calls(evaled, eng, _depth + 1, visited)
+                continue
+            # A call that cannot be worked out on the spot -- it waits on a
+            # variable, or on a call of its own, or no rule fits it at all --
+            # still stands for what it answers, not for the call: the term
+            # holds a fresh variable and the call runs as a goal of its own.
+            # `X = [1|mult_list(2,6,[])]` fails as mult_list does, and
+            # `S:[1|merge(mult_list(2,10,S),[3,5])]` is worked out as the
+            # list grows, the profiler's guarded merge included.
+            if evaled is None and eng is not None:
+                _rv_w = PsiTerm(type_def=eng.wl.top)
+                eng.unifier.set_attr(td, key, _rv_w)
+                eng.push_goal(GoalType.EVAL, child, _rv_w, child.type.rule)
                 continue
         # `&` written inside a term is the meet of its two sides, and the
         # term holds what they meet at: structures.lf marks where it has
@@ -6966,6 +7032,18 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
             _val_cv = _eval_body_sync(_side_cv, eng, 0)
             if _val_cv is not None and _val_cv.deref() is not _side_cv:
                 _val_cv = _keep_call_value(_side_cv, _val_cv, eng)
+                # The branch a cond answers with is a value like any other,
+                # and a call written in it stands for what that call answers:
+                # merge's `cond(H1 > H2, [H2|merge(L1,T2)], …)` hands back a
+                # list whose tail is merge's next step, which runs as a goal
+                # when it cannot be worked out on the spot.
+                _vcv_d = _val_cv.deref()
+                from wild_life.data_structures import NON_STRICT_TERM as _NST_cv
+                if (_vcv_d.attr_list and _vcv_d.type is not None
+                        and _vcv_d.type._builtin_func is None
+                        and not (_vcv_d.flags & (QUOTED_TRUE | _NST_cv))
+                        and not _is_user_function(_vcv_d)):
+                    _reduce_embedded_calls(_vcv_d, eng, 0, set())
                 if _n_cv == 0:
                     a_d = _val_cv.deref()
                 else:
