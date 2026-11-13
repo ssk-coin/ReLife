@@ -4500,6 +4500,20 @@ def _retry_held_calls(held: list, eng, _depth: int) -> None:
             eng.unifier.set_attr(nd, key, evaled)
 
 
+def _is_partial_application(call: PsiTerm) -> bool:
+    """Whether a call asks for features it has not been given yet.
+
+    The first rule still in place decides, as it does when the call is
+    matched: `comp(func1 => succ, func2 => succ)` waits for its third
+    argument, and until then it is a value to pass round, not a call.
+    """
+    for _h_pa, _b_pa in (call.type.rule or []):
+        if _h_pa is None or _b_pa is None:
+            continue
+        return bool(set(_h_pa.deref().attr_list) - set(call.attr_list))
+    return False
+
+
 def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
     """Synchronously evaluate a user-defined function call, cycles included.
 
@@ -4617,6 +4631,20 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
             # one would go on reducing against variables nothing binds
             # any more.
             eng.unifier.set_attr(t, _key, _ev)
+    # An argument that is still a call after that is waiting on something,
+    # and what it will answer decides which rule the call takes: the rules
+    # are not tried against the call itself.  The engine's EVAL goal runs
+    # such an argument as a goal of its own and comes back.  Trying the
+    # rules here would run the guard of one that takes any call -- the
+    # profiler's `merge -> @ | …, fail` counts a failed try -- for a call
+    # that has not really been made yet.  A partial application is a value,
+    # and is passed as it is.
+    for _key in _strict_args:
+        _pend = t.attr_list[_key].deref()
+        if (_pend.attr_list and _is_user_function(_pend)
+                and not (_pend.flags & QUOTED_TRUE)
+                and not _is_partial_application(_pend)):
+            return None
     # What a rule that does not match puts back is the call as it now
     # stands, with its arguments worked out.
     t_copy_attrs = dict(t.attr_list)
@@ -11519,7 +11547,8 @@ def bi_statistics(goal: PsiTerm, eng) -> bool:
     return True
 
 
-def _rule_to_string(h, b, wl, inline: bool = False):
+def _rule_to_string(h, b, wl, inline: bool = False,
+                    function_clause: bool = False):
     """ルール (head, body) を共有 PrintState で文字列化する。
 
     body 中の conjunction ','( left, right ) を個々のゴールに分解し、
@@ -11574,6 +11603,19 @@ def _rule_to_string(h, b, wl, inline: bool = False):
         _pretty_tag_or_psi_term(ps, h, MAX_PRECEDENCE + 1, 0, wl)
     finally:
         ps.write_canon = _was_canon
+    if function_clause:
+        # A function's rule is written as the one term it is, `Head -> Body.`,
+        # so the line breaks are worked out over the whole of it: a rule too
+        # long for the line breaks its head's arguments too, and the body's
+        # arguments line up under the bracket they follow.
+        ps.write(" -> ")
+        if b is not None:
+            _pretty_tag_or_psi_term(ps, b, MAX_PRECEDENCE + 1, 0, wl)
+        else:
+            ps.write("true")
+        ps.write(".")
+        return ps.take(), None
+
     head_str = ps.take()
 
     body_str = None
@@ -11674,6 +11716,10 @@ def _bi_listing_one(defn, wl, imported: bool = False, eng=None) -> None:
         print(f"non_strict({func_name})?")
 
     for h, b in active_rules:
+        if is_function:
+            _clause_text, _ = _rule_to_string(h, b, wl, function_clause=True)
+            print(_clause_text)
+            continue
         head_str, body_str = _rule_to_string(h, b, wl)
 
         if is_function:
