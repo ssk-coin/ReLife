@@ -677,6 +677,35 @@ def _body_has_cut(term: PsiTerm, wl, seen=None) -> bool:
     return False
 
 
+def _sum_waits_on_a_variable(t: PsiTerm, wl) -> bool:
+    """Whether a sum is a number still to come rather than a term.
+
+    Every operand has to be able to turn out a number, and at least one of
+    them has to be a variable that has not yet: `Z - 8` waits on Z, while
+    peep's `1 + changes` is a term built from a name, not a sum to work out.
+    """
+    from wild_life.built_ins import (
+        _ARITH_OPS_SET as _AOS_sw, _can_be_a_number as _cbn_sw)
+    waits = False
+    stack = [t]
+    seen = set()
+    while stack:
+        n = stack.pop().deref()
+        if id(n) in seen:
+            continue
+        seen.add(id(n))
+        sym = (n.type.keyword.symbol
+               if (n.type is not None and n.type.keyword is not None) else '')
+        if n.attr_list and n.value is None and sym in _AOS_sw:
+            stack.extend(n.attr_list.values())
+            continue
+        if n.attr_list or not _cbn_sw(n, wl):
+            return False
+        if n.value is None:
+            waits = True
+    return waits
+
+
 def _patch_cut_barriers(term: PsiTerm, wl, cut_point, seen=None) -> None:
     """Recursively set cut atoms' .value to cut_point in a copied body.
 
@@ -3501,6 +3530,11 @@ class Engine:
         if (not (_ns_hoist and funct.type in _ns_hoist)
                 and not funct.__dict__.get('_wl_args_hoisted', False)):
             _hoisted = []
+            _hoisted_sums = []
+            from wild_life.built_ins import (
+                _ARITH_OPS_SET as _AOS_h, _eval_arith as _ea_h)
+            from wild_life.data_structures import (
+                QUOTED_TRUE as _QT_h, NON_STRICT_TERM as _NST_h)
             for _hk in list(funct.attr_list.keys()):
                 _ha = funct.attr_list[_hk].deref()
                 if (_iuf_hoist(_ha) and _ha.attr_list
@@ -3508,9 +3542,32 @@ class Engine:
                     _hv = PsiTerm(type_def=wl.top)
                     self.unifier.set_attr(funct, _hk, _hv)
                     _hoisted.append((_ha, _hv))
-            if _hoisted:
+                    continue
+                # A sum that cannot be worked out yet is still a number to
+                # be, not a term to match: `assign(L, Z-8)` against
+                # `assign(A, B:int)` waits for Z, as schedule's lateCalc
+                # does while a prerequisite's start is still unknown.  The
+                # argument becomes a variable the sum is equated with, and
+                # that equation waits on what the sum is missing.
+                _sym_h = (_ha.type.keyword.symbol
+                          if (_ha.type is not None
+                              and _ha.type.keyword is not None) else '')
+                if (_sym_h in _AOS_h and _ha.attr_list and _ha.value is None
+                        and not (_ha.flags & (_QT_h | _NST_h))
+                        and _sum_waits_on_a_variable(_ha, wl)
+                        and not _ea_h(_ha, self)[0]):
+                    _hv = PsiTerm(type_def=wl.top)
+                    self.unifier.set_attr(funct, _hk, _hv)
+                    _hoisted_sums.append((_ha, _hv))
+            if _hoisted or _hoisted_sums:
                 funct._wl_args_hoisted = True
                 self.push_goal(GoalType.EVAL, funct, result, rules)
+                _eq_defn_h = (getattr(wl, 'eqsym', None)
+                              or wl.syntax_module.symbol_table.get('='))
+                for _ha, _hv in reversed(_hoisted_sums):
+                    _eq_h = PsiTerm(type_def=_eq_defn_h)
+                    _eq_h.attr_list = {'1': _hv, '2': _ha}
+                    self.push_goal(GoalType.PROVE, _eq_h, _DEFRULES, None)
                 for _ha, _hv in reversed(_hoisted):
                     self.push_goal(GoalType.EVAL, _ha, _hv, _ha.type.rule)
                 return True

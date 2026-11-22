@@ -1970,7 +1970,7 @@ class Unifier:
             u = u.deref()
             v = v.deref()
             if u is v:
-                return True
+                    return True
 
         # 特性の単一化
         if not self._unify_attrs(u, v):
@@ -2565,6 +2565,19 @@ class Unifier:
             # Deref to get the actual sort-constrained term (past any variable wrapper)
             pattern_d_copy = pattern_copy.deref()
 
+            # A call written in the pattern's features stands for what it
+            # answers, and that is what meets the term's feature: schedule's
+            # `earlyStart => earlyCalc(R)` meets an earliest start that a
+            # later task's sum has already made a number to be, which the
+            # call itself, as a term, could never be.  The calls are put in
+            # variables here and worked out as goals of their own alongside
+            # the rule's goal.
+            _pattern_evals = []
+            if self.engine is not None and pattern_d_copy.attr_list:
+                from wild_life.inference import (
+                    _collect_embedded_func_goals as _cefg_dl)
+                _pattern_evals = _cefg_dl(pattern_d_copy, self.engine, set())
+
             # Collect concrete integer/real literals from the goal copy BEFORE unification.
             # In C Wild Life, integer literals in rule bodies act as sort-constrained
             # variables that get "narrowed" to their value during rule instantiation,
@@ -2582,6 +2595,15 @@ class Unifier:
             # only committed when the delay goal succeeds (e.g. manual7: best_friend
             # is added only when get_along(P,Q) succeeds).
             _trial_mark = self.trail.mark()
+            # A `!` in the rule's goal cuts back to here: it commits the
+            # choices the pattern itself makes -- schedule's
+            # `:: A:task(…, prerequisites => R:{[];list}) | !, lateCalc(A,R)`
+            # takes the first of [] and list that fits -- and nothing the
+            # computation had open before the rule fired.  A cut with no
+            # point of its own would empty the whole choice stack, the
+            # query's alternatives included.
+            _cs_rule = (self.engine.choice_stack
+                        if self.engine is not None else None)
 
             # Unify pattern_d_copy with u (e.g. person(best_friend=>Q) with cleopatra_pt)
             # This binds u's attrs from the pattern (adds best_friend=Q_fresh).
@@ -2604,6 +2626,8 @@ class Unifier:
             from wild_life.data_structures import GoalType as _GT
             from wild_life.inference import _DEFRULES as _defrules_sentinel
             goal_materialized = goal_copy.deref()
+            from wild_life.inference import _patch_cut_barriers as _pcb_dl
+            _pcb_dl(goal_materialized, WL, _cs_rule)
 
             # Fire integer literal delays BEFORE the goal so they appear first in output.
             # In C Wild Life the integer feature key '1' in write(C.1) fires BEFORE
@@ -2634,6 +2658,8 @@ class Unifier:
             _gs_save = _eng.goal_stack
             _eng.goal_stack = None
             _eng.push_goal(_GT.PROVE, goal_materialized, _defrules_sentinel, None)
+            for _ft_dl, _rv_dl, _rl_dl in _pattern_evals:
+                _eng.push_goal(_GT.EVAL, _ft_dl, _rv_dl, _rl_dl)
             # The choices a pattern's disjunction leaves are taken with the
             # rule's goal still to be proved, the way C's unify goal settles
             # the feature while the goal that reads it is still on the stack:
