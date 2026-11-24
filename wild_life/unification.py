@@ -1781,7 +1781,11 @@ class Unifier:
         # evaluation of numeric sub-terms, e.g. loop(N-1) where N=3.
         u_is_num = (u.type is WL.integer or u.type is WL.real) and u.value is not None and not u.attr_list
         v_is_num = (v.type is WL.integer or v.type is WL.real) and v.value is not None and not v.attr_list
-        if (u_is_num or v_is_num) and self.engine is not None:
+        # A non-strict head is matched against the terms as they are written:
+        # gauss's `exp_dist((A+B)*C, Z)` is not a match for `4 * Z`, whatever
+        # A and B might add up to.
+        if ((u_is_num or v_is_num) and self.engine is not None
+                and not getattr(self.engine, 'no_arith_eval', False)):
             try:
                 from wild_life.built_ins import _eval_arith as _ea, _make_number as _mn
                 eng = self.engine
@@ -1902,7 +1906,12 @@ class Unifier:
                 return not any(_is_plain_atom(_v)
                                for _v in t.attr_list.values())
 
-            if _is_arith_equation(u) and _is_arith_equation(v):
+            # A non-strict predicate's head is matched against what it was
+            # handed as it is written: gauss's `exp_dist_do_add(A:real +
+            # B:real, X)` asks whether both terms of the sum are numbers, and
+            # `54 + vr(…)` is a sum whose second term is not.
+            if (_is_arith_equation(u) and _is_arith_equation(v)
+                    and not getattr(self.engine, 'no_arith_eval', False)):
                 _ok_u_aa, _val_u_aa = _ea_aa(u, self.engine)
                 _ok_v_aa, _val_v_aa = (_ea_aa(v, self.engine) if _ok_u_aa
                                        else (False, 0.0))

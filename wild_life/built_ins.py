@@ -1911,11 +1911,17 @@ class _WriteFailure(Exception):
     pass
 
 
-def _eval_and_conjunction(t: PsiTerm, eng) -> Optional[PsiTerm]:
+def _eval_and_conjunction(t: PsiTerm, eng,
+                          keep: bool = False) -> Optional[PsiTerm]:
     """Evaluate an and_sym (&) psi-term conjunction.
 
     Returns the merged psi-term if the conjunction succeeds, or None if it fails.
     Used by _write_term to handle writeq(`X & Y) before printing.
+
+    With *keep*, a call on either side is worked out for good and its answer
+    is met as it is, not a copy of it: intabs's `fake_copy(P) & @(A)` proves
+    the goal P names with P's own variables, which is how map_pred hands
+    back what extend_node binds.
     """
     wl = eng.wl
 
@@ -1941,7 +1947,7 @@ def _eval_and_conjunction(t: PsiTerm, eng) -> Optional[PsiTerm]:
         """Evaluate one side of & before conjunction: user func, cond, nested &."""
         s = s.deref()
         if s.type is not None and s.type is wl.and_sym:
-            return _eval_and_conjunction(s, eng)
+            return _eval_and_conjunction(s, eng, keep)
         # A side written with a backquote is the term itself, not something
         # to work out: the profiler meets `CondForFailOccurence` with
         # `` `cond(profile_fail_occured) `` to build the goal it is about to
@@ -1958,6 +1964,9 @@ def _eval_and_conjunction(t: PsiTerm, eng) -> Optional[PsiTerm]:
         if _g_side is not None:
             return _g_side.deref()
         # Evaluate user-defined function calls (e.g. posint_stream_to(5))
+        if _is_user_function(s) and keep:
+            ev = _eval_user_func_sync(s, eng, 0)
+            return ev.deref() if ev is not None else None
         if _is_user_function(s):
             _mark = eng.trail.mark()
             try:
@@ -4733,6 +4742,9 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
                 # The value is read before the goal is proved, the way
                 # c_such_that checks it out and hands it back first.
                 _held_calls = _calls_written_in(_vp_d, eng)
+                from wild_life.inference import (
+                    _release_value_backquotes as _rvb_st)
+                _rvb_st(_vp_d)
                 _eval_embedded_user_funcs(_vp_d, eng, _depth + 1, set())
             _eval_embedded_user_funcs(_lmg_sync(_cond_d, eng.wl), eng,
                                       _depth + 1, set())
@@ -4977,6 +4989,18 @@ def _eval_copy_term_func(t: 'PsiTerm', eng=None) -> 'PsiTerm':
         _cell_ct = _global_cell(arg, eng) or _persistent_cell(arg, eng)
         if _cell_ct is not None:
             arg = _cell_ct.deref()
+        # What is copied is the term the meet comes to, and the meet is made
+        # for good first: intabs's `copy_term(X&Y)` leaves X and Y one term
+        # as well as answering a copy of it.
+        if (arg.type is not None and arg.type is eng.wl.and_sym
+                and '1' in arg.attr_list and '2' in arg.attr_list
+                and not (arg.flags & (QUOTED_TRUE | _NST_SWAP))):
+            _met_ct = _eval_and_conjunction(arg, eng, keep=True)
+            if _met_ct is None:
+                # No term at all: what the call comes to is `{}`, and
+                # nothing meets that.
+                return PsiTerm(type_def=eng.wl.disj_nil)
+            arg = _met_ct.deref()
     return copy_term(arg)
 
 
@@ -5774,6 +5798,9 @@ def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
         return _sv
 
     # Compound term: evaluate embedded user-function and cond sub-terms in-place
+    from wild_life.inference import (
+        _release_value_backquotes as _rvb_ebs)
+    _rvb_ebs(body_d)
     _eval_embedded_user_funcs(body_d, eng, _depth, set())
     return body_d
 
@@ -6015,6 +6042,11 @@ def _eval_embedded_user_funcs(
     # is merely being read calls a predicate the file has not defined yet.
     if (td.flags & QUOTED_TRUE) and getattr(eng, '_expanding_clause', False):
         return
+    # A sum held as it is written is not worked out from inside either:
+    # gauss's `exp_red_mult` builds `6 * 1 + 1 * Y` in a non-strict head, and
+    # slist_reduce later asks for the `6 * 1` by its shape.
+    if td.__dict__.get('_wl_held_arith'):
+        return
     # Check if this term is a non-strict-first-arg built-in (e.g. setq, assert).
     # For these, skip evaluating argument '1' — it is a function/predicate NAME
     # that should be looked up, not evaluated as a value.
@@ -6073,6 +6105,8 @@ def _eval_embedded_user_funcs(
             if _rv_ch is not None:
                 eng.unifier.set_attr(td, key, _rv_ch)
                 continue
+        if child.__dict__.get('_wl_held_arith'):
+            continue
         evaled = _try_eval_any_func(child, eng)
         if evaled is not None and evaled is not child:
             # An expression asked for its value is worth that value from then
@@ -6132,6 +6166,10 @@ def _eval_embedded_user_funcs(
             _re_ev = _try_eval_any_func(child, eng)
             if _re_ev is not None and _re_ev is not child:
                 eng.unifier.set_attr(td, key, _re_ev)
+
+
+_SHAPE_QUERY_FUNCS = frozenset(('root_sort', 'features', 'feature_values',
+                                'map'))
 
 
 def _reduce_embedded_calls(t: PsiTerm, eng, _depth: int, visited: set) -> None:
@@ -6211,6 +6249,19 @@ def _reduce_embedded_calls(t: PsiTerm, eng, _depth: int, visited: set) -> None:
                 _rv_w = PsiTerm(type_def=eng.wl.top)
                 eng.unifier.set_attr(td, key, _rv_w)
                 eng.push_goal(GoalType.EVAL, child, _rv_w, child.type.rule)
+                continue
+        # A question about a term's shape, written into a term, stands for
+        # its answer the same as a user call does: intabs builds
+        # `abscall(root_sort(A), map(my_project(2=>A), features(A)))` and
+        # what it files is the predicate's name and its argument list.
+        if (_get_sym(child) in _SHAPE_QUERY_FUNCS
+                and not (child.flags & (QUOTED_TRUE | _NST_rec))):
+            _reduce_embedded_calls(child, eng, _depth + 1, visited)
+            _sq = (_eval_map_or_reduce(child, eng)
+                   if _get_sym(child) == 'map'
+                   else _try_eval_any_func(child, eng))
+            if _sq is not None and _sq.deref() is not child:
+                eng.unifier.set_attr(td, key, _sq)
                 continue
         # `&` written inside a term is the meet of its two sides, and the
         # term holds what they meet at: structures.lf marks where it has
@@ -7373,9 +7424,13 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
     # Handle copy_term(X) functional use: Y = copy_term(X) → Y = fresh copy of X
     if _is_copy_term_func(b_d):
         c = _eval_copy_term_func(b_d, eng)
+        if c.deref().type is eng.wl.disj_nil and not c.deref().attr_list:
+            return False
         return _unify(eng, _stored_side(a_d, eng), c)
     if _is_copy_term_func(a_d):
         c = _eval_copy_term_func(a_d, eng)
+        if c.deref().type is eng.wl.disj_nil and not c.deref().attr_list:
+            return False
         return _unify(eng, _stored_side(b_d, eng), c)
 
     # Handle glb(X,Y) functional use: B = glb(X,Y) → B = GLB of X and Y
@@ -10298,6 +10353,13 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
                        or _try_eval_any_func(rhs_term, eng))
             if _rhs_ev is not None and _rhs_ev.deref() is not rhs_term:
                 rhs_term = _rhs_ev.deref()
+            elif (a2 is rhs_term
+                    and not (rhs_term.flags & (QUOTED_TRUE | _NST_SWAP))):
+                # The calls written inside it are asked before the cell is
+                # written, as C's copy of the clause asked them: intabs's
+                # `OldFathers <- [Node|fake_copy(OldFathers)]` copies the
+                # list the cell held, not the one it is about to hold.
+                _reduce_embedded_calls(rhs_term, eng, 0, set())
         if not _backtrackable:
             # `X <<- s([1+6],X)` reads X before it writes it, so the X inside
             # the new term is the 3 that was there — `s([7],3)`, not a term
@@ -13614,16 +13676,21 @@ def register_all(wl) -> None:
 
     # ── LIFE meta-predicates (no-ops or minimal stubs) ─────────────────────
     def _bi_non_strict(goal, eng):
-        """non_strict(P): mark P as non-strict (lazy evaluation of arguments)."""
-        arg = goal.attr_list.get('1')
-        if arg is None:
+        """non_strict(P): mark P as non-strict (lazy evaluation of arguments).
+
+        Every argument is declared, as with dynamic: gauss writes
+        `non_strict(exp_no_minus,exp_dist,exp_dist_do_add,exp_dist_do_mult)`
+        for four predicates at once.
+        """
+        if not goal.attr_list:
             return False
-        arg = arg.deref()
-        if arg.type is not None and arg.type is not eng.wl.top:
-            # Register this sort/function as non-strict
-            if not hasattr(eng, 'non_strict_set'):
-                eng.non_strict_set = set()
-            eng.non_strict_set.add(arg.type)
+        for arg in goal.attr_list.values():
+            arg = arg.deref()
+            if arg.type is not None and arg.type is not eng.wl.top:
+                # Register this sort/function as non-strict
+                if not hasattr(eng, 'non_strict_set'):
+                    eng.non_strict_set = set()
+                eng.non_strict_set.add(arg.type)
         return True
     _reg('non_strict', _bi_non_strict)
 

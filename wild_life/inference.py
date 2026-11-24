@@ -331,6 +331,42 @@ def _arith_is_settled(t: PsiTerm, _seen: set = None) -> bool:
     return all(_arith_is_settled(_v, _seen) for _v in t.attr_list.values())
 
 
+def _arith_is_symbolic(t: PsiTerm) -> bool:
+    """Whether an arithmetic term holds something that is not a number.
+
+    Such a term is data, not a sum still waiting to be worked out: gauss's
+    equations are written over `vr(…)` records, as in `4*Z - Y`, and no
+    binding will ever make that a number, so a non-strict call that is handed
+    one is handed the text of it.  A sum over variables alone is not this --
+    it is waiting on them.
+    """
+    stack = [t]
+    seen = set()
+    while stack:
+        n = stack.pop().deref()
+        if id(n) in seen:
+            continue
+        seen.add(id(n))
+        if n.value is not None:
+            continue
+        sym = n.type.keyword.symbol if (n.type and n.type.keyword) else ''
+        if n.attr_list:
+            if sym in _ARITH_OPS_NON_STRICT:
+                stack.extend(n.attr_list.values())
+                continue
+            return True
+        if n.type is None or n.type.keyword is None or sym == '@':
+            continue
+        from wild_life.runtime import WL as _WL_sym
+        if n.type is _WL_sym.top:
+            continue
+        if (getattr(_WL_sym, 'real', None) is not None
+                and n.type.is_subtype_of(_WL_sym.real)):
+            continue
+        return True
+    return False
+
+
 def _arith_holds_user_call(t: PsiTerm, _seen: set = None) -> bool:
     """Whether a user function's call is written inside an arithmetic term.
 
@@ -395,7 +431,8 @@ def _mark_arith_non_strict(t: PsiTerm, visited: set = None, eng=None,
     if (sym in _ARITH_OPS_NON_STRICT and td.value is None
             and (_arith_is_settled(td)
                  or _arith_reads_a_cell(td)
-                 or (force and _arith_holds_user_call(td)))):
+                 or (force and _arith_holds_user_call(td))
+                 or _arith_is_symbolic(td))):
         if eng is not None and not (td.flags & NON_STRICT_TERM):
             eng.trail.trail_psi(td, 'flags')
         td.flags |= NON_STRICT_TERM
@@ -536,6 +573,34 @@ def _expand_head_disj(head: PsiTerm, wl, depth: int = 0) -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 # Cut barrier helper
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Marks a BIND_DIRECT goal that makes a call stand for its value.
+_CALL_VALUE = object()
+
+
+def _head_arith_nodes(t: PsiTerm) -> list:
+    """The arithmetic terms written in a clause head copy.
+
+    A non-strict predicate's head builds its answer as written: gauss's
+    `exp_red_mult(A, K*V)` hands back the product K times V once K and V are
+    known, not what it comes to, and the next predicate asks whether it is
+    `A*1`.  C copies such a head without marking anything for evaluation.
+    """
+    out = []
+    stack = [t]
+    seen = set()
+    while stack:
+        n = stack.pop().deref()
+        if id(n) in seen:
+            continue
+        seen.add(id(n))
+        if (n.attr_list and n.value is None and n.type is not None
+                and n.type.keyword is not None
+                and n.type.keyword.symbol in _ARITH_OPS_NON_STRICT):
+            out.append(n)
+        stack.extend(n.attr_list.values())
+    return out
+
 
 def _term_has_dot(t: PsiTerm, seen=None) -> bool:
     """Whether a stored term holds a `T.F` anywhere under it."""
@@ -796,6 +861,17 @@ def _eval_body_to_result(branch: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
     if _is_cond_builtin(branch_d):
         return _eval_cond_functional(branch_d, result, eng)
 
+    # A copy asked for is made when the branch is taken: intabs's
+    # `X 'U' Y -> cond(X :== @ or Y :== @, copy_term(X&Y), …)` hands back a
+    # copy of the meet, and the meet is made then.
+    from wild_life.built_ins import (
+        _is_copy_term_func as _ictf_br, _eval_copy_term_func as _ectf_br)
+    if _ictf_br(branch_d):
+        _ct_br = _ectf_br(branch_d, eng)
+        if _ct_br is None or _ct_br.deref().type is eng.wl.disj_nil:
+            return False
+        return eng.unifier.unify(result, _ct_br)
+
     # Disjunction branch: evaluate each element (including arithmetic like
     # 1 + posint_stream_to(N)) via _eval_body_sync, then unify result with
     # the produced disjunction.  The generic _collect_embedded_func_goals path
@@ -1043,7 +1119,8 @@ def _match_one(c: 'PsiTerm', h: 'PsiTerm', out: list, eng, seen: set,
             return 'never'
         if below:
             noted = True
-    if noted:
+    if noted and c.type is not None and h.type is not None and (
+            c.type is wl.top or not c.type.is_subtype_of(h.type)):
         # Something the head asks for is unsettled inside c, so c is waiting
         # on it too — disequality5 marks X as well as the Y within it.
         _add_blocker(out, c)
@@ -1476,6 +1553,60 @@ def _eval_cond_functional(cond_term: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
 # Goal-stack based embedded-function-call lifter
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _release_backquote(t: 'PsiTerm') -> 'Optional[PsiTerm]':
+    """What a backquote holds, frozen, once the quote has done its work.
+
+    C reads `` `T `` as T marked quoted: there is no quote left in the term,
+    only a term nothing will evaluate.  Returns None for anything else.
+    """
+    t = t.deref()
+    if not (t.type is not None and t.type.keyword is not None
+            and t.type.keyword.symbol == '`'
+            and list(t.attr_list.keys()) == ['1']):
+        return None
+    from wild_life.data_structures import (
+        QUOTED_TRUE as _QT_rb, NON_STRICT_TERM as _NST_rb)
+    inner = t.attr_list['1'].deref()
+    # Only a quoted sum is let go here.  A quoted call or goal is code a
+    # program is building -- accumulators.lf hands such pieces back from its
+    # functions and runs them once the clause they go into is filed -- and
+    # the quote is what tells that code apart from the program's own.
+    if not (inner.attr_list and inner.value is None
+            and inner.type is not None and inner.type.keyword is not None
+            and inner.type.keyword.symbol in _ARITH_OPS_NON_STRICT):
+        return None
+    inner.flags |= _NST_rb
+    inner._wl_held_arith = True
+    _mark_arith_non_strict(inner)
+    _freeze_calls_deep(inner, _QT_rb)
+    return inner
+
+
+def _release_value_backquotes(t: 'PsiTerm') -> None:
+    """Release the backquotes written inside a function's value.
+
+    gauss's `div_eq([A*X|Tl],B) -> [(`(Z*X))|div_eq(Tl,B)] | Z= -A/B`
+    answers a list of products, and update_vars matches `[@*Y|Tl]` against
+    it.  The quoted terms themselves are left as they are written.
+    """
+    stack = [t.deref()]
+    seen = set()
+    while stack:
+        n = stack.pop()
+        if id(n) in seen:
+            continue
+        seen.add(id(n))
+        for k in list(n.attr_list.keys()):
+            c = n.attr_list[k].deref()
+            inner = _release_backquote(c)
+            if inner is not None:
+                n.attr_list[k] = inner
+                seen.add(id(inner))
+                continue
+            if c.attr_list:
+                stack.append(c)
+
+
 def _collect_embedded_func_goals(t: 'PsiTerm', eng, visited: set) -> list:
     """Walk t (non-recursively via an explicit work-list) and replace any
     user-function sub-terms with fresh unbound variables.
@@ -1538,6 +1669,16 @@ def _collect_embedded_func_goals(t: 'PsiTerm', eng, visited: set) -> list:
         # made leaves `D = Ys` behind and the character stream never
         # advances.
         from wild_life.data_structures import QUOTED_TRUE as _QT_cefg
+        # A backquote's work is done once the term is handed back, as it is
+        # once a call is handed one: gauss's `div_eq([A*X|Tl],B) ->
+        # [(`(Z*X))|div_eq(Tl,B)]` answers a list of products, and
+        # update_vars matches `[@*Y|Tl]` against it.  What it held stays as
+        # it is written.
+        _inner_cefg = _release_backquote(child)
+        if _inner_cefg is not None:
+            parent.attr_list[key] = _inner_cefg
+            examined.add(id(_inner_cefg))
+            continue
         if (child.flags & _QT_cefg) or (
                 child.type is not None and child.type.keyword is not None
                 and child.type.keyword.symbol == '`'):
@@ -1622,6 +1763,23 @@ def _collect_embedded_func_goals(t: 'PsiTerm', eng, visited: set) -> list:
                         parent.attr_list[key] = _ev_conj
                         # Examined the conjunction; don't re-enqueue its children.
                         continue
+            # A sum written into what a function hands back is worked out
+            # with the rest of it: gauss's `mult_eq([A:real],B) -> [A*B]`
+            # hands back the product, and the non-strict slist_merge then
+            # asks whether it is a real.  Only a sum whose terms are all
+            # numbers already: one still waiting on a variable is left for
+            # whoever reads it once the variable is known.
+            from wild_life.data_structures import NON_STRICT_TERM as _NST_cefg
+            if (_ch_sym in _ARITH_OPS_NON_STRICT and child.attr_list
+                    and child.value is None
+                    and not (child.flags & _NST_cefg)
+                    and _arith_is_settled(child)):
+                from wild_life.built_ins import (
+                    _eval_arith as _ea_cefg, _make_number as _mn_cefg)
+                _ok_cefg, _val_cefg = _ea_cefg(child, eng)
+                if _ok_cefg:
+                    parent.attr_list[key] = _mn_cefg(eng, _val_cefg)
+                    continue
             # Try evaluating as a pure built-in (root_sort, features, etc.)
             from wild_life.built_ins import _try_eval_string_func as _tesf_cefg
             _bi_ev = _tesf_cefg(child, eng)
@@ -2132,7 +2290,7 @@ class Engine:
                 _eval_and_conjunction as _eac_pg)
             _mark_pg = self.trail.mark()
             try:
-                _met_pg = _eac_pg(thegoal, self)
+                _met_pg = _eac_pg(thegoal, self, keep=True)
             except UnificationFailure:
                 _met_pg = None
             if _met_pg is not None:
@@ -2292,6 +2450,36 @@ class Engine:
                     _w_cmp = _esc_w(_w_a, self)
                     if _w_cmp is not None:
                         self.unifier.set_attr(thegoal, _w_k, _w_cmp)
+                        continue
+                    # So is an identity test or a boolean built-in: intabs
+                    # writes `Node2 === Node3` and `not(New3)` and reads
+                    # true for both.
+                    _w_sym = (_w_a.type.keyword.symbol
+                              if (_w_a.type is not None
+                                  and _w_a.type.keyword is not None) else '')
+                    if (_w_sym in ('===', '\\===')
+                            and '1' in _w_a.attr_list
+                            and '2' in _w_a.attr_list):
+                        _w_same = (_w_a.attr_list['1'].deref()
+                                   is _w_a.attr_list['2'].deref())
+                        if _w_sym != '===':
+                            _w_same = not _w_same
+                        self.unifier.set_attr(
+                            thegoal, _w_k,
+                            wl.make_atom('true' if _w_same else 'false'))
+                        continue
+                    from wild_life.built_ins import (
+                        _eval_bool_builtin as _ebb_w,
+                        _is_proper_bool_expr as _ipbe_w,
+                        _try_eval_any_func as _teaf_bw)
+                    _w_bool = (_teaf_bw(_w_a, self) if _ipbe_w(_w_a)
+                               else _ebb_w(_w_a, self))
+                    if (_w_bool is not None
+                            and _w_bool.deref().type is not None
+                            and _w_bool.deref().type.keyword is not None
+                            and _w_bool.deref().type.keyword.symbol
+                            in ('true', 'false')):
+                        self.unifier.set_attr(thegoal, _w_k, _w_bool)
             if _bi_sym in _WRITE_BUILTINS and thegoal.attr_list:
                 from wild_life.built_ins import (
                     _is_user_function as _iuf_w,
@@ -2593,6 +2781,15 @@ class Engine:
             self.goal_count += 1
             # Pushed in LIFO order: evaluate, then prove what it came to.
             self.push_goal(GoalType.PROVE, _fn_res, _DEFRULES, None)
+            # The call itself becomes what it came to, as C's evaluation
+            # leaves a call standing for its value: intabs's
+            # `Proc:proc(PName)` proves the `tooo_proc` fact through Proc,
+            # and reads the fact's actions off Proc afterwards.
+            # Only once there is a value: a call left waiting on a variable
+            # is woken later as the call it is, and must still read as one.
+            if thegoal.coref is None:
+                self.push_goal(GoalType.BIND_DIRECT, thegoal, _fn_res,
+                               _CALL_VALUE)
             self.push_goal(GoalType.EVAL, thegoal, _fn_res, rules)
             return True
 
@@ -2661,6 +2858,40 @@ class Engine:
                     _call_key = _k_pa
                     _call_arg = _ad_pa
                     break
+            # A meet handed to a strict predicate is worked out before the
+            # predicate sees it, as any function is: intabs's
+            # `normalize(A&B)` normalizes the one term A and B make, and
+            # fails when they make none.
+            if _call_key is None and wl.and_sym is not None:
+                from wild_life.data_structures import (
+                    QUOTED_TRUE as _QT_and, NON_STRICT_TERM as _NST_and)
+                for _k_and, _av_and in list(thegoal.attr_list.items()):
+                    _ad_and = _av_and.deref()
+                    if (_ad_and.type is wl.and_sym
+                            and '1' in _ad_and.attr_list
+                            and '2' in _ad_and.attr_list
+                            and not (_ad_and.flags & (_QT_and | _NST_and))):
+                        _eq_and = (getattr(wl, 'eqsym', None)
+                                   or wl.syntax_module.symbol_table.get('='))
+                        if _eq_and is None:
+                            break
+                        self.goal_stack = aim.next
+                        self.goal_count += 1
+                        _V_and = wl.make_var()
+                        self.unifier.set_attr(thegoal, _k_and, _V_and)
+                        # Each side is worked out where it stands and met
+                        # with the one variable, left side first: chapla's
+                        # `updateCP(append(M,L)&list)` hands on the very
+                        # positions append lists, not copies of them.
+                        self.push_goal(GoalType.PROVE, thegoal, aim.b, aim.c)
+                        for _side_and in (_ad_and.attr_list['2'],
+                                          _ad_and.attr_list['1']):
+                            _eqt_and = PsiTerm(type_def=_eq_and)
+                            _eqt_and.attr_list = {'1': _V_and,
+                                                  '2': _side_and}
+                            self.push_goal(GoalType.PROVE, _eqt_and,
+                                           None, None)
+                        return True
             if _call_key is not None:
                 self.goal_stack = aim.next
                 self.goal_count += 1
@@ -2762,6 +2993,20 @@ class Engine:
                 _bag_pa = _ebc_pa(_a_pa_d, self)
                 if _bag_pa is not None:
                     self.unifier.set_attr(thegoal, _k_pa, _bag_pa)
+                    continue
+                # A copy asked for is handed over as the copy: intabs's
+                # `solve_alter(copy_term(alt(Alt1, …)), …)` matches the
+                # alternative it copies, not the call.
+                from wild_life.built_ins import (
+                    _is_copy_term_func as _ictf_pa,
+                    _eval_copy_term_func as _ectf_pa)
+                if (_ictf_pa(_a_pa_d)
+                        and not (_a_pa_d.flags & (_QT_pa | _NST_pa))):
+                    _ct_pa = _ectf_pa(_a_pa_d, self)
+                    if (_ct_pa is None
+                            or _ct_pa.deref().type is wl.disj_nil):
+                        return False
+                    self.unifier.set_attr(thegoal, _k_pa, _ct_pa)
                     continue
                 # A built-in call held as it is written is handed over as
                 # it stands: the grammar expander carries a rule's body
@@ -2956,12 +3201,31 @@ class Engine:
         # here, so the node is settled once the head has matched.
         _lone_hk = ([k for k in head.attr_list if k not in thegoal.attr_list]
                     if head.attr_list else [])
+        _ns_head_arith = None
+        if _non_strict:
+            _ha_ns = head_orig.__dict__.get('_wl_has_arith')
+            if _ha_ns is None:
+                _ha_ns = bool(_head_arith_nodes(head_orig))
+                head_orig._wl_has_arith = _ha_ns
+            if _ha_ns:
+                _ns_head_arith = _head_arith_nodes(head)
         mark = self.trail.mark()
         ok = self.unifier.unify(thegoal, head)
         if _non_strict:
             self.no_arith_eval = _prev_no_arith
             if ok:
                 _mark_arith_non_strict(head)
+                if _ns_head_arith:
+                    from wild_life.data_structures import (
+                        NON_STRICT_TERM as _NST_hd)
+                    for _n_hd in _ns_head_arith:
+                        if _n_hd.coref is None:
+                            if not (_n_hd.flags & _NST_hd):
+                                self.trail.trail_psi(_n_hd, 'flags')
+                                _n_hd.flags |= _NST_hd
+                            # Held for good, the way C holds a term it
+                            # copied without marking it for evaluation.
+                            _n_hd._wl_held_arith = True
         if not ok:
             self.trail.undo_to(mark)
             # Try next clause if any
@@ -3714,6 +3978,7 @@ class Engine:
                     # `lrmap(F,[E|L]) -> [F(E)|L1] | L1 = lrmap(F,L)` is
                     # written for, and reading the guard first walks the list
                     # right to left.
+                    _release_value_backquotes(_vp_d)
                     _eval_embedded_user_funcs(_vp_d, self, 0, set())
                     _sv = _try_eval_string_func(_vp_d, self)
                     if _sv is not None and _sv is not _vp_d:
@@ -4470,6 +4735,16 @@ class Engine:
                     self.goal_count += 1
                     _bd_u = self.aim.a   # the disjunction psi-term (not deref'd)
                     _bd_v = self.aim.b   # the next alternative element
+                    if (_bd_u is not None and _bd_v is not None
+                            and _bd_v.deref() is _bd_u.deref()):
+                        _bd_u = None     # already one term: nothing to bind
+                    if _bd_u is not None and self.aim.c is _CALL_VALUE:
+                        _cv_d = _bd_v.deref()
+                        if (_cv_d.value is None and not _cv_d.attr_list
+                                and (_cv_d.type is None
+                                     or _cv_d.type is self.wl.top
+                                     or _cv_d.resid)):
+                            _bd_u = None     # still waiting: no value yet
                     if _bd_u is not None:
                         _bd_v_d = _bd_v.deref() if _bd_v is not None else _bd_v
                         # Try arithmetic evaluation on the alternative: if alt is
