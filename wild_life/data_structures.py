@@ -519,6 +519,13 @@ class ChoicePoint:
     # already been cut away takes nothing else with it.
     _serial_counter = 0
 
+    # The prompt depth a level of the interactive session stands on, for the
+    # choice point the session leaves under a query typed at a deeper
+    # prompt; 0 for every other choice point.  Such a choice point holds no
+    # alternative: backtracking that reaches it has run out of answers for
+    # that level, and the session closes it.
+    prompt_level = 0
+
     def __init__(self, undo_point, goal_stack: Optional[Goal],
                  next: Optional['ChoicePoint'] = None):
         ChoicePoint._serial_counter += 1

@@ -55,8 +55,10 @@ def title(quiet: bool = False) -> None:
 #   bindings_str - formatted variable bindings string (e.g. "A = 1, B = 2.")
 #   cs_before    - choice_stack BEFORE proving (for restoring on pop)
 #   var_tree     - the variable tree for this query (to merge at deeper levels)
+#   level_cp     - the choice point the level stands on (None at depth 1)
 Frame = namedtuple('Frame', ['pre_mark', 'bindings_str', 'cs_before',
-                            'var_tree', 'saved_pd', 'cs_after'])
+                            'var_tree', 'saved_pd', 'cs_after', 'level_cp'],
+                   defaults=(None,))
 
 
 def _without_line_comment(text: str) -> str:
@@ -121,6 +123,41 @@ def _names_a_persistent(term, engine) -> bool:
         if t.attr_list:
             stack.extend(t.attr_list.values())
     return False
+
+
+def _cut_to_level(term, level_cp, inherited, wl) -> None:
+    """Make a `!` written in a query typed at a deeper prompt cut back to the
+    choice point its level stands on, and no further.
+
+    `X={1;2}?`, then `A= !,B={1;2}?`, then `call_once(A)?` takes B's other
+    answer away but not X's: backtracking afterwards closes the level the cut
+    was written at and comes back to `X = 1` at the prompt below it.  A
+    variable carried over from an earlier query keeps the cut it was given
+    there: `A= !,B={1;2}?` typed at the top level, then `call_once(A)?`,
+    leaves nothing to come back to at all.
+    """
+    # The query names such a variable through a node of its own bound to the
+    # earlier one, so everything on the way to what it stands for is skipped.
+    skip = set()
+    for v in (inherited or {}).values():
+        while v is not None:
+            skip.add(id(v))
+            v = v.coref
+    seen = set()
+    stack = [term]
+    while stack:
+        t = stack.pop()
+        while t is not None and id(t) not in skip and t.coref is not None:
+            t = t.coref
+        if t is None or id(t) in skip or id(t) in seen:
+            continue
+        seen.add(id(t))
+        if t.type is wl.cut:
+            if t.value is None:
+                t.value = level_cp
+            continue
+        if t.attr_list:
+            stack.extend(t.attr_list.values())
 
 
 def _prompt(depth: int, module_name: str = "") -> str:
@@ -200,6 +237,7 @@ def run_repl(
     from wild_life.parser_ import parse_string
     from wild_life.unification import HaltException, AbortException, SortCycleException
     from wild_life.data_structures import QUERY, FACT, ERROR, DefType
+    from wild_life.data_structures import ChoicePoint
 
     # ---- Initialise runtime (modules, types, operators) --------------------
     if not WL._initialized:
@@ -377,6 +415,44 @@ def run_repl(
         # Return parent frame's bindings (if any)
         return frame_stack[-1].bindings_str if frame_stack else ""
 
+    def _has_own_choices(frame) -> bool:
+        """Whether backtracking at this level has an alternative to take.
+
+        What is under the level's query, and the choice point a deeper
+        level stands on, are not its alternatives.
+        """
+        _top = engine.choice_stack
+        return (_top is not None and _top is not frame.cs_before
+                and not _top.prompt_level)
+
+    def _close_run_out_levels() -> str:
+        """Close the levels backtracking has run out of answers for.
+
+        Usually that is the current level alone, but a query can take
+        choice points of the levels under it away: `A1=get_choice-g?`,
+        `B={a;b}?`, then `set_choice(A1+g)?` leaves nothing made since A1
+        was read, so backtracking finds no level to come back to and goes
+        on to the top level.  Backtracking stops at the newest choice point
+        a level stands on, and that level and those above it are closed.
+        Returns the bindings of the level the prompt comes back to.
+        """
+        nonlocal depth
+        _top = engine.choice_stack
+        if _top is None:
+            _pop_all()
+            return ""
+        if _top.prompt_level:
+            for _i, _f in enumerate(frame_stack):
+                if _f.level_cp is _top:
+                    while len(frame_stack) > _i:
+                        _f = frame_stack.pop()
+                        engine.trail.undo_to(_f.pre_mark)
+                        engine.choice_stack = _restore_choices(_f.cs_before)
+                        depth -= 1
+                    engine.goal_stack = None
+                    return frame_stack[-1].bindings_str if frame_stack else ""
+        return _pop_frame()
+
     def _pop_all():
         """Pop all frames back to depth 0."""
         nonlocal depth
@@ -459,12 +535,10 @@ def run_repl(
                 # The current frame's cs_before is the choice stack state before
                 # the current query was proved. Alternatives "above" cs_before
                 # belong to the current depth; cs_before itself belongs to outer levels.
-                current_cs_before = frame_stack[-1].cs_before if frame_stack else None
-                has_own_choices = (engine.choice_stack is not None and
-                                   engine.choice_stack is not current_cs_before)
+                has_own_choices = _has_own_choices(frame_stack[-1])
                 if not has_own_choices:
-                    # No more alternatives at this depth — pop one level
-                    parent_bindings = _pop_frame()
+                    # No more alternatives at this depth — close it
+                    parent_bindings = _close_run_out_levels()
                     sys.stdout.write("\n*** No\n")
                     if parent_bindings:
                         sys.stdout.write(parent_bindings + "\n")
@@ -500,9 +574,8 @@ def run_repl(
                     # (pure side-effect alternatives like write/disjunction in goal pos).
                     # If the frame has own variables, stay at current depth so the user
                     # can inspect bindings before popping.
-                    current_cs_before2 = frame_stack[-1].cs_before if frame_stack else None
-                    still_has_own = (engine.choice_stack is not None and
-                                     engine.choice_stack is not current_cs_before2)
+                    still_has_own = (_has_own_choices(frame_stack[-1])
+                                     if frame_stack else False)
                     frame_has_own_vars = bool(frame_stack[-1].var_tree) if frame_stack else False
                     if not still_has_own and not frame_has_own_vars:
                         # Last alternative consumed, no own vars → auto-pop to parent level
@@ -511,8 +584,8 @@ def run_repl(
                     else:
                         _write_prompt(depth)
                 else:
-                    # Exhausted alternatives — pop one level
-                    parent_bindings = _pop_frame()
+                    # Exhausted alternatives — close the level
+                    parent_bindings = _close_run_out_levels()
                     sys.stdout.write("\n*** No\n")
                     if parent_bindings:
                         sys.stdout.write(parent_bindings + "\n")
@@ -617,17 +690,25 @@ def run_repl(
 
                 saved_noisy = engine.noisy
                 engine.noisy = False
-                # At depth > 0 there are accumulated bindings from outer frames on
-                # the trail (pre_mark > 0).  If cs_before is None (no active choice
-                # points), run() would call undo_to(0) on failure, wiping those
-                # outer bindings.  We prevent this by passing a sentinel ChoicePoint
-                # as cs_barrier: run() then skips undo_to(0) and the REPL's own
-                # undo_to(pre_mark) only removes the current query's bindings.
-                from wild_life.data_structures import ChoicePoint as _CP_sentinel
+                # A query typed at a deeper prompt stands on a choice point of
+                # its own, made before the query starts and holding no
+                # alternative: backtracking that reaches it means the query
+                # has run out of answers, and the level is closed.  A program
+                # that reads the choice point stack sees it like any other:
+                # `A1=get_choice-g?` then `B=exists_choice(A1+g,get_choice)?`
+                # answers true, as the second query's level was entered after
+                # A1 was read.  It is also the barrier the query's own run
+                # does not backtrack past, so the bindings of the levels
+                # under it stay when the query fails.
+                level_cp = None
                 _cs_barrier = cs_before
-                if depth > 0 and cs_before is None:
-                    _cs_barrier = _CP_sentinel(undo_point=pre_mark,
-                                               goal_stack=None, next=None)
+                if depth > 0:
+                    level_cp = ChoicePoint(undo_point=pre_mark,
+                                           goal_stack=None, next=cs_before)
+                    level_cp.prompt_level = depth + 1
+                    engine.choice_stack = level_cp
+                    _cs_barrier = level_cp
+                    _cut_to_level(term, level_cp, inherited, WL)
                 try:
                     # Pass _cs_barrier so this fresh query does NOT
                     # backtrack into choice points from enclosing (outer) queries.
@@ -698,7 +779,8 @@ def run_repl(
                         frame_stack.append(Frame(pre_mark, bindings_str,
                                                  cs_before, var_tree,
                                                  saved_pd,
-                                                 engine.choice_stack))
+                                                 engine.choice_stack,
+                                                 level_cp))
                         depth += 1
                         # TRUE MODEL: write *** Yes + bindings + prompt immediately on frame push.
                         sys.stdout.write("\n*** Yes\n")

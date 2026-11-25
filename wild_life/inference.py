@@ -1016,7 +1016,7 @@ def _add_blocker(out: list, t: 'PsiTerm') -> None:
 
 
 def _match_one(c: 'PsiTerm', h: 'PsiTerm', out: list, eng, seen: set,
-               bindings: dict, stuck: list, depth: int = 0):
+               bindings: dict, depth: int = 0):
     """How far the call's term c already matches the head's term h.
 
     Matching is one-way: a head position that is a variable takes the call's
@@ -1062,13 +1062,8 @@ def _match_one(c: 'PsiTerm', h: 'PsiTerm', out: list, eng, seen: set,
             return False
         if taken is c:
             return False
-        _paired = _pair_blockers(taken, c, out, set(), eng)
-        if _paired == 'never':
+        if _pair_blockers(taken, c, out, set(), eng) == 'never':
             return 'never'
-        if not _paired:
-            # The two differ nowhere a binding could reach, yet they are still
-            # two terms and the head asks for one.
-            stuck[0] = True
         # What the two terms wait on is noted between themselves; the term
         # that holds them does not wait with them.
         return False
@@ -1078,11 +1073,8 @@ def _match_one(c: 'PsiTerm', h: 'PsiTerm', out: list, eng, seen: set,
             return False
         # The head asks for this very term again — `f(X:s(X))` asks the call's
         # term to be its own first feature.
-        _paired = _pair_blockers(taken, c, out, set(), eng)
-        if _paired == 'never':
+        if _pair_blockers(taken, c, out, set(), eng) == 'never':
             return 'never'
-        if not _paired:
-            stuck[0] = True
         return False
     bindings[id(h)] = c
 
@@ -1108,13 +1100,19 @@ def _match_one(c: 'PsiTerm', h: 'PsiTerm', out: list, eng, seen: set,
             # something it is not: `g(t2)` is a t2 and `g(t1(l => t3))` wants
             # a t1, so the rule is ruled out.  One that asks only for features
             # — project3's `X:@(set => true)` — is waiting for what the term
-            # will be given, and any term can be given a feature.
+            # will be given, and any term can be given a feature.  So is one
+            # whose sort the term already has: dissolve's
+            # `features_internal([X|T])` applied to the bare sort name `cons`
+            # waits for that cons to be given a head and a tail, rather than
+            # passing on to the catch-all rule, and the answer shows `cons~`.
             if (not _is_open_call_term(c, wl)
-                    and h.type is not None and h.type is not wl.top):
+                    and h.type is not None and h.type is not wl.top
+                    and not (c.type is not None
+                             and c.type.is_subtype_of(h.type))):
                 return 'never'
             _add_blocker(out, c)
             return True
-        below = _match_one(cv, hv, out, eng, seen, bindings, stuck, depth + 1)
+        below = _match_one(cv, hv, out, eng, seen, bindings, depth + 1)
         if below == 'never':
             return 'never'
         if below:
@@ -1273,9 +1271,7 @@ def _rule_match_status(head: 'PsiTerm', call: 'PsiTerm', eng):
     call's own terms are never narrowed to make a rule fit.  A call that is
     not specific enough yet therefore waits — the answer is the list of terms
     whose narrowing would settle it — and one that no narrowing could ever
-    make fit reports 'never', so the next rule is tried.  'stuck' is the third
-    case: the call is as settled as it will get and still does not match, so
-    it neither applies the rule nor waits.
+    make fit reports 'never', so the next rule is tried.
     """
     if head is None or call is None or not head.attr_list:
         return 'ready'
@@ -1401,7 +1397,6 @@ def _rule_match_status(head: 'PsiTerm', call: 'PsiTerm', eng):
 
     blockers: list = []
     bindings: dict = {}
-    stuck = [False]
     seen: set = set()
     mark = eng.trail.mark()
     _match_cs = eng.choice_stack
@@ -1421,14 +1416,14 @@ def _rule_match_status(head: 'PsiTerm', call: 'PsiTerm', eng):
                 asked[k] = merged
         for k in keys:
             if _match_one(call.attr_list[k], asked[k], blockers, eng, seen,
-                          bindings, stuck) == 'never':
+                          bindings) == 'never':
                 return 'never'
     finally:
         eng.trail.undo_to(mark)
         eng.choice_stack = _match_cs
     if blockers:
         return blockers
-    return 'stuck' if stuck[0] else 'ready'
+    return 'ready'
 
 
 def _is_cyclic(t: 'PsiTerm', _seen: frozenset = frozenset(),
@@ -1449,11 +1444,13 @@ def _pair_blockers(a: 'PsiTerm', b: 'PsiTerm', out: list, seen: set, eng,
                    depth: int = 0) -> bool:
     """Note the terms whose narrowing could still make a and b one term.
 
-    Whether they can differ at all is what decides it: two terms that already
-    agree down to the very same variables are noted nowhere, because no
-    binding could bring the two of them together.  Where they do differ, every
-    term on the way down to the difference is waiting on it — which is why
-    disequality3 marks each cell of `s(a(a(a(B))))` and not only B.
+    Two terms that are not one and the same wait on each other, however alike
+    they look: only unifying them can make them one, and every pair of cells
+    on the way down that are still two terms waits along with them — which is
+    why disequality3 marks each cell of `s(a(a(a(B))))` and not only B, and
+    why append's `app4([X|L1],L2,[X|L3])` applied to A = [1,2] and
+    C = [1,2], written out separately, leaves the two heads as `1~` until
+    `A = C` makes them one.  A cell the two already share is noted nowhere.
 
     Returns 'never' when no narrowing could ever bring them together, and
     otherwise whether anything was noted.
@@ -1489,8 +1486,6 @@ def _pair_blockers(a: 'PsiTerm', b: 'PsiTerm', out: list, seen: set, eng,
         _add_blocker(out, a)
         _add_blocker(out, b)
         return True
-    differs = (a.type is not b.type or a.value != b.value
-               or a.attr_list.keys() != b.attr_list.keys())
     for sub_key, sub in a.attr_list.items():
         other = b.attr_list.get(sub_key)
         if other is None:
@@ -1498,12 +1493,9 @@ def _pair_blockers(a: 'PsiTerm', b: 'PsiTerm', out: list, seen: set, eng,
         below = _pair_blockers(sub, other, out, seen, eng, depth + 1)
         if below == 'never':
             return 'never'
-        if below:
-            differs = True
-    if differs:
-        _add_blocker(out, a)
-        _add_blocker(out, b)
-    return differs
+    _add_blocker(out, a)
+    _add_blocker(out, b)
+    return True
 
 
 def _eval_cond_functional(cond_term: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
@@ -3230,6 +3222,7 @@ class Engine:
             self.trail.undo_to(mark)
             # Try next clause if any
             if self.choice_stack and \
+               self.choice_stack.goal_stack is not None and \
                self.choice_stack.goal_stack.type == GoalType.PROVE and \
                self.choice_stack.goal_stack.a is thegoal:
                 return self.backtrack_and_succeed()
@@ -3921,8 +3914,6 @@ class Engine:
                     _st_match = _rule_match_status(head.deref(), funct, self)
                     if _st_match == 'never':
                         return False
-                    if _st_match == 'stuck':
-                        return True
                     if isinstance(_st_match, list) and _st_match:
                         if _rule_cp is not None:
                             self.drop_choice_point(_rule_cp)
@@ -3930,7 +3921,7 @@ class Engine:
                         self._suspend_call(funct, result, rules, _st_match)
                         return True
                     mark = self.trail.mark()
-                    ok = self.unifier.unify(funct, head)
+                    ok = self.unifier.match_call_head(funct, head)
                     if not ok:
                         self.trail.undo_to(mark)
                         return False
@@ -4060,8 +4051,8 @@ class Engine:
         # psi-term in both places.  `f(X,X)` therefore does not apply to
         # `f(a(a(X1)), a(a(X2)))` however alike the two arguments look, and
         # unifying them would answer a question the call has not settled — so
-        # the call residuates on the variables that keep them apart, and is
-        # retried when one of them is bound.
+        # the call residuates on every cell of the two that is still two
+        # terms, and is retried when one of them is bound.
         # Matching is one-way: the head's variables take the call's terms, and
         # the call's own terms are never narrowed to make a rule fit.  A rule
         # no narrowing could ever fit is passed over; one the call is not yet
@@ -4072,12 +4063,6 @@ class Engine:
         _match = _rule_match_status(_head_d_arity, funct, self)
         if _match == 'never':
             return False
-        if _match == 'stuck':
-            # The call's arguments are alike down to their variables yet are
-            # still two terms, and the head asks for one: nothing left to bind
-            # can settle it, so the call neither applies the rule nor waits —
-            # it simply has no value.
-            return True
         _free_args_for_resid = _match if isinstance(_match, list) else None
         if _free_args_for_resid:
             # The call as a whole is waiting, not this one rule: the pending
@@ -4096,7 +4081,7 @@ class Engine:
 
         # Unify head with funct first (to bind head arguments)
         mark = self.trail.mark()
-        ok = self.unifier.unify(funct, head)
+        ok = self.unifier.match_call_head(funct, head)
         if not ok:
             self.trail.undo_to(mark)
             # If this is the last rule in a resid re-fire, fall back to returning
@@ -4386,6 +4371,23 @@ class Engine:
                     _eq_term_bo.attr_list['1'] = result
                     _eq_term_bo.attr_list['2'] = body_d2
                     self.push_goal(GoalType.PROVE, _eq_term_bo, None, None)
+                else:
+                    self.push_goal(GoalType.UNIFY, body_d2, result, None)
+            elif _body_is_arith:
+                # A sum over calls is still a sum once the calls have
+                # answered: schedule's `earlyCalc([B|L]) -> max(B.earlyStart
+                # + B.duration, earlyCalc(L))` is worth a number, or waits
+                # for one while B's start is unknown.  Meeting the result
+                # with the sum as a term would fail on an earliest start
+                # another task's sum has already made a real.  `=` works the
+                # sum out, or makes it wait, once the calls below have run.
+                _eq_defn_ac = (getattr(wl, 'eqsym', None)
+                               or wl.syntax_module.symbol_table.get('='))
+                if _eq_defn_ac is not None:
+                    _eq_term_ac = PsiTerm(type_def=_eq_defn_ac)
+                    _eq_term_ac.attr_list['1'] = result
+                    _eq_term_ac.attr_list['2'] = body_d2
+                    self.push_goal(GoalType.PROVE, _eq_term_ac, None, None)
                 else:
                     self.push_goal(GoalType.UNIFY, body_d2, result, None)
             else:
@@ -4697,6 +4699,26 @@ class Engine:
     # ─── main loop ──────────────────────────────────────────────────────────
 
     def run(self, cs_barrier=None) -> bool:
+        """Run the prove loop as a proof of its own.
+
+        A proof started while a unification is under way -- the condition
+        `cs := X | okc(X)` puts on what becomes a cs -- runs its delay rules
+        as it goes, not when the unification that started it is done:
+        `Y = m` in okc has run `:: m(…) | …` before okc reads Y.
+        """
+        _u = self.unifier
+        _held = (_u._delay_hold, _u._pending_delay_fires,
+                 _u._matching_call_head)
+        _u._delay_hold = 0
+        _u._pending_delay_fires = []
+        _u._matching_call_head = False
+        try:
+            return self._run_loop(cs_barrier)
+        finally:
+            (_u._delay_hold, _u._pending_delay_fires,
+             _u._matching_call_head) = _held
+
+    def _run_loop(self, cs_barrier=None) -> bool:
         """
         Run the main prove loop (main_prove in login.c).
         Returns True if the goal_stack was satisfied (at least once).
@@ -4864,15 +4886,22 @@ class Engine:
                 if not success:
                     # Backtrack to the most recent choice point, but not past
                     # cs_barrier (which marks the boundary of this fresh query).
+                    # Nor past the choice point a deeper prompt's level stands
+                    # on: reaching it means that level has no answers left,
+                    # which is for the session to act on, and the bindings
+                    # of the levels under it stay.
+                    _at_level = (self.choice_stack is not None
+                                 and self.choice_stack.prompt_level)
                     can_backtrack = (
                         self.choice_stack is not None
                         and (cs_barrier is None or self.choice_stack is not cs_barrier)
+                        and not _at_level
                     )
                     if can_backtrack:
                         self.backtrack()
                         success = True
                     else:
-                        if cs_barrier is None:
+                        if cs_barrier is None and not _at_level:
                             # No barrier: full cleanup (top-level query)
                             self.trail.undo_to(0)
                         # With barrier: don't undo trail — caller (main.py) handles it

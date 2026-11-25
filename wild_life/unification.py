@@ -220,10 +220,18 @@ def _fired_rules_of(t: PsiTerm) -> set:
     return fs
 
 
-def _share_fired_rules(u: PsiTerm, v: PsiTerm) -> set:
-    """Join two psi-terms' fired-rule histories into one shared set."""
-    fs = _fired_rules_of(u)
-    fs |= _fired_rules_of(v)
+def _share_fired_rules(u: PsiTerm, v: PsiTerm, trail=None) -> set:
+    """Join two psi-terms' fired-rule histories into one shared set.
+
+    The join is a new set, recorded on the trail, so backtracking past it
+    gives each term back the history it had: resid1's body `typ`, met by
+    the typ a choice point handed X, has not run `:: typ(…)` itself, and
+    once that choice is undone it still owes the rule to the next X.
+    """
+    fs = set(_fired_rules_of(u)) | _fired_rules_of(v)
+    if trail is not None:
+        trail.trail_psi(u, '_delay_rules_fired')
+        trail.trail_psi(v, '_delay_rules_fired')
     u._delay_rules_fired = fs
     v._delay_rules_fired = fs
     return fs
@@ -529,6 +537,12 @@ class Unifier:
         # _unify_impl_inner): a cyclic term would otherwise keep handing
         # itself a fresh copy of the prototype for ever.
         self._in_deferred_check: bool = False
+        self._pending_delay_fires: list = []
+        # How many unifications the delay rules asked for now wait on; a
+        # proof started inside one (a conditional sort's) starts again at 0.
+        self._delay_hold: int = 0
+        # Set while a function call is matched against a rule's head.
+        self._matching_call_head: bool = False
 
     def bind(self, var: PsiTerm, val: PsiTerm):
         """変数 var を val に束縛する (バックトラック可能)
@@ -1045,6 +1059,19 @@ class Unifier:
         t.attr_list = old_attrs
         t.attr_list[key] = val
 
+    def match_call_head(self, call: PsiTerm, head: PsiTerm) -> bool:
+        """Unify a function call with the head of the rule chosen for it.
+
+        The head only names what the call already holds, so a sort written
+        in it owes no delay rules of its own (see _fire_fresh_sorts).
+        """
+        _saved = self._matching_call_head
+        self._matching_call_head = True
+        try:
+            return self.unify(call, head)
+        finally:
+            self._matching_call_head = _saved
+
     def unify(self, u: PsiTerm, v: PsiTerm) -> bool:
         """2つの psi-term を単一化する
         C版の global_unify() に対応 (login.c)
@@ -1056,11 +1083,17 @@ class Unifier:
             True if successful, False on failure
         """
         is_top_level = (self._unify_nesting == 0)
+        _holds = (self._delay_hold == 0)
+        if _holds:
+            _outer_fires = self._pending_delay_fires
+            self._pending_delay_fires = []
         self._unify_nesting += 1
+        self._delay_hold += 1
         try:
             result = self._unify_impl(u, v)
         finally:
             self._unify_nesting -= 1
+            self._delay_hold -= 1
             # At the top-level unify call, flush deferred wakeup goals in the
             # order they were collected (attribute order 1,2,3,…).  Push them
             # onto the goal stack in REVERSE order so the first goal ends up on
@@ -1069,6 +1102,25 @@ class Unifier:
                 for _gt, _ga, _gb, _gc in reversed(self._deferred_wakeups):
                     self.engine.push_goal(_gt, _ga, _gb, _gc)
                 self._deferred_wakeups.clear()
+            if _holds:
+                _fires = self._pending_delay_fires
+                self._pending_delay_fires = _outer_fires
+        # The delay rules the unification made applicable run once the two
+        # terms are wholly one: what a rule reads is the term with every
+        # feature both sides brought.  schedule's `A6 = task(duration => 3,
+        # prerequisites => [A1])` on an A6 that an earlier task already
+        # reads is a task with A1 to wait for; asked while only the sort had
+        # been merged, `:: A:task(…, prerequisites => R:{[];list}) | !, …`
+        # would find no prerequisites, take [] for them and commit to it.
+        # And a choice the rule leaves — a friend for inherit's person —
+        # comes back to the terms as one, not to half a unification.
+        if _holds and result and _fires:
+            for _t_pf, _s_pf, _owed_pf in _fires:
+                _t_pf = _t_pf.deref()
+                if (_t_pf.type is None
+                        or not _t_pf.type.is_subtype_of(_s_pf)):
+                    continue
+                self._fire_delay_rules(_t_pf, _s_pf, only=_owed_pf)
         return result
 
     def _unify_impl(self, u: PsiTerm, v: PsiTerm) -> bool:
@@ -2059,6 +2111,15 @@ class Unifier:
             return
         if getattr(self.engine, '_in_fire_delay', False):
             return
+        if self._matching_call_head:
+            # A function's head is matched against the call, not built: the
+            # `B:task` of schedule's `lateCalc(A,[B:task|L])` names a task
+            # the call already holds, one that has run `:: A:task(…) | …`.
+            # Running the rule again at every call would start that task's
+            # sums over each time.  A clause body's `typ` meeting X is a
+            # term of its own, and still owes resid1 its `:: typ(…)`.
+            _share_fired_rules(u, v, self.trail)
+            return
         for term, other in ((u, v), (v, u)):
             if term.type is None or term.type is WL.top:
                 continue
@@ -2072,7 +2133,7 @@ class Unifier:
             if not getattr(other, '_delay_rules_fired', None):
                 continue
             self._fire_delay_rules(term, term.type, use_fired_set=True)
-        _share_fired_rules(u, v)
+        _share_fired_rules(u, v, self.trail)
 
     def _fire_narrowed(self, term: PsiTerm, other: PsiTerm, new_sort) -> None:
         """Run the delay rules a sort narrowing has just made applicable.
@@ -2085,7 +2146,7 @@ class Unifier:
             return
         if new_sort is None or new_sort is WL.top:
             return
-        _share_fired_rules(term, other)
+        _share_fired_rules(term, other, self.trail)
         self._fire_delay_rules(term, new_sort, use_fired_set=True)
 
     def _unify_types(self, u: PsiTerm, v: PsiTerm) -> bool:
@@ -2157,9 +2218,11 @@ class Unifier:
             for alt_glb in reversed(glbs[1:]):
                 alt_psi = PsiTerm(type_def=alt_glb)
                 # The alternative is a stand-in for u, not a term the reader
-                # built, so it inherits u's delay-rule history: coming back
-                # here owes `:: a2 |`, not `:: b1 |` and `:: b2 |` again.
-                alt_psi._delay_rules_fired = _fired_rules_of(u)
+                # built, so it inherits the two sides' delay-rule history:
+                # coming back here owes `:: a2 |`, not `:: b1 |` and `:: b2 |`
+                # again.
+                alt_psi._delay_rules_fired = (set(_fired_rules_of(u))
+                                              | _fired_rules_of(v))
                 # The alternative narrows u to the other greatest lower bound
                 # and then redoes the whole unification, because everything
                 # this call goes on to do — merging u and v among it — is
@@ -2463,7 +2526,8 @@ class Unifier:
         return True
 
     def _fire_delay_rules(self, u: PsiTerm, new_sort,
-                          use_fired_set: bool = False) -> None:  # noqa: E501
+                          use_fired_set: bool = False,
+                          only=None) -> None:  # noqa: E501
         """グローバル遅延ルール (:: Pattern | Goal) を起動する。
 
         u のソートが new_sort に絞り込まれたとき、パターンのソートが
@@ -2476,6 +2540,30 @@ class Unifier:
         # Skip the recursive call — the goal is already being set up.
         if getattr(self.engine, '_in_fire_delay', False):
             return
+        if self._delay_hold > 0 and only is None:
+            # Inside a unification the rules wait for it to finish (see
+            # unify), but which ones the term owes is settled now and
+            # written into its history: `f(X, X) = f(b1, b2)` owes what
+            # `X = b1, X = b2` owes, B1 once and then A1 and B2.
+            _hist = _fired_rules_of(u)
+            _owed = []
+            for _r in _delay_rules_by_specificity(WL):
+                if use_fired_set and id(_r) in _hist:
+                    continue
+                _p = _r.attr_list.get('1')
+                if _p is None or _r.attr_list.get('2') is None:
+                    continue
+                _ps = _p.deref().type
+                if (_ps is not None and _ps is not WL.top
+                        and not new_sort.is_subtype_of(_ps)):
+                    continue
+                _owed.append(id(_r))
+            if _owed:
+                self.trail.trail_copy(u, '_delay_rules_fired')
+                _hist.update(_owed)
+                self._pending_delay_fires.append(
+                    (u, new_sort, frozenset(_owed)))
+            return
         self.engine._in_fire_delay = True
         # Collect concrete typed literals from goal copies for deferred firing.
         # (In C Wild Life, integer/real literals in rule bodies act as sort-constrained
@@ -2483,7 +2571,7 @@ class Unifier:
         deferred_literal_fires: list = []
         try:
             self._fire_delay_rules_inner(u, new_sort, deferred_literal_fires,
-                                         use_fired_set)
+                                         use_fired_set, only)
         finally:
             self.engine._in_fire_delay = False
         # Fire deferred delays for concrete integer/real literals found in goal copies.
@@ -2525,12 +2613,17 @@ class Unifier:
 
     def _fire_delay_rules_inner(self, u: PsiTerm, new_sort,
                                 deferred_literal_fires: list = None,
-                                use_fired_set: bool = False) -> None:
+                                use_fired_set: bool = False,
+                                only=None) -> None:
         """_fire_delay_rules の実処理 (再入禁止ガード外側から呼ぶ)。"""
         wl = WL
         fired_set = _fired_rules_of(u)
         for rule_inner in _delay_rules_by_specificity(wl):
-            if use_fired_set and id(rule_inner) in fired_set:
+            if only is not None:
+                # The rules a unification settled on when it asked for them.
+                if id(rule_inner) not in only:
+                    continue
+            elif use_fired_set and id(rule_inner) in fired_set:
                 # This term has already run this rule for an earlier, wider
                 # sort of its own: narrowing b1 to a1 owes A1, not B1 again.
                 continue
@@ -2746,7 +2839,12 @@ class Unifier:
                 # Recurse into sub-term first (depth-first post-order = bottom-up firing).
                 # In C Wild Life, delay fires for inner terms before outer ones.
                 self._fire_delay_rules_for_subterms(sub, visited)
-                self._fire_delay_rules(sub, sub_type)
+                # A sub-term that has already run a rule is not owed it again
+                # because a variable now names the structure holding it:
+                # schedule's `lateCalc(A,[B:task|L])` meets the same tasks
+                # call after call, and running `:: A:task(…) | …` on each of
+                # them every time would start their sums over and over.
+                self._fire_delay_rules(sub, sub_type, use_fired_set=True)
 
     def _carry_resids(self, src: PsiTerm, dst: PsiTerm) -> None:
         """Move what one variable is waiting for onto the one it becomes."""

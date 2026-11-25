@@ -4708,7 +4708,7 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
                 if _st_sync != 'ready':
                     t.attr_list = t_copy_attrs
                     return None
-                ok_h = eng.unifier.unify(t, head)
+                ok_h = eng.unifier.match_call_head(t, head)
                 if not ok_h:
                     eng.trail.undo_to(mark)
                     continue
@@ -4805,7 +4805,7 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
             return None
 
         mark = eng.trail.mark()
-        ok = eng.unifier.unify(t, head)
+        ok = eng.unifier.match_call_head(t, head)
         if not ok:
             # Restore original attrs in case we modified them
             t.attr_list = t_copy_attrs
@@ -6825,16 +6825,24 @@ def _expand_disjunctions_in_place(lhs: PsiTerm, rhs: PsiTerm, eng,
     node, so X reads as 3 for one alternative and -3 for the next, where
     unifying a copy of the expression would have left X as the disjunction.
 
+    With bind_nodes, when no choice sits among a function call's arguments,
+    the equation itself is proved first and the choices are picked after it
+    (see below).
+
     Returns True once the goals are pushed, or None when neither side holds a
     disjunction and the caller should carry on.
     """
     from wild_life.inference import _DEFRULES as _DR
     wl = eng.wl
     slots = []   # [(fresh var standing in for a disjunction, its alternatives)]
+    call_args = []   # disjunctions written as arguments of a function call
 
-    def collect(t, depth=0):
+    def collect(t, depth=0, in_call=False):
         if depth > 10 or not t.attr_list:
             return
+        in_call = in_call or (t.type is not None
+                              and t.type.type == DefType.FUNCTION
+                              and not (t.flags & QUOTED_TRUE))
         for key in list(t.attr_list.keys()):
             sub = t.attr_list[key].deref()
             if sub.type is not None and sub.type is wl.disjunction:
@@ -6849,8 +6857,10 @@ def _expand_disjunctions_in_place(lhs: PsiTerm, rhs: PsiTerm, eng,
                     else:
                         eng.unifier.set_attr(t, key, fresh)
                     slots.append((fresh, elems))
+                    if in_call:
+                        call_args.append(fresh)
                     continue
-            collect(sub, depth + 1)
+            collect(sub, depth + 1, in_call)
 
     collect(lhs)
     collect(rhs)
@@ -6871,6 +6881,33 @@ def _expand_disjunctions_in_place(lhs: PsiTerm, rhs: PsiTerm, eng,
         eq = PsiTerm(type_def=eq_defn)
         eq.attr_list = {'1': lhs, '2': rhs}
         return eq
+
+    # A function is applied to the value of its argument: in
+    # `X = f(show({a;b}))` show is asked about a, then about b, never about
+    # a choice still open, so a choice among a call's arguments is made
+    # before the equation, as further below.
+    if bind_nodes and not call_args:
+        # A choice written inside a term is a value still to be worked out,
+        # and the equation does not wait for it: the variable is given the
+        # term with the choice open, whatever was waiting on the variable
+        # runs, and only then is an alternative picked.  After
+        # `call_once(X)?`, `X = (A = {1;2;3}, write(A), fail)?` wakes
+        # call_once on a goal whose A is still open, so it writes `@`, and
+        # its failure fails the query since no alternative had been opened
+        # yet.  With nothing waiting, the choice follows straight on:
+        # `Y = (A = {1;2;3}, write(A), fail)` leaves Y worth
+        # `(A = 1, write(A), fail)` with 2 and 3 to come back to.
+        picks = []
+        for fresh, elems in slots:
+            pick = equation(fresh, elems[-1])
+            for choice in reversed(elems[:-1]):
+                either = PsiTerm(type_def=wl.life_or)
+                either.attr_list = {'1': equation(fresh, choice), '2': pick}
+                pick = either
+            picks.append(pick)
+        eng.push_goal(GoalType.PROVE, conjoin(picks), _DR, None)
+        eng.push_goal(GoalType.PROVE, equation(lhs, rhs), _DR, None)
+        return True
 
     import itertools
     combos = [
@@ -8944,7 +8981,13 @@ def _sort_compare_args(goal, eng):
                 and _ty is not None and _ty.is_subtype_of(eng.wl.real)):
             _ty = (eng.wl.integer if float(_d.value).is_integer()
                    else eng.wl.real)
-        sorts.append((_ty, _d.value))
+        # What a `!` cuts back to is how it runs, not a value of the term:
+        # `X=1?`, `A = !?`, then `A :== !?` compares two cuts made at
+        # different prompts, and they are the same sort all the same.
+        _val = _d.value
+        if _ty is eng.wl.cut:
+            _val = None
+        sorts.append((_ty, _val))
     return sorts[0], sorts[1]
 
 
@@ -9927,7 +9970,12 @@ def _collect_solutions(template: PsiTerm, g: PsiTerm, eng) -> list:
                     eng.main_loop_ok = _ok_ev
             collected.append(copy_term(_elem))
             eng.trail.undo_to(_mark_ev)
-            if not eng.choice_stack or eng.choice_stack is cp_save:
+            # A `!` in the goal that reaches back to the level the query was
+            # typed at leaves nothing more to collect: `X = 1?` then
+            # `Z={p;q}, findall(Y,(member(Y,[1,2,3]),!),L)?` gives L = [1]
+            # with Z = p, the same as at the top level.
+            if (not eng.choice_stack or eng.choice_stack is cp_save
+                    or eng.choice_stack.prompt_level):
                 break
             eng.backtrack()
         else:
