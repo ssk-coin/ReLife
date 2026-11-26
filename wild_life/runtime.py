@@ -429,11 +429,14 @@ class WildLifeRuntime:
         self.comment.type = DefType.TYPE
 
         # disjunction / disj (論理和 {a;b;c})
-        # The user-facing name is 'disj'; 'disjunction' is a backward-compat alias.
+        # The name a program sees is 'disj'.  'disjunction' is left free for
+        # programs to use as a name of their own: the profiler files the
+        # counts of a `(A ; B)` goal under `disjunction(tries => 0, ...)`, a
+        # record to read later, and that record must not turn into a choice
+        # between alternatives each time `profile_stats.g` is looked at.
         self.disjunction = self.update_symbol(bi, "disj")
         self.disjunction.type = DefType.TYPE
         self._make_type_link(self.disjunction, self.top)
-        bi.symbol_table["disjunction"] = self.disjunction  # disjunction -> disj alias
 
         # disj_nil: the empty disjunction {}
         # User-facing name is 'disj_nil'; when printing it prints as '{}'.

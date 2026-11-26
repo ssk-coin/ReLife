@@ -175,6 +175,13 @@ def _eval_copy_thaw(t: PsiTerm, thaw_evalin: bool = False) -> bool:
                     and '2' in _in_d.attr_list):
                 n.coref = _in_d
                 _clear(_in_d, set())
+                # Read when the rule it is written into runs, and not while
+                # that rule is still being put together: the profiler's
+                # `RewrittenCut = (!, StatsForWhat = `(profile_stats.What),
+                # …)` must still name the record when q's rewritten clause
+                # is filed, not a copy of what the record holds now.  Filing
+                # the rule copies the term, and the note does not go with it.
+                _in_d._wl_quoted_reading = True
                 _seen[_id] = True
                 return True
             _seen[_id] = False
@@ -272,8 +279,40 @@ def _mark_non_strict_args(t: PsiTerm, eng, visited: set = None) -> None:
             # inside the constraints it is to make a clause out of, and
             # `person(N)` is no more evaluated there than at the top.
             _freeze_calls_deep(arg, _QT_ns)
+            _hold_backquotes(arg)
     for sub in t.attr_list.values():
         _mark_non_strict_args(sub, eng, visited)
+
+
+def _hold_backquotes(t: PsiTerm) -> None:
+    """Keep the backquotes inside a non-strict argument as part of the term.
+
+    Nothing evaluates a term handed to a non-strict call, so a backquote
+    written inside it is never used up: it stays in the term and is written
+    with it.  libtest hands `test(gen_member(a,[b,c,d,e,a],test => `:==))`
+    to its non-strict `test`, which writes the call out as
+    `gen_member(a,[b,c,d,e,a],test => ` :==)` before evaluating it.
+
+    Walked with a stack, as a non-strict argument can be a long list.
+    """
+    from wild_life.data_structures import HELD_QUOTE
+    if t is None:
+        return
+    visited = set()
+    stack = [t]
+    while stack:
+        node = stack.pop()
+        if node is None:
+            continue
+        node = node.deref()
+        if id(node) in visited:
+            continue
+        visited.add(id(node))
+        if (node.type is not None and node.type.keyword is not None
+                and node.type.keyword.symbol == '`'
+                and list(node.attr_list.keys()) == ['1']):
+            node.flags |= HELD_QUOTE
+        stack.extend(node.attr_list.values())
 
 
 # The built-ins that reach their arguments through C's evaluating deref, so
@@ -602,6 +641,57 @@ def _head_arith_nodes(t: PsiTerm) -> list:
     return out
 
 
+def _is_open_head_sum(n: PsiTerm) -> bool:
+    """Whether a head argument is an arithmetic expression to work out.
+
+    `makeunique(Pre, N+1)` is one; a sum held as written (quoted, or under
+    a non-strict call) or an operator the program gave rules of its own is
+    not.
+    """
+    from wild_life.data_structures import (
+        QUOTED_TRUE as _QT_ohs, NON_STRICT_TERM as _NST_ohs)
+    if (n.value is not None or not n.attr_list or n.type is None
+            or n.type.keyword is None
+            or n.type.keyword.symbol not in _ARITH_OPS_NON_STRICT
+            or n.flags & (_QT_ohs | _NST_ohs)):
+        return False
+    _r = n.type.rule
+    return not (_r and not callable(_r))
+
+
+def _head_sum_waits_on_vars(n: PsiTerm, wl) -> bool:
+    """Whether a sum is open only for want of numbers bound to its variables.
+
+    `N+1` with N free is; `a+1`, or a sum over a call or a structure, is
+    something else and is left as it is.
+    """
+    found = False
+    stack = [n]
+    seen = set()
+    while stack:
+        t = stack.pop().deref()
+        if id(t) in seen:
+            continue
+        seen.add(id(t))
+        if t.value is not None:
+            if not isinstance(t.value, (int, float)) or isinstance(t.value, bool):
+                return False
+            continue
+        if not t.attr_list:
+            if t.resid is None and (t.type is wl.top or t.type is None):
+                found = True
+                continue
+            if (t.type is not None and wl.real is not None
+                    and t.type is not wl.top and t.type.is_subtype_of(wl.real)):
+                found = True
+                continue
+            return False
+        if t is not n and not _is_open_head_sum(t):
+            return False
+        stack.extend(t.attr_list.values())
+    return found
+
+
 def _term_has_dot(t: PsiTerm, seen=None) -> bool:
     """Whether a stored term holds a `T.F` anywhere under it."""
     if t is None:
@@ -845,7 +935,6 @@ def _eval_body_to_result(branch: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
     from wild_life.data_structures import QUOTED_TRUE as _QT_br
     if branch_d.flags & _QT_br:
         return eng.unifier.unify(result, branch_d)
-
     # Arithmetic?
     arith_ok, arith_val = _eval_arith(branch_d, eng)
     if arith_ok:
@@ -2246,6 +2335,30 @@ class Engine:
     def _deref_term(self, t: PsiTerm) -> PsiTerm:
         return t.deref() if t else t
 
+    def _write_side_waits(self, t: PsiTerm) -> bool:
+        """Whether one side of an equation being written is a sum that waits.
+
+        That is a two-operand arithmetic call whose operands are numbers or
+        plain variables, at least one of them still unbound: the `Y/3` of
+        `Y/3 = X` before Y is known.
+        """
+        sym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
+        if (sym not in _STRICT_ARITH_SYMS or len(t.attr_list) != 2
+                or '1' not in t.attr_list or '2' not in t.attr_list):
+            return False
+        waits = False
+        for _op in t.attr_list.values():
+            _op = _op.deref()
+            if _op.value is not None:
+                if not isinstance(_op.value, (int, float)):
+                    return False
+                continue
+            if _op.attr_list or not (_op.type is None
+                                     or _op.type is self.wl.top):
+                return False
+            waits = True
+        return waits
+
     def prove_aim(self) -> bool:
         """Handle a 'prove' goal. Returns success flag."""
         wl = self.wl
@@ -2388,10 +2501,19 @@ class Engine:
             # everything sharing it follows the choice — the X of
             # `(X:{40;41;44}) = 41` among them.  The goal goes back on the
             # stack, so it is asked again once the choice is made.
+            # A choice held as it was written is a term like any other,
+            # though: the grammar expander is handed tokenizer.lf's
+            # `{ cond(is_syntactic(X), …) }` as data, and its
+            # `` `(S :== `cond) `` asks about the braces, not about the cond
+            # inside them -- the braces hold code, which is not expanded as
+            # grammar steps.
             if thegoal.attr_list and _bi_sym in _DEREF_EVAL_BUILTINS:
+                from wild_life.data_structures import (
+                    QUOTED_TRUE as _QT_dj, NON_STRICT_TERM as _NST_dj)
                 for _k_dj in list(thegoal.attr_list.keys()):
                     _ad_dj = thegoal.attr_list[_k_dj].deref()
-                    if _ad_dj.type is wl.disjunction and _ad_dj.attr_list:
+                    if (_ad_dj.type is wl.disjunction and _ad_dj.attr_list
+                            and not (_ad_dj.flags & (_QT_dj | _NST_dj))):
                         self.goal_stack = aim.next
                         self.goal_count += 1
                         self.push_goal(GoalType.PROVE, thegoal, aim.b, aim.c)
@@ -2524,10 +2646,45 @@ class Engine:
                             if (not _eq_v.attr_list
                                     or (_eq_v.flags & (_QT_w | _NST_w))):
                                 continue
+                            if _eq_v.type is wl.disjunction:
+                                # A choice on one side is written one
+                                # alternative at a time, as a choice written
+                                # on its own is: the debugger's trace of
+                                # `X={one;two}` prints `@ = one`, and comes
+                                # back to print `@ = two` -- the goal, being
+                                # the same term, follows the choice made.
+                                if not self.unifier._settle_disjunction(
+                                        _eq_v):
+                                    self.goal_stack = aim.next
+                                    self.goal_count += 1
+                                    return False
+                                _eq_v = _eq_v.deref()
+                                if not _eq_v.attr_list:
+                                    continue
                             _eq_ev = _teaf_w(_eq_v, self)
                             if (_eq_ev is not None
                                     and _eq_ev.deref() is not _eq_v):
                                 self.unifier.set_attr(_a_w, _eq_k, _eq_ev)
+                            elif self._write_side_waits(_eq_v):
+                                # An arithmetic side that cannot be worked
+                                # out yet is made to wait, and what is
+                                # written is the number it promises: the
+                                # debugger's trace of the goal `Y/3 = X`
+                                # prints `real~ = @`, and the goal, which is
+                                # the same term, then meets X with that
+                                # waiting number rather than with the call.
+                                self.goal_stack = aim.next
+                                self.goal_count += 1
+                                _R_eq = wl.make_var()
+                                self.unifier.set_attr(_a_w, _eq_k, _R_eq)
+                                _eq_goal = PsiTerm(type_def=wl.eqsym)
+                                _eq_goal.attr_list['1'] = _R_eq
+                                _eq_goal.attr_list['2'] = _eq_v
+                                self.push_goal(GoalType.PROVE, thegoal,
+                                               aim.b, aim.c)
+                                self.push_goal(GoalType.PROVE, _eq_goal,
+                                               _DEFRULES, None)
+                                return True
                             else:
                                 _eeuf_w(_eq_v, self, 0, set())
                     elif (_a_w.attr_list and not _iuf_w(_a_w)
@@ -3227,6 +3384,24 @@ class Engine:
                self.choice_stack.goal_stack.a is thegoal:
                 return self.backtrack_and_succeed()
             return False
+        # A sum written in the head is worked out once the head has matched
+        # and before the body runs (see _residuate_head_sums).  Whether a
+        # head has one at all is the same for every copy of the clause.
+        if (not _non_strict and defn is not None
+                and defn.type == DefType.PREDICATE and head.attr_list):
+            _ho_hs = head_orig.__dict__.get('_wl_has_head_sum')
+            if _ho_hs is None:
+                _ho_hs = any(_is_open_head_sum(_a_hs.deref())
+                             for _a_hs in head_orig.attr_list.values())
+                head_orig._wl_has_head_sum = _ho_hs
+            if _ho_hs and not self._residuate_head_sums(thegoal, head):
+                self.trail.undo_to(mark)
+                if self.choice_stack and \
+                   self.choice_stack.goal_stack is not None and \
+                   self.choice_stack.goal_stack.type == GoalType.PROVE and \
+                   self.choice_stack.goal_stack.a is thegoal:
+                    return self.backtrack_and_succeed()
+                return False
         # `rpf(Term, [F|LF], Level, [Term.F | LNames])` builds its answer out
         # of a feature of the term it was given, and the answer is the feature
         # rather than the reading of it.  The term and the label are known
@@ -3245,6 +3420,49 @@ class Engine:
             self._resolve_head_feature_terms(head)
         if head.attr_list and head_orig.__dict__.get('_wl_has_call'):
             self._bind_settled_head_calls(head, head_orig)
+        return True
+
+    def _residuate_head_sums(self, thegoal: 'PsiTerm',
+                             head: 'PsiTerm') -> bool:
+        """Work out the sums a matched predicate head was written with.
+
+        A sum in a clause head is worked out as soon as the clause is
+        entered, the same as one written in its body: smalltwente's
+        `makeunique(Pre, N+1)`, called with a fresh variable, cannot add
+        anything up yet, so it waits on N and makes N a real.  Left as a
+        structure, N stays free and later matches the stored `1+1` a
+        retract reads back, where a real does not.
+
+        Only a sum the call handed a free variable for is looked at, and
+        only one that waits for nothing but numbers to be bound.
+        """
+        from wild_life.built_ins import _eval_arith as _ea_hs, bi_unify as _bu_hs
+        wl = self.wl
+        _eq_def = (getattr(wl, 'eqsym', None)
+                   or wl.syntax_module.symbol_table.get('='))
+        if _eq_def is None:
+            return True
+        for _k_hs, _n0_hs in list(head.attr_list.items()):
+            _n_hs = _n0_hs.deref()
+            _g_hs = thegoal.attr_list.get(_k_hs)
+            if _g_hs is None or _g_hs.deref() is not _n_hs:
+                continue
+            if not _is_open_head_sum(_n_hs):
+                continue
+            # A sum whose terms are all known was already given its value
+            # by the match itself.
+            if _ea_hs(_n_hs, self)[0]:
+                continue
+            if not _head_sum_waits_on_vars(_n_hs, wl):
+                continue
+            _sum_hs = PsiTerm(type_def=_n_hs.type)
+            _sum_hs.attr_list = dict(_n_hs.attr_list)
+            _res_hs = PsiTerm(type_def=wl.top)
+            self.unifier.bind(_n_hs, _res_hs)
+            _eq_hs = PsiTerm(type_def=_eq_def)
+            _eq_hs.attr_list = {'1': _res_hs, '2': _sum_hs}
+            if not _bu_hs(_eq_hs, self):
+                return False
         return True
 
     def _bind_settled_head_calls(self, head: 'PsiTerm',
@@ -3830,10 +4048,9 @@ class Engine:
                 return True
 
         head_orig, body_orig = active[0]
-        # Choice point level before the remaining-clause alternatives are
-        # pushed.  A guarded rule (`f(X) -> Val | Guard`) commits to its clause
-        # once head matching and the guard both succeed, so the guard is
-        # followed by a cut back to this level.
+        # Choice point holding the remaining rules.  A rule written
+        # `f(X) -> Val | Goal` commits to its clause as soon as its head
+        # matches, so this choice point is dropped before the goal is proved.
         _rule_cp = None
         # A `!` written in a rule's guard reaches back to where the call was
         # made and no further, exactly as one in a predicate's body does.  An
@@ -3986,8 +4203,15 @@ class Engine:
                     self.push_goal(GoalType.UNIFY, val_part, result, None)
                 else:
                     self.push_goal(GoalType.SUCHTHAT_VAL, val_part, result, _st_call)
+                # The rule is taken once its head matches: the goal after `|`
+                # is part of its value, not a test for choosing it, so when
+                # that goal fails the call fails and no later rule is tried.
+                # testprof profiles `f(N:int) -> Y + 1 | Y = N*N, fail`, and
+                # `X = f(2)` counts one try of f, not a second one in the
+                # profiler's catch-all rule after it.
                 if _rule_cp is not None:
-                    self.push_goal(GoalType.EVAL_COMMIT, _rule_cp, None, None)
+                    self.drop_choice_point(_rule_cp)
+                    _rule_cp = None
                 self.push_goal(GoalType.PROVE, _cond_d, _DEFRULES, None)
                 return True
 
@@ -4647,6 +4871,14 @@ class Engine:
         # is still in its own module once the load returns.
         _module_before_load = self.wl.current_module
         _expanding = self._expanding_load_on()
+        if _expanding:
+            # A load that expands what it reads keeps the name of the file
+            # and the line it has come to in the globals loading_file and
+            # line, which it sets with `<-` and puts back when it is done:
+            # a query that does that keeps what it did and answers at a
+            # level of its own, as `import("parser")?` after
+            # `expand_load(true)?` answers at `--1>`.
+            self.used_existing_global = True
         try:
             while True:
                 try:

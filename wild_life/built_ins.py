@@ -1421,6 +1421,30 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         _v = _os_ge.environ.get(_n)
         return _make_string(eng, _v) if _v is not None else None
 
+    elif sym == 'system' and len(t.attr_list) == 1:
+        # system(Command) is a function: it runs the shell command and is
+        # worth the command's return code.  SuperLint, before it reads the C
+        # program it checks, runs the preprocessor over that file with
+        # `ReturnCode = system(Command)` and removes the result afterwards
+        # with `@ = system(strcon("rm ", CPPFile))`, so the command has to
+        # run when the clause body reads the call.
+        a1 = t.attr_list.get('1')
+        if a1 is None or eng is None:
+            return None
+        _cmd = _get_str_val(a1.deref(), eng)
+        if _cmd is None:
+            return None
+        import subprocess as _subp_sy
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+        try:
+            _ret = _subp_sy.call(_cmd, shell=True)
+        except Exception:
+            _ret = -1
+        return eng.wl.make_integer(_ret)
+
     elif sym == 'ops' and not t.attr_list:
         # `ops` is the operator table as a list of op(Precedence, Type, Name),
         # which is how preparser.lf's expression grammar asks what the current
@@ -2958,16 +2982,78 @@ def bi_get_code(goal: PsiTerm, eng) -> bool:
     return _unify(eng, arg, _read_one_char(eng, True)) if arg else False
 
 
+def _read_from_stream(goal: PsiTerm, eng, stream) -> bool:
+    """read(T[, Kind]) from a file opened with open_in.
+
+    The term is read whole, however many lines it is written over, and what
+    follows it is left for the next read.  Kind says how the term ended:
+    `declaration` for a full stop, `query` for a question mark.  The
+    SuperLint rule compiler reads its rules file this way, one rule at a
+    time, and writes a query it reads back out as a query:
+    `get_next_rule(Expression, Type, EOF) :- read(Expression, Type), ...`.
+    """
+    from wild_life.tokenizer import TokenizerState, WL as _WL_rd
+    from wild_life.parser_ import Parser
+    from wild_life.data_structures import FACT as _FACT_rd, QUERY as _QUERY_rd
+    _cached = getattr(eng, '_read_stream_ts', None)
+    if _cached is not None and _cached[0] is stream:
+        ts = _cached[1]
+    else:
+        ts = TokenizerState(stream, getattr(stream, 'name', 'stream'))
+        eng._read_stream_ts = (stream, ts)
+    _noisy_rd = _WL_rd.noisy
+    _WL_rd.noisy = False          # no prompt: this is not the terminal
+    try:
+        term, kind = Parser(ts).parse()
+    except Exception:
+        term, kind = None, None
+    finally:
+        _WL_rd.noisy = _noisy_rd
+    if term is None:
+        term = PsiTerm(type_def=eng.wl.eof)
+    a1 = goal.attr_list.get('1')
+    a2 = goal.attr_list.get('2')
+    if a1 is not None and not _unify(eng, a1.deref(), term):
+        return False
+    if (a2 is not None and kind in (_FACT_rd, _QUERY_rd)
+            and term.deref().type is not eng.wl.eof):
+        _kind_atom = eng.wl.make_atom(
+            'query' if kind == _QUERY_rd else 'declaration',
+            eng.wl.bi_module)
+        return _unify(eng, a2.deref(), _kind_atom)
+    return True
+
+
 def bi_read(goal: PsiTerm, eng) -> bool:
     """read(T) — read and parse a term from stdin."""
+    if sys.stdin is not sys.__stdin__:
+        return _read_from_stream(goal, eng, sys.stdin)
     arg = _get_one_arg(goal)
     from wild_life.tokenizer import tokenizer_from_string
     from wild_life.parser_ import Parser
-    try:
-        line = sys.stdin.readline()
-    except (EOFError, KeyboardInterrupt):
-        line = ''
-    if not line:
+    from wild_life.main import _without_line_comment
+    # A term is read whole, however many lines it takes, and the blank lines
+    # and comments in front of it are passed over: parser.in reads
+    # FILES/parser.3, where every term follows an empty line, and its first
+    # read is foo(a,b,4 => c,bar => d), not the empty line before it.  Only
+    # the end of the input with no term left answers end_of_file.
+    line = ''
+    while True:
+        try:
+            _next_rd = sys.stdin.readline()
+        except (EOFError, KeyboardInterrupt):
+            _next_rd = ''
+        if _next_rd == '':
+            break
+        line += _next_rd
+        _text_rd = '\n'.join(_without_line_comment(_l)
+                             for _l in line.split('\n')).rstrip()
+        if not _text_rd:
+            line = ''
+            continue
+        if _text_rd.endswith('.') or _text_rd.endswith('?'):
+            break
+    if not line.strip():
         wl = eng.wl
         result = PsiTerm(type_def=wl.eof)
     else:
@@ -3882,6 +3968,15 @@ def _feature_arg_term(feat: PsiTerm, eng):
     # adding a to in would come to.
     _written = feat.deref() is feat
     feat = feat.deref()
+    # A sum written there is the number it comes to: the profiler walks the
+    # counts of a clause's goals with `cond(has_feature(GoalNumber + 1,
+    # Goals), …)`, and asks about goal 2 once goal 1 has been written.
+    if (_written and feat.attr_list and eng is not None
+            and feat.value is None
+            and _get_sym(feat) in _ARITH_OPS_SET):
+        _ok_ar, _val_ar = _eval_arith(feat, eng)
+        if _ok_ar:
+            return _make_number(eng, _val_ar)
     if (_written and feat.attr_list and eng is not None
             and feat.value is None
             and _get_sym(feat) not in _ARITH_OPS_SET):
@@ -6079,6 +6174,10 @@ def _eval_embedded_user_funcs(
         # at A, and waits on A while it is still a variable.
         if (child.type is not None and child.type.keyword is not None
                 and child.type.keyword.symbol == '.'):
+            # One written under a backquote is left for the rule it is
+            # built into to read when that rule runs.
+            if child.__dict__.get('_wl_quoted_reading'):
+                continue
             _cell_d = _resolve_dot_feat(child, eng)
             if _cell_d is not None and _cell_d.deref() is not child:
                 eng.unifier.set_attr(td, key, _cell_d)
@@ -6266,9 +6365,13 @@ def _reduce_embedded_calls(t: PsiTerm, eng, _depth: int, visited: set) -> None:
         # `&` written inside a term is the meet of its two sides, and the
         # term holds what they meet at: structures.lf marks where it has
         # been with `A = @(visited => B&@(visited => A))`, which is a mark
-        # on B as much as on A.
+        # on B as much as on A.  A meet held as data is a term like any
+        # other, though: the grammar rule parser.lf writes as
+        # `{ Tree = Operator & @(L), N = 0 }` reaches the expander as data,
+        # and the clause it is turned into does the meet when it runs.
         if (eng.wl.and_sym is not None and child.type is eng.wl.and_sym
-                and '1' in child.attr_list and '2' in child.attr_list):
+                and '1' in child.attr_list and '2' in child.attr_list
+                and not (child.flags & (QUOTED_TRUE | _NST_rec))):
             _met = _eval_and_conjunction(child, eng)
             if _met is not None and _met.deref() is not child:
                 eng.unifier.set_attr(td, key, _met)
@@ -7251,8 +7354,12 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
         # `evalin(D) = Ys)` hands the grammar expander that term to put in
         # the clause it builds, and reading it here asks the stream for a
         # character the rule has not come to yet.
+        # A such-that is a term under a backquote as well: the profiler takes
+        # a rule's `Y + 1 | Y = N*N, fail` apart with
+        # `ExpressionResult = `(Value | Body)`, which proves nothing.
         if (_is_user_function(td) or _is_cond_builtin_local(td)
-                or (_td_sym_bq in ('.', 'eval', 'evalin') and td.attr_list)):
+                or (_td_sym_bq in ('.', 'eval', 'evalin') and td.attr_list)
+                or (td.type is eng.wl.such_that and td.attr_list)):
             eng.trail.trail_psi(td, 'flags')
             td.flags |= _QT_bq
 
@@ -7979,9 +8086,12 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
     # A such-that term standing as a value — `A = (X | call(p(X)))` — proves
     # its guard and takes the value part, the same as a such-that rule body.
     _st_side = None
+    # One held as it is written is the term it is: the rule body clause/1
+    # hands back, or one under a backquote.
     for _cand in (b_d, a_d):
         if (_cand.type is not None and _cand.type is eng.wl.such_that
-                and '1' in _cand.attr_list and '2' in _cand.attr_list):
+                and '1' in _cand.attr_list and '2' in _cand.attr_list
+                and not (_cand.flags & QUOTED_TRUE)):
             _st_side = _cand
             break
     if _st_side is not None:
@@ -7999,10 +8109,14 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
     # suspends on it, so `leq(7,N)` can constrain N before N is known.
     _CMP_FUNC_SYMS = frozenset(('>', '<', '>=', '=<', '=:=', '=\\='))
 
+    # One held as it is written is the goal it is: the `X =:= 0` the profiler
+    # reads out of g's rule with clause/1 is put back into the rule it
+    # builds, not answered while X is still unbound.
     def _is_cmp_expr(t):
         from wild_life.data_structures import NON_STRICT_TERM as _NST_CMP
         return (_get_sym(t) in _CMP_FUNC_SYMS and '1' in t.attr_list
-                and '2' in t.attr_list and not (t.flags & _NST_CMP))
+                and '2' in t.attr_list
+                and not (t.flags & (_NST_CMP | QUOTED_TRUE)))
 
     _b_is_cmp = _is_cmp_expr(b_d)
     _a_is_cmp = (not _b_is_cmp) and _is_cmp_expr(a_d)
@@ -8322,7 +8436,14 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
             if _b_evaled_d.value is not None:
                 # Concrete numeric result → create a fresh number term (the
                 # original _b_evaled object may reference now-undone bindings).
-                b_d = _make_number(eng, float(_b_evaled_d.value))
+                # A name that answers a string is worth that string: the
+                # SuperLint rule compiler writes `CPT = c_public_terms_file`
+                # with `c_public_terms_file -> "c_public_terms"` and then
+                # writes `load("c_public_terms")?` into the file it builds.
+                if isinstance(_b_evaled_d.value, (int, float)):
+                    b_d = _make_number(eng, float(_b_evaled_d.value))
+                else:
+                    b_d = _b_evaled_d
                 _b_is_user_fn = False
             else:
                 # Compound result — try arithmetic evaluation
@@ -8921,6 +9042,27 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
         a_str = _try_eval_string_func(a_d, eng)
         if a_str is not None:
             a_d = a_str
+
+    # Once the equation itself runs, an evalin whose argument is still an
+    # unbound variable answers that variable.  The tokenizer's rule for a
+    # `.` followed by a blank asks `has_feature(K,void_table)` as a grammar
+    # step, which leaves the rest of the characters unbound, and then reads
+    # one character past it with `_E = [@|_F], evalin(_F) = _D`: the rest
+    # `_D` is a fresh variable, which the `[A,B|R]` read_new_token keeps for
+    # the next token then matches.  Kept as the call written out, the rest
+    # was no list at all and the second statement of FILES/parser.1 could
+    # not be read.
+    for _n_ev in range(2):
+        _side_ev = a_d if _n_ev == 0 else b_d
+        if (_get_sym(_side_ev) == 'evalin'
+                and list(_side_ev.attr_list.keys()) == ['1']
+                and not (_side_ev.flags & (_QT_eq | _NST_eq))):
+            _arg_ev = _strip_backtick(_side_ev.attr_list['1'].deref())
+            if _term_is_unbound(_arg_ev, eng) and _arg_ev.coref is None:
+                if _n_ev == 0:
+                    a_d = _arg_ev
+                else:
+                    b_d = _arg_ev
 
     return _unify(eng, a_d, b_d)
 
@@ -9748,9 +9890,15 @@ def _eval_as_bool_func(t: 'PsiTerm', eng, _depth: int = 0) -> 'Optional[bool]':
             _r_bv = _try_eval_string_func(t, eng)
         except Exception:
             _r_bv = None
-        eng.trail.undo_to(_m_bv)
+        _s_bv = _get_sym(_r_bv.deref()) if _r_bv is not None else ''
+        # A feature found is handed over as well as reported: the profiler
+        # asks `cond(has_feature(2, C, TermWhenTrue), …)` of a rule body's
+        # cond, and the goals of the branch then work on the TermWhenTrue
+        # the question bound.  Only when the answer is the condition itself;
+        # one inside and/or/not is a part of a question still being asked.
+        if not (_s_bv == 'true' and sym == 'has_feature' and _depth == 0):
+            eng.trail.undo_to(_m_bv)
         if _r_bv is not None:
-            _s_bv = _get_sym(_r_bv.deref())
             if _s_bv == 'true':
                 return True
             if _s_bv in ('false', 'fail'):
@@ -10046,6 +10194,8 @@ def _normalize_clause_for_assert(arg: PsiTerm, eng) -> PsiTerm:
         from wild_life.inference import (
             _thaw_non_strict_freeze as _thaw_asrt)
         _thaw_asrt(arg)
+        if sym == ':-':
+            _unmark_rule_text(arg.attr_list['2'], eng)
         return arg
     # A fact is filed as written too: the sum in it is part of the clause
     # rather than one to work out, which `assert` says by marking the whole
@@ -10185,6 +10335,33 @@ def _mark_persistent_deep(t, seen: set) -> None:
     t._wl_persistent_written = True
     for _sub in t.attr_list.values():
         _mark_persistent_deep(_sub, seen)
+
+
+def _read_dots_before_write(t: PsiTerm, eng, visited: set,
+                            _depth: int = 0) -> None:
+    """Replace each `T.F` written inside t by the feature it reads now.
+
+    Only the terms inside t are looked at; a quoted or held term is left as
+    it is written.
+    """
+    if _depth > 100:
+        return
+    td = t.deref()
+    if id(td) in visited or (td.flags & (QUOTED_TRUE | _NST_SWAP)):
+        return
+    visited.add(id(td))
+    if _get_sym(td) == '`':
+        return
+    for key in list(td.attr_list.keys()):
+        child = td.attr_list[key].deref()
+        if not child.attr_list:
+            continue
+        if _get_sym(child) == '.':
+            _cell = _resolve_dot_feat(child, eng)
+            if _cell is not None and _cell.deref() is not child:
+                eng.unifier.set_attr(td, key, _cell)
+            continue
+        _read_dots_before_write(child, eng, visited, _depth + 1)
 
 
 def bi_store_arrow(goal: PsiTerm, eng) -> bool:
@@ -10375,6 +10552,12 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         return True
 
     # Mode 2: Local variable / bound term
+    # The features read inside the new value are read before the cell is
+    # written: expanders.lf turns the head `map_man(X)` into
+    # `map_man([X|Tail])` with `X <- root_sort(X) & @([X.1|Tail]) & ...`,
+    # and the `X.1` there is the X of the old head, not a reading of the
+    # head it is about to become.
+    _read_dots_before_write(a2, eng, set())
     # Evaluate RHS (arithmetic or term)
     ok_arith, val = _eval_arith(a2, eng)
     if ok_arith:
@@ -10625,6 +10808,35 @@ def _bk_mark_quote(t: PsiTerm, eng) -> None:
             if eng is not None:
                 eng.trail.trail_psi(node, 'flags')
             node.flags |= QUOTED_TRUE
+            node._wl_bk_quoted = True
+        stack.extend(node.attr_list.values())
+
+
+def _unmark_rule_text(t: PsiTerm, eng) -> None:
+    """Let a rule body read out as text be program again.
+
+    What clause/1 hands back is held as it is written, but a rule asserted
+    from it runs like any other: the debugger reads `p(X) :- X={one;two}`
+    with clause/1 and asserts it back inside a traced body, and the call then
+    comes back for `two` as well as `one`, and the `Y/3` of
+    `p(X) :- Y/3=X, ...` waits for Y as soon as the goal is written out.  A
+    term the program itself quoted with a backquote keeps its quote.
+    """
+    if t is None:
+        return
+    _seen: set = set()
+    stack = [t]
+    while stack:
+        node = stack.pop().deref()
+        if id(node) in _seen:
+            continue
+        _seen.add(id(node))
+        if node.__dict__.pop('_wl_bk_quoted', False):
+            if node.flags & QUOTED_TRUE:
+                eng.trail.trail_psi(node, 'flags')
+                node.flags &= ~QUOTED_TRUE
+        elif node.flags & QUOTED_TRUE:
+            continue
         stack.extend(node.attr_list.values())
 
 
@@ -12543,10 +12755,20 @@ def bi_open_in(goal: PsiTerm, eng) -> bool:
         except OSError:
             return False
     if a2 is not None:
-        # 2-arg form: bind stream token to a2
-        stream_term = PsiTerm()
-        stream_term.value = f          # store file object as value
-        stream_term.type = eng.wl.top  # generic type
+        # 2-arg form: bind stream token to a2.  An input file is a term of
+        # its own sort, input_file, which carries the name it was opened
+        # under and the stream it reads from: parser.lf's syntax hands the
+        # S1 it opened down to next_statement, which writes
+        # "*** File 'FILES/parser.1' parsed" out of `S1.input_file_name`
+        # and then closes S1.
+        _file_t = PsiTerm(type_def=eng.wl.stream)
+        _file_t.value = f
+        stream_term = PsiTerm(type_def=(eng.wl.inputfilesym
+                                        or eng.wl.top))
+        stream_term.attr_list = {
+            'input_file_name': _make_string(eng, filename),
+            'stream': _file_t,
+        }
         if not hasattr(eng, '_open_streams'):
             eng._open_streams = {}
         eng._open_streams[id(stream_term)] = f
@@ -12611,6 +12833,17 @@ def bi_open_out(goal: PsiTerm, eng) -> bool:
         return True
 
 
+def _input_file_stream(t: PsiTerm):
+    """The file an input_file term made by open_in reads from, or None."""
+    _s = t.attr_list.get('stream')
+    if _s is None:
+        return None
+    _sv = _s.deref().value
+    if _sv is not None and hasattr(_sv, 'read'):
+        return _sv
+    return None
+
+
 def _stream_file(t: PsiTerm, eng):
     """The Python file object a stream psi-term stands for, or None."""
     t = t.deref()
@@ -12620,6 +12853,10 @@ def _stream_file(t: PsiTerm, eng):
     streams = getattr(eng, '_open_streams', None)
     if streams is not None and id(t) in streams:
         return streams[id(t)]
+    # An input file reads from the stream it carries.
+    _in_f = _input_file_stream(t)
+    if _in_f is not None:
+        return _in_f
     if t.type is not None and t.type.keyword is not None:
         sym = t.type.keyword.symbol
         if sym == 'stdout':
@@ -12671,11 +12908,19 @@ def bi_close(goal: PsiTerm, eng) -> bool:
     if a1 is None:
         return False
     a1d = a1.deref()
+    # A global's name stands for what it holds: parser.in keeps the input
+    # file it opened in `teststream` and closes it with
+    # `close(S:teststream)`.
+    _cell_cl = _global_cell(a1d, eng)
+    if _cell_cl is not None:
+        a1d = _cell_cl.deref()
     f = None
     if a1d.value is not None and hasattr(a1d.value, 'close'):
         f = a1d.value
     elif hasattr(eng, '_open_streams') and id(a1d) in eng._open_streams:
         f = eng._open_streams.pop(id(a1d))
+    else:
+        f = _input_file_stream(a1d)
     if f is None:
         return True  # nothing to close
     try:
@@ -13372,6 +13617,12 @@ def register_all(wl) -> None:
     _reg('get_char', bi_get_char)
     _reg('get', bi_get_code)
     _reg('read', bi_read)
+    # What read says about how a term ended is one of the built-in names
+    # `declaration` and `query`, the same names whichever module asks: the
+    # SuperLint rule compiler tests `Type :== declaration` in a module of
+    # its own.
+    wl.update_symbol(wl.bi_module, 'declaration')
+    wl.update_symbol(wl.bi_module, 'query')
     _reg('read_term', bi_read_term)
     _reg('parse', bi_parse)
     _reg('format', bi_format)
@@ -13477,7 +13728,17 @@ def register_all(wl) -> None:
         a2 = goal.attr_list.get('2')
         if a1 is None or a2 is None:
             return False
-        elems = _proper_list_elems(a2.deref(), eng)
+        _lst_mr = a2.deref()
+        elems = _proper_list_elems(_lst_mr, eng)
+        # A call written where the list goes stands for the list it answers:
+        # parser.lf fills its operator tables with
+        # `maprel(init_hash_op,ops)`, one entry per operator `ops` lists.
+        if (elems is None and _lst_mr.coref is None
+                and not (_lst_mr.flags & QUOTED_TRUE)
+                and _lst_mr.type is not None):
+            _lst_ev = _try_eval_any_func(_lst_mr, eng)
+            if _lst_ev is not None:
+                elems = _proper_list_elems(_lst_ev.deref(), eng)
         if elems is None:
             return False
         _p = a1.deref()
@@ -13877,6 +14138,17 @@ def register_all(wl) -> None:
         """
         return bool(getattr(wl, 'quietflag', False))
     _reg('quiet', _bi_quiet)
+
+    # ── verbose — switch the interpreter's verbose mode ───────────────────
+    # The name belongs to the built-in module, so every module that writes
+    # `verbose` writes the same symbol: testprof asks
+    # `write_stats(verif, verbosity => verbose)` from the user module, and
+    # the profiler's `Verbosity:{normal; verbose}` has to recognise it.
+    def _bi_verbose(goal, eng):
+        """verbose — turn verbose mode on or off; always succeeds."""
+        wl.verbose = not bool(getattr(wl, 'verbose', False))
+        return True
+    _reg('verbose', _bi_verbose)
 
     def _bi_print_variables(goal, eng):
         """print_variables — write out the variables the session holds."""

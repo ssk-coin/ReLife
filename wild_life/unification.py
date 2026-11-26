@@ -1540,7 +1540,17 @@ class Unifier:
             from wild_life.data_structures import NON_STRICT_TERM as _NST_BIND
             _skip_arith = (getattr(self.engine, 'no_arith_eval', False)
                            if self.engine else False) or bool(u.flags & _NST_BIND)
-            if self.engine is not None and not u_is_var and not _skip_arith:
+            # A sum held as it is written — what retract/1 and clause/1 read
+            # back out of the database — is a structure, and a variable that
+            # is already known to be a number is not one: smalltwente's
+            # makeunique stores `instanceunique(dummy, 1+1)`, and the next
+            # `retract(instanceunique(dummy, N))`, whose N the head sum `N+1`
+            # has made a real, does not match it.
+            _held_sum = (v_is_sort_var and bool(u.flags & _QUOTED_TRUE)
+                         and WL.real is not None
+                         and v.type.is_subtype_of(WL.real))
+            if (self.engine is not None and not u_is_var and not _skip_arith
+                    and not _held_sum):
                 _arith_ops = _ARITH_OP_SYMS
                 _sym = u.type.keyword.symbol if u.type and u.type.keyword else ''
                 if _sym in _arith_ops:
@@ -1681,6 +1691,16 @@ class Unifier:
             # `{}` is the end of a choice, not a choice of none: it has no
             # alternative to take from the choice it meets, so the two are
             # matched -- and refused -- by their sorts.
+            _disj_pattern = True
+        if (not _disj_pattern and u.type is WL.disjunction
+                and v.type is WL.disjunction
+                and ((u.flags | v.flags) & _QUOTED_TRUE)):
+            # A choice held as it is written is a piece of program text, not
+            # a set of alternatives to pick from: retracting the rule
+            # `p(X) :- X={one;two}` that clause/1 just handed back meets the
+            # stored `{one;two}` with the copied one feature by feature.
+            # Picking `one` there would rewrite the body the debugger puts
+            # back, so a later call could never come back for `two`.
             _disj_pattern = True
 
         # Disjunction × Disjunction: compute cross-product semantic intersection.
@@ -2067,6 +2087,14 @@ class Unifier:
             if (u.flags & _NST_merge) and not (v.flags & _NST_merge):
                 self.trail.trail_psi(v, 'flags')
                 v.flags |= _NST_merge
+            # A term held as it is written stays held once it has met a
+            # pattern: the profiler's `empty_goals(…, C:cond(Test), …)` takes
+            # the cond of a rule body read with clause/1, and that cond is
+            # still the text of the rule, to be counted and rewritten, rather
+            # than a question to answer while the rule's X is unbound.
+            if (u.flags & _QUOTED_TRUE) and not (v.flags & _QUOTED_TRUE):
+                self.trail.trail_psi(v, 'flags')
+                v.flags |= _QUOTED_TRUE
             self.bind(u, v)
             # Fix C: fire pending daemon resids after compound-compound unification.
             # When a psi-term u has daemon resids (from such_that), and u is

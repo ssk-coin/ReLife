@@ -246,6 +246,21 @@ def run_repl(
     # ---- Register built-ins ------------------------------------------------
     register_all(WL)
 
+    # ---- Where queries come from -------------------------------------------
+    # Queries are read from the terminal whatever the program reads from:
+    # parser.in's `p :- open_in("FILES/parser.3",S), teststream=S.` leaves
+    # the file as what the program reads, and the `close(S:teststream)?`
+    # typed after it is still the next query, not the next line of the file.
+    _repl_stdin = sys.stdin
+
+    def _read_query_line() -> str:
+        if sys.stdin is _repl_stdin:
+            return input()
+        _l = _repl_stdin.readline()
+        if _l == '':
+            raise EOFError
+        return _l[:-1] if _l.endswith('\n') else _l
+
     # ---- Create the inference engine ---------------------------------------
     engine = Engine(WL)
     engine.noisy = False   # REPL handles all output itself
@@ -483,7 +498,7 @@ def run_repl(
     while True:
         try:
             try:
-                line = input()
+                line = _read_query_line()
                 repl_line_number += 1
                 # `trace_input` writes the input out as it is read.
                 if WL.trace_input:
@@ -611,7 +626,7 @@ def run_repl(
                     sys.stdout.write('|    ')
                     sys.stdout.flush()
                     try:
-                        _cont = input()
+                        _cont = _read_query_line()
                         repl_line_number += 1
                         if WL.trace_input:
                             sys.stdout.write(_cont + "\n")

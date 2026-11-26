@@ -10,7 +10,7 @@ from typing import Optional, Dict, Set, List, Tuple, IO
 # Avoid circular imports at module level
 from wild_life.data_structures import (
     PsiTerm, Definition, OperatorType, int_div as _int_div,
-    NON_STRICT_TERM as _NST_WALK
+    NON_STRICT_TERM as _NST_WALK, HELD_QUOTE
 )
 import wild_life.runtime as _wl_module
 
@@ -1184,7 +1184,10 @@ def _pretty_psi_term(ps: PrintState, t: Optional['PsiTerm'],
                                         MAX_PRECEDENCE + 1, depth + 1, wl)
                 ps.write(")")
                 return
-            if not ps.no_arith_eval:
+            # A backquote a non-strict call was handed is part of the term
+            # it holds, and is written with it: libtest's non-strict `test`
+            # writes `gen_member(a,[b,c,d,e,a],test => ` :==)`.
+            if not ps.no_arith_eval and not (t.flags & HELD_QUOTE):
                 # Normal context: strip the backtick (sort annotation display).
                 # Use _pretty_tag_or_psi_term so cycle detection (printed_pointers)
                 # is honoured for inner terms that are named variables.
@@ -1309,7 +1312,9 @@ def _print_value(ps: PrintState, t: 'PsiTerm', wl) -> None:
         return
 
     if defn == wl.stream:
-        ps.write(f"stream({t.value!r})")
+        # What a stream reads from is not written out: the input file
+        # parser.in opens answers `stream => stream`.
+        _print_symbol(ps, defn.keyword)
         return
 
     if defn == wl.eof:
