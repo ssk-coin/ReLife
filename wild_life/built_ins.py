@@ -521,7 +521,11 @@ def _is_settled_value(t: 'PsiTerm', origin) -> bool:
         # is a different matter — `stu` is worth `student(roommate =>
         # employee(representative => S), advisor => don(secretary => S))`,
         # and the S it shares is part of what it is worth.
-        if n.attr_list and _get_sym(n) in _ARITH_OPS_SET:
+        # Only a sum with operands is waiting: SuperLint's token
+        # `*(column => 5, file => …, line => 1)` is a term of sort `*` with
+        # nothing to add up, and is the token the name answers.
+        if (n.attr_list and _get_sym(n) in _ARITH_OPS_SET
+                and ('1' in n.attr_list or '2' in n.attr_list)):
             return False
         seen.add(id(n))
         stack.extend(n.attr_list.values())
