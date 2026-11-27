@@ -117,6 +117,11 @@ def _is_complete_arith_expr(t: 'PsiTerm') -> bool:
     sym = t.type.keyword.symbol if t.type and t.type.keyword else ''
     if sym not in _ARITH_OPS_SET:
         return False
+    # A term of an operator's sort that carries named features is a
+    # structure, not a sum: SuperLint's parser builds `root_sort(Op) &
+    # @(L, R, operator => Op, mode => infix)` for the C expression it reads.
+    if any(not str(_k).isdigit() for _k in t.attr_list):
+        return False
     # Nullary operators are always complete
     if sym in ('cpu_time', 'real_time', 'genint', 'get_choice'):
         return True
