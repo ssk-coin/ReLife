@@ -3281,6 +3281,12 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         t_pre.attr_list = {}
         for _k, _v in t.attr_list.items():
             _vd = _v.deref()
+            # A quoted argument is handed over as it is written: comma is
+            # given the grammar's goals, and `has_feature(K, void_table)`
+            # among them is a goal for later, not a value to work out now.
+            if _vd.flags & QUOTED_TRUE:
+                t_pre.attr_list[_k] = _vd
+                continue
             # Try arithmetic evaluation first (handles N-1, N*2, etc. in recursive calls)
             _ok_arith, _arith_val = _eval_arith(_vd, eng, _depth + 1)
             if _ok_arith:
@@ -6143,7 +6149,8 @@ _NON_STRICT_ARG1_BUILTINS: frozenset = frozenset({
 
 
 def _eval_embedded_user_funcs(
-        t: PsiTerm, eng, _depth: int, visited: set) -> None:
+        t: PsiTerm, eng, _depth: int, visited: set,
+        follow_bound: bool = True) -> None:
     """Walk t's attribute tree and evaluate any user-function sub-terms.
 
     Also evaluates built-in functional sub-terms (children, chr, asc,
@@ -6171,6 +6178,10 @@ def _eval_embedded_user_funcs(
     # ``write(X:`(1+2), eval(X))`` is printed as the sum, not as 3.
     if (td.type is not None and td.type.keyword is not None
             and td.type.keyword.symbol == '`'):
+        # The backquote has done its work here: what it holds is a quoted
+        # term from now on.  A clause asserted with it in its body holds
+        # that term and not the quote (see _assert_dropping_quotes).
+        _mark_backquote_read(td, eng)
         return
     # A choice held as it is written stays whole: the `{ X = strcon(…),
     # cond(…) }` a grammar rule hands the expander is the goal it was
@@ -6199,7 +6210,18 @@ def _eval_embedded_user_funcs(
     )
     _store_arrow = (td.type is not None and td.type.keyword is not None
                     and td.type.keyword.symbol in ('<-', '<<-'))
+    # The branches of a cond are worked out only once the condition has
+    # chosen one: accumulators.lf's `cond(A :\== C, (Tin.A = In.A, …))`
+    # must not give Tin the feature A when A is C, or the grammar code it
+    # builds links an accumulator that is not there.
+    _cond_node = _is_cond_builtin_local(td)
     for key in list(td.attr_list.keys()):
+        if _cond_node and key != '1':
+            continue
+        # Without follow_bound only the calls written in the term are made:
+        # a variable bound by now holds data that was handed over.
+        if not follow_bound and td.attr_list[key].coref is not None:
+            continue
         if _skip_arg1 and key == '1':
             # A feature written where the value goes names a place too, and
             # the place is the cell: the profiler builds
@@ -6228,7 +6250,7 @@ def _eval_embedded_user_funcs(
             _cell_d = _resolve_dot_feat(child, eng)
             if _cell_d is not None and _cell_d.deref() is not child:
                 eng.unifier.set_attr(td, key, _cell_d)
-                _eval_embedded_user_funcs(_cell_d, eng, _depth + 1, visited)
+                _eval_embedded_user_funcs(_cell_d, eng, _depth + 1, visited, follow_bound)
                 continue
         # A term that reads a cell is not rewritten into what it came to:
         # the cell is read again every time the term is, and glob_gc counts
@@ -6256,9 +6278,10 @@ def _eval_embedded_user_funcs(
         # A quoted call is data: the clauses debug.lf reads back with
         # clause/1 are handed to rewrite_rules as a list, and the head
         # `append([],L)` of the first one is the head, not the L that
-        # calling append would answer.
-        if (child.flags & QUOTED_TRUE) and child.type is not None \
-                and child.type.type == DefType.FUNCTION:
+        # calling append would answer.  So is a goal of a clause the
+        # expander is reading: tokenizer.lf's `has_feature(K, void_table)`.
+        if ((child.flags & QUOTED_TRUE) and child.type is not None
+                and child.attr_list and child.value is None):
             continue
         evaled = _try_eval_any_func(child, eng)
         if evaled is not None and evaled is not child:
@@ -6278,7 +6301,7 @@ def _eval_embedded_user_funcs(
             # arguments have gone back to being variables.
             eng.unifier.set_attr(td, key, evaled)
             if evaled.deref().type is not eng.wl.alist:
-                _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited)
+                _eval_embedded_user_funcs(evaled, eng, _depth + 1, visited, follow_bound)
             # What the call handed back can itself be worked out once the
             # calls inside it have been: `X \== Y` answers `not(X == Y)`,
             # and that is false once the `==` has said true.
@@ -6310,9 +6333,9 @@ def _eval_embedded_user_funcs(
                     _ev_conj = _eval_body_sync(child, eng, _depth + 1)
                     if _ev_conj is not None and _ev_conj is not child:
                         eng.unifier.set_attr(td, key, _ev_conj)
-                        _eval_embedded_user_funcs(_ev_conj, eng, _depth + 1, visited)
+                        _eval_embedded_user_funcs(_ev_conj, eng, _depth + 1, visited, follow_bound)
                         continue
-            _eval_embedded_user_funcs(child, eng, _depth + 1, visited)
+            _eval_embedded_user_funcs(child, eng, _depth + 1, visited, follow_bound)
             # What the child stands for can become clear once the calls under
             # it have been worked out: `append([H|append(L,[])],[])` is a list
             # to append to only after the inner append has made one.
@@ -9145,6 +9168,15 @@ def _term_is_unbound(t: Optional[PsiTerm], eng) -> bool:
             and (t.type is None or t.type is wl.top))
 
 
+def _is_call_data(raw: PsiTerm, d: PsiTerm) -> bool:
+    """Whether a term is a call with arguments.
+
+    Only a term with arguments counts: a name on its own -- a global, or a
+    function of no arguments such as `ops` -- is still read for its value.
+    """
+    return bool(d.attr_list) and d.type is not None and d.value is None
+
+
 def _sort_compare_args(goal, eng):
     """The two sorts a sort-comparison predicate compares, or None.
 
@@ -9157,9 +9189,18 @@ def _sort_compare_args(goal, eng):
     sorts = []
     for _arg in (a, b):
         _d = _strip_backtick(_arg.deref())
-        _ev = _try_eval_any_func(_d, eng)
-        if _ev is None:
-            _ev = _try_eval_string_func(_d, eng)
+        # A call written in the comparison is asked for its value; a quoted
+        # one is compared as it is.  The expander compares the goals of the
+        # clause it is reading, `S1 :== ,` or `X :== succeed`, and
+        # tokenizer.lf's `has_feature(K, void_table)` is one of them: what
+        # is asked is whether that goal is a conjunction or `succeed`, not
+        # what the goal answers.
+        if (_d.flags & QUOTED_TRUE) and _is_call_data(_arg, _d):
+            _ev = None
+        else:
+            _ev = _try_eval_any_func(_d, eng)
+            if _ev is None:
+                _ev = _try_eval_string_func(_d, eng)
         if _ev is None and _get_sym(_d) == '.' and _d.attr_list:
             # A feature written on a term is the feature's value here too:
             # the profiler asks `profile_old_clauses.What.type :== function`
@@ -10260,6 +10301,51 @@ def _normalize_clause_for_assert(arg: PsiTerm, eng) -> PsiTerm:
     return _normalize_arith_in_term(arg, eng, evaluate=False)
 
 
+def _mark_backquote_read(t: PsiTerm, eng) -> None:
+    """Note that a backquote has been read by a strict context."""
+    if t.__dict__.get('_wl_bq_read'):
+        return
+    t.__dict__.setdefault('_wl_bq_read', False)
+    eng.trail.trail_psi(t, '_wl_bq_read')
+    t._wl_bq_read = True
+
+
+def _assert_dropping_quotes(arg: PsiTerm, eng) -> None:
+    """File a clause; a backquote already read stands for what it quotes.
+
+    A quote keeps a term from being worked out while a clause is being put
+    together, but the clause that is filed is program: std_expander builds
+    `Code2 = `((CodeA;CodeB) comma Code3)` into each traverse rule, and the
+    rule runs `comma` once it is called, so the code it hands back is
+    `(CodeA;CodeB)` and not `(CodeA;CodeB) comma succeed`.  debug.lf's
+    traced rules likewise write the value of `write_term(Result,Verbose)`.
+    A backquote nothing has read yet -- written straight into the clause the
+    program asserts -- is still a call to quote, and stays.
+    """
+    _mark = eng.trail.mark()
+    _seen: set = set()
+    _stack = [arg]
+    while _stack:
+        _n = _stack.pop().deref()
+        if id(_n) in _seen:
+            continue
+        _seen.add(id(_n))
+        if (_n.__dict__.get('_wl_bq_read') and _n.type is not None
+                and _n.type.keyword is not None
+                and _n.type.keyword.symbol == '`'
+                and len(_n.attr_list) == 1 and '1' in _n.attr_list):
+            _inner = _n.attr_list['1']
+            eng.trail.trail_psi(_n, 'coref')
+            _n.coref = _inner
+            _stack.append(_inner)
+            continue
+        _stack.extend(_n.attr_list.values())
+    try:
+        eng.assert_clause(arg)
+    finally:
+        eng.trail.undo_to(_mark)
+
+
 def bi_assert(goal: PsiTerm, eng) -> bool:
     """assert(Clause) / assertz(Clause)."""
     arg = _get_one_arg(goal)
@@ -10267,7 +10353,7 @@ def bi_assert(goal: PsiTerm, eng) -> bool:
         return False
     arg = _normalize_clause_for_assert(arg, eng)
     eng.assert_first = False
-    eng.assert_clause(arg)
+    _assert_dropping_quotes(arg, eng)
     return True
 
 
@@ -10278,7 +10364,7 @@ def bi_asserta(goal: PsiTerm, eng) -> bool:
         return False
     arg = _normalize_clause_for_assert(arg, eng)
     eng.assert_first = True
-    eng.assert_clause(arg)
+    _assert_dropping_quotes(arg, eng)
     eng.assert_first = False
     return True
 

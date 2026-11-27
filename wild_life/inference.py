@@ -1004,9 +1004,18 @@ def _eval_body_to_result(branch: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
             _ebs_and(_b_rhs, eng, 0)   # side effects: binds vars in _b_lhs
             return _eval_body_to_result(_b_lhs, result, eng)
 
-    # Compound with embedded user-function sub-terms
+    # Compound with embedded user-function sub-terms.  A conjunction or a
+    # disjunction is code, and of the calls in it only the ones the rule
+    # wrote are made now: std_expander's `X comma Y -> cond(X :== succeed,
+    # Y, cond(Y :== succeed, X, (X,Y)))` hands back the grammar code it was
+    # given in X and Y, and the `project(X,Term) = Y` in that code is made
+    # when the code runs, not when comma returns it.  A call the rule wrote
+    # into its own `(pr(X), 1)` is made here as before.
     from wild_life.built_ins import _is_user_function as _iuf_btr
-    eval_goals = _collect_embedded_func_goals(branch_d, eng, set())
+    _code_br = (branch_d.type is not None
+                and branch_d.type in (wl.commasym, wl.life_or))
+    eval_goals = _collect_embedded_func_goals(
+        branch_d, eng, set(), follow_bound=not _code_br)
     eng.push_goal(GoalType.UNIFY, branch_d, result, None)
     # Push top-level eval goals first, then push all deferred sub-goals last.
     # Deferring sub-goals ensures they run BEFORE top-level goals in LIFO order,
@@ -1017,7 +1026,10 @@ def _eval_body_to_result(branch: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
         for _ak in list(ft.attr_list.keys()):
             _av = ft.attr_list[_ak].deref()
             if not _iuf_btr(_av) and _av.attr_list:
-                _sub_goals = _collect_embedded_func_goals(_av, eng, set())
+                if _code_br and ft.attr_list[_ak].coref is not None:
+                    continue
+                _sub_goals = _collect_embedded_func_goals(
+                    _av, eng, set(), follow_bound=not _code_br)
                 for _sft, _srv, _srl in _sub_goals:
                     deferred_subs.append((_sft, _srv, _srl))
     for _sft, _srv, _srl in deferred_subs:
@@ -1688,7 +1700,8 @@ def _release_value_backquotes(t: 'PsiTerm') -> None:
                 stack.append(c)
 
 
-def _collect_embedded_func_goals(t: 'PsiTerm', eng, visited: set) -> list:
+def _collect_embedded_func_goals(t: 'PsiTerm', eng, visited: set,
+                                 follow_bound: bool = True) -> list:
     """Walk t (non-recursively via an explicit work-list) and replace any
     user-function sub-terms with fresh unbound variables.
 
@@ -1733,6 +1746,11 @@ def _collect_embedded_func_goals(t: 'PsiTerm', eng, visited: set) -> list:
     while i < len(work_queue):
         parent, key = work_queue[i]
         i += 1
+        # Without follow_bound, only the calls written in the term are
+        # collected: a variable of the rule that is bound by now holds data
+        # the rule was handed, not calls it wrote.
+        if not follow_bound and parent.attr_list[key].coref is not None:
+            continue
         child = parent.attr_list[key].deref()
         child_id = id(child)
         if child_id in examined:
@@ -3828,7 +3846,18 @@ class Engine:
                         # gets copy_body evaluated BEFORE where's body (@)
                         # discards the argument.  Without this, bodify_list(B)
                         # would run on the goal stack with B still unbound.
-                        _eval_embedded_user_funcs(_attr, self, 0, set())
+                        # A conjunction or a disjunction handed over is
+                        # code: only the calls written into it here are
+                        # made, not those in the code it carries --
+                        # std_expander's `(CodeA;CodeB) comma Code3` is
+                        # given the grammar's goals, `has_feature(K,
+                        # void_table)` among them, to run later.
+                        _eval_embedded_user_funcs(
+                            _attr, self, 0, set(),
+                            follow_bound=not (
+                                _attr.type is not None
+                                and _attr.type in (self.wl.commasym,
+                                                   self.wl.life_or)))
                         # The argument may be a call in its own right: a
                         # built-in written for its value — `sum(map(F, L))`
                         # asks sum for the list map makes — is reduced too.
