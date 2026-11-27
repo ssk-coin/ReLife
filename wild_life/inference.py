@@ -4181,6 +4181,17 @@ class Engine:
                     if not ok:
                         self.trail.undo_to(mark)
                         return False
+                elif funct.attr_list:
+                    # A head with no arguments still names the call it
+                    # catches: debug.lf's `R -> @ | …, write(M, ": fails")`
+                    # writes `f(merci_arnaud,c)`, the call that reached it.
+                    # (A call with no arguments of its own is not linked;
+                    # see above.)
+                    mark = self.trail.mark()
+                    ok = self.unifier.match_call_head(funct, head)
+                    if not ok:
+                        self.trail.undo_to(mark)
+                        return False
                 # Now that argument variables are bound, eagerly evaluate any
                 # built-in or user-defined functional sub-terms in cond_part
                 # (e.g. genChildren(children(X), A) → children(X) → [a,b,c,d]).

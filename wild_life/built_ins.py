@@ -10319,27 +10319,47 @@ def _assert_dropping_quotes(arg: PsiTerm, eng) -> None:
     rule runs `comma` once it is called, so the code it hands back is
     `(CodeA;CodeB)` and not `(CodeA;CodeB) comma succeed`.  debug.lf's
     traced rules likewise write the value of `write_term(Result,Verbose)`.
-    A backquote nothing has read yet -- written straight into the clause the
-    program asserts -- is still a call to quote, and stays.
+
+    A backquote has been read when a strict context went through it, or when
+    it reaches the clause through a variable: the term was built by a goal
+    of the clause that ran, `Check = (… `write_term(R,V) …)`, and that goal
+    worked out what it wrote.  A backquote written straight into the clause
+    handed to assert, one inside a non-strict argument, and one inside a
+    quoted term are still quotes, and stay; so does one inside the term a
+    dropped backquote held, which is quoted data.
     """
+    from wild_life.data_structures import HELD_QUOTE as _HQ_ad
     _mark = eng.trail.mark()
     _seen: set = set()
-    _stack = [arg]
+    # (raw node, reached through a binding, inside quoted data)
+    _stack = [(arg, False, False)]
     while _stack:
-        _n = _stack.pop().deref()
-        if id(_n) in _seen:
+        _raw, _bound, _quoted = _stack.pop()
+        _bound = _bound or _raw.coref is not None
+        _n = _raw.deref()
+        _key = (id(_n), _bound, _quoted)
+        if _key in _seen:
             continue
-        _seen.add(id(_n))
-        if (_n.__dict__.get('_wl_bq_read') and _n.type is not None
-                and _n.type.keyword is not None
-                and _n.type.keyword.symbol == '`'
-                and len(_n.attr_list) == 1 and '1' in _n.attr_list):
-            _inner = _n.attr_list['1']
-            eng.trail.trail_psi(_n, 'coref')
-            _n.coref = _inner
-            _stack.append(_inner)
-            continue
-        _stack.extend(_n.attr_list.values())
+        _seen.add(_key)
+        _is_bq = (_n.type is not None and _n.type.keyword is not None
+                  and _n.type.keyword.symbol == '`'
+                  and len(_n.attr_list) == 1 and '1' in _n.attr_list)
+        if _is_bq and not _quoted:
+            # (The reader marks every backquote node itself as quoted, so
+            # that mark says nothing here; what counts is whether a term
+            # around it is quoted data.)
+            _read = (_n.__dict__.get('_wl_bq_read')
+                     or (_bound and not (_n.flags & _HQ_ad)))
+            if _read:
+                _inner = _n.attr_list['1']
+                eng.trail.trail_psi(_n, 'coref')
+                _n.coref = _inner
+                _stack.append((_inner, _bound, True))
+                continue
+        if not _is_bq and (_n.flags & QUOTED_TRUE) and _n is not arg.deref():
+            _quoted = True
+        for _v in _n.attr_list.values():
+            _stack.append((_v, _bound, _quoted))
     try:
         eng.assert_clause(arg)
     finally:
