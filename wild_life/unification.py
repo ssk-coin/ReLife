@@ -1241,8 +1241,15 @@ class Unifier:
         # A projection in a term read in is data, and meets as a term:
         # SuperLint's rule compiler takes `Declaration.scope` out of the
         # rules file to write into the rule it builds.
+        # So is a `.` term a function's head is written with: SuperLint's
+        # `Node.Feature -> '*protected_project*'(Feature, Node)` gives `.`
+        # rules of its own, and the call `.(toplevel(…), F)` is matched
+        # against that head as a term, not read as a feature.
+        _matching_head = self._matching_call_head
+
         def _dot_check(_x):
             return (_is_dot_access(_x)
+                    and not _matching_head
                     and not _x.__dict__.get('_wl_read_data'))
         if _dot_check(u) or _dot_check(v):
             if self.engine is not None:

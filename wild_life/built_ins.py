@@ -6912,6 +6912,15 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
     if (eng is not None and _is_user_function(host)
             and _has_applicable_rule(host)):
         _hv = _eval_user_func_sync(host, eng, 0)
+        if (_hv is not None and _hv.deref() is not host
+                and _in_store_term(_hv.deref())):
+            # What the rules answer is a term in the store: the feature is
+            # read off that very term, and the name is not made one with
+            # it -- SuperLint's `current_declaration.previous` reads the
+            # declaration the store holds, and merging the name into it
+            # would tie the table's cell to whatever is written there.
+            host = _hv.deref()
+            _hv = None
         if _hv is not None and _hv.deref() is not host:
             _hv_d = _hv.deref()
             # A call is not its own answer: `cnl(A, ctxt => C).1` reads the
@@ -9455,16 +9464,16 @@ def bi_sort_comparable(goal: PsiTerm, eng) -> bool:
     """X :>< Y — the two sorts lie on one chain, either way round."""
     sorts = _sort_compare_args(goal, eng)
     return (sorts is not None
-            and (sorts[0].is_subtype_of(sorts[1])
-                 or sorts[1].is_subtype_of(sorts[0])))
+            and (_sort_key_under(sorts[0], sorts[1])
+                 or _sort_key_under(sorts[1], sorts[0])))
 
 
 def bi_sort_incomparable(goal: PsiTerm, eng) -> bool:
     """X :\\>< Y — neither sort lies under the other."""
     sorts = _sort_compare_args(goal, eng)
     return (sorts is not None
-            and not sorts[0].is_subtype_of(sorts[1])
-            and not sorts[1].is_subtype_of(sorts[0]))
+            and not _sort_key_under(sorts[0], sorts[1])
+            and not _sort_key_under(sorts[1], sorts[0]))
 
 
 # A sort comparison answers true or false, so it stands where a value is
@@ -10963,6 +10972,19 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
                 # list the cell held, not the one it is about to hold.
                 _reduce_embedded_calls(rhs_term, eng, 0, set())
         if not _backtrackable:
+            # A term already in the store is linked to as it is, links back
+            # to this cell and all: SuperLint's `previous_declaration.next
+            # <<- current_declaration` closes a chain whose current
+            # declaration already points back through `previous`.
+            _rt_pre = rhs_term.deref()
+            if (_rt_pre is not lhs and _in_store_term(_rt_pre)
+                    and lhs.__dict__.get('_wl_persistent_cell', False)
+                    and lhs.value is None and not lhs.attr_list
+                    and (lhs.type is None or lhs.type is eng.wl.top)):
+                eng.persistent_store_touched = True
+                lhs.coref = _rt_pre
+                eng.unifier._wakeup_resid(lhs, lhs)
+                return True
             # `X <<- s([1+6],X)` reads X before it writes it, so the X inside
             # the new term is the 3 that was there — `s([7],3)`, not a term
             # that points back at itself the way `X <- s(1+4,X)` does.
