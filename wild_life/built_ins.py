@@ -4707,7 +4707,17 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
     _saved_er = getattr(eng.unifier, '_eval_result_for_match', None)
     eng.unifier._eval_result_for_match = None
     try:
-        return _eval_user_func_sync_inner(t, eng, _depth)
+        _res_sync = _eval_user_func_sync_inner(t, eng, _depth)
+        # A rule whose value is a feature read hands back the feature:
+        # SuperLint's `get_the_token -> the_token.1` answers the token the
+        # persistent the_token holds, not the projection.
+        if (_res_sync is not None and _res_sync.deref() is not t
+                and _get_sym(_res_sync.deref()) == '.'
+                and _res_sync.deref().attr_list):
+            _cell_rs = _resolve_dot_feat(_res_sync.deref(), eng)
+            if _cell_rs is not None:
+                _res_sync = _cell_rs
+        return _res_sync
     except RecursionError:
         # A chain of reductions longer than the Python stack holds is one
         # this cannot work out here; the call is left as it stands.
@@ -6377,6 +6387,23 @@ def _reduce_embedded_calls(t: PsiTerm, eng, _depth: int, visited: set) -> None:
     for key in list(td.attr_list.keys()):
         child = td.attr_list[key].deref()
         if not child.attr_list:
+            # A function of no arguments written inside the term is a call
+            # too, when it has a rule of no arguments: SuperLint's
+            # `the_current_token <<- ref(get_the_token)` keeps the token
+            # get_the_token answers now, not the name.  A name whose rules
+            # all want arguments (`fact` alone) is not a call, and a global's
+            # name is read elsewhere.
+            if (eng is not None and child.value is None
+                    and child.coref is None
+                    and not (child.flags & QUOTED_TRUE)
+                    and _is_user_function(child)
+                    and _has_applicable_rule(child)
+                    and child.type.type is not DefType.GLOBAL
+                    and not getattr(child.type, 'is_persistent', False)
+                    and not _call_in_progress(child)):
+                _ev0 = _eval_user_func_sync(child, eng, _depth)
+                if _ev0 is not None and _ev0.deref() is not child:
+                    eng.unifier.set_attr(td, key, _ev0)
             continue
         # A call whose value is a choice is worked out by the engine, which
         # gives each alternative a choice point of its own: machine's
@@ -10669,6 +10696,23 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
                        or _try_eval_any_func(rhs_d, eng))
             if _rhs_sc is not None and _rhs_sc.deref() is not rhs_d:
                 rhs_d = _rhs_sc.deref()
+            elif (a2.coref is None
+                    and not (rhs_d.flags & (QUOTED_TRUE | _NST_SWAP))):
+                # The calls written inside it are asked before the name is
+                # written: SuperLint's `the_current_token <<-
+                # ref(get_the_token)` files the token get_the_token answers.
+                _reduce_embedded_calls(rhs_d, eng, 0, set())
+        elif (not _rhs_quoted and not rhs_d.attr_list
+                and rhs_d.value is None
+                and not (rhs_d.flags & QUOTED_TRUE)
+                and _is_user_function(rhs_d) and _has_applicable_rule(rhs_d)
+                and rhs_d.type.type is not DefType.GLOBAL
+                and not getattr(rhs_d.type, 'is_persistent', False)):
+            # A function of no arguments written on the right is a call:
+            # `previous_token <<- get_the_token` files the token.
+            _rhs_0 = _eval_user_func_sync(rhs_d, eng, 0)
+            if _rhs_0 is not None and _rhs_0.deref() is not rhs_d:
+                rhs_d = _rhs_0.deref()
         # What `<<-` writes into a name stays written, features and all: a
         # counter kept under `ps <<- data(tries => 0)` is counted up with
         # `T:(ps.tries) <<- T+1` and has to survive the `fail` the clause
