@@ -560,7 +560,13 @@ class Unifier:
                 and val.coref is None and val.value is None
                 and not val.attr_list
                 and (val.type is None or val.type is _WL_bind.top)
-                and not var.__dict__.get('_wl_persistent_written', False)
+                and (not var.__dict__.get('_wl_persistent_written', False)
+                     # A feature opened on a stored term and still empty is
+                     # a cell too: SuperLint's `search(String, Void, …)`
+                     # fills `string_storage.Hash` through its own Void.
+                     or (var.coref is None and var.value is None
+                         and not var.attr_list
+                         and (var.type is None or var.type is _WL_bind.top)))
                 and not val.__dict__.get('_wl_persistent_cell', False)):
             # Two variables made one, and one of them is what a `persistent`
             # name holds: it is the cell that stays, since the other side is

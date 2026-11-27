@@ -4836,6 +4836,15 @@ def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm
             _fcd_bq(_inner_bq, QUOTED_TRUE)
             eng.unifier.set_attr(t, _key, _inner_bq)
             continue
+        # A global's or a persistent's name is handed over as its cell, not
+        # a copy of what it holds: SuperLint maps `insert_in_table(2 =>
+        # operators_table)` over a list, and each call writes into the table.
+        if not _attr.attr_list and _attr.value is None:
+            _cell_sy = _global_cell(_attr, eng) or _persistent_cell(_attr, eng)
+            if _cell_sy is not None:
+                if _cell_sy.deref() is not _attr:
+                    eng.unifier.set_attr(t, _key, _cell_sy)
+                continue
         _ev = _try_eval_any_func(_attr, eng, _depth + 1)
         if _ev is None and _attr.attr_list:
             # Compound arg (e.g. `(CX, NT) & memo_copy(X, Table)` or

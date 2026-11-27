@@ -1014,6 +1014,8 @@ def _eval_body_to_result(branch: 'PsiTerm', result: 'PsiTerm', eng) -> bool:
     from wild_life.built_ins import _is_user_function as _iuf_btr
     _code_br = (branch_d.type is not None
                 and branch_d.type in (wl.commasym, wl.life_or))
+    if not _code_br:
+        _reduce_written_builtin_calls(branch_d, eng)
     eval_goals = _collect_embedded_func_goals(
         branch_d, eng, set(), follow_bound=not _code_br)
     eng.push_goal(GoalType.UNIFY, branch_d, result, None)
@@ -1698,6 +1700,58 @@ def _release_value_backquotes(t: 'PsiTerm') -> None:
                 continue
             if c.attr_list:
                 stack.append(c)
+
+
+def _reduce_written_builtin_calls(t: 'PsiTerm', eng) -> None:
+    """Work out the built-in calls a function's value is written with.
+
+    The calls written in a rule's value are made when the value is made,
+    built-in ones as much as the program's own: SuperLint's
+    `make_list_from_string(String, Length) -> [asc(substr(String, 1, 1)) |
+    …]` answers a list of character codes, not of `asc` calls.  Only what
+    the rule wrote is walked -- a variable bound by now holds data that was
+    handed over -- and a call of the program's own is left for the engine,
+    which works those out one goal at a time.  Innermost calls first, so
+    `asc(substr(…))` reads the string substr answers.
+    """
+    from wild_life.built_ins import (
+        _is_user_function as _iuf_rw, _try_eval_any_func as _tesf_rw)
+    from wild_life.data_structures import (
+        QUOTED_TRUE as _QT_rw, NON_STRICT_TERM as _NST_rw)
+    _seen: set = set()
+
+    def _walk(node, depth):
+        if depth > 200:
+            return
+        n = node.deref()
+        if id(n) in _seen or (n.flags & (_QT_rw | _NST_rw)):
+            return
+        _seen.add(id(n))
+        if n.type is not None and n.type is eng.wl.disjunction:
+            return
+        if (n.type is not None and n.type.keyword is not None
+                and n.type.keyword.symbol == '`'):
+            return
+        # A meet is worked out as a whole, by what works out meets: intabs's
+        # `[root_sort(A) & root_sort(C) | …]` meets the two sorts.
+        if n.type is not None and n.type is eng.wl.and_sym:
+            return
+        for k in list(n.attr_list.keys()):
+            raw = n.attr_list[k]
+            if raw.coref is not None:
+                continue
+            c = raw.deref()
+            if not c.attr_list:
+                continue
+            _walk(c, depth + 1)
+            if (c.type is not None and c.type._builtin_func is not None
+                    and not _iuf_rw(c) and c.value is None
+                    and not (c.flags & (_QT_rw | _NST_rw))):
+                ev = _tesf_rw(c, eng)
+                if ev is not None and ev.deref() is not c:
+                    eng.unifier.set_attr(n, k, ev)
+
+    _walk(t, 0)
 
 
 def _collect_embedded_func_goals(t: 'PsiTerm', eng, visited: set,
@@ -2530,6 +2584,30 @@ class Engine:
                     QUOTED_TRUE as _QT_dj, NON_STRICT_TERM as _NST_dj)
                 for _k_dj in list(thegoal.attr_list.keys()):
                     _ad_dj = thegoal.attr_list[_k_dj].deref()
+                    # A function of no arguments whose value is a choice
+                    # stands for that choice: SuperLint asks `current_token
+                    # :== single_type_specifier`, and single_type_specifier
+                    # is `{void; char; short; int; …}`.
+                    if (not _ad_dj.attr_list and _ad_dj.value is None
+                            and _ad_dj.type is not None
+                            and _ad_dj.type.type is DefType.FUNCTION
+                            and _ad_dj.type.rule
+                            and not callable(_ad_dj.type.rule)
+                            and not (_ad_dj.flags & (_QT_dj | _NST_dj))
+                            and not getattr(_ad_dj.type, 'is_persistent',
+                                            False)):
+                        from wild_life.built_ins import (
+                            _is_user_function as _iuf_dj,
+                            _has_applicable_rule as _har_dj,
+                            _has_disjunctive_body as _hdb_dj,
+                            _eval_user_func_sync as _eufs_dj)
+                        if (_iuf_dj(_ad_dj) and _har_dj(_ad_dj)
+                                and _hdb_dj(_ad_dj, wl)):
+                            _v_dj = _eufs_dj(_ad_dj, self, 0)
+                            if (_v_dj is not None
+                                    and _v_dj.deref().type is wl.disjunction):
+                                self.unifier.set_attr(thegoal, _k_dj, _v_dj)
+                                _ad_dj = _v_dj.deref()
                     if (_ad_dj.type is wl.disjunction and _ad_dj.attr_list
                             and not (_ad_dj.flags & (_QT_dj | _NST_dj))):
                         self.goal_stack = aim.next
@@ -3815,6 +3893,18 @@ class Engine:
                 continue
             if _attr.flags & _QT_pf:
                 continue
+            # A global's or a persistent's name is handed over as its cell,
+            # not a copy of what the cell holds: SuperLint's
+            # `insert_in_table(What, Table) -> @ | Table.(asc(What)) <<- What`
+            # is given operators_table to write into.
+            if not _attr.attr_list and _attr.value is None:
+                from wild_life.built_ins import (
+                    _global_cell as _gc_pf, _persistent_cell as _pc_pf)
+                _cell_pf = _gc_pf(_attr, self) or _pc_pf(_attr, self)
+                if _cell_pf is not None:
+                    if _cell_pf.deref() is not _attr:
+                        self.unifier.set_attr(funct, _key, _cell_pf)
+                    continue
             if _is_user_function(_attr):
                 _evaled = _eval_user_func_sync(_attr, self)
                 if _evaled is not None and _evaled is not _attr:
@@ -4580,6 +4670,9 @@ class Engine:
         #   1. Push UNIFY first  → it sits below EVAL goals on the stack
         #   2. Push EVAL goals after → they sit on top, so they run FIRST
         # This ensures the fresh variables are bound before UNIFY fires.
+        if not (body_d2.type is not None
+                and body_d2.type in (wl.commasym, wl.life_or)):
+            _reduce_written_builtin_calls(body_d2, self)
         eval_goals = _collect_embedded_func_goals(body_d2, self, set())
 
         # Choose how to bind result to body_d2:
