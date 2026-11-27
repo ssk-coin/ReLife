@@ -1740,6 +1740,16 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         _a1_ev = _try_eval_string_func(a1, eng)
         if _a1_ev is not None:
             a1 = _a1_ev
+        # A feature read is read first: SuperLint asks `features(
+        # current_declarations.struct_declarations, current_module)` about
+        # the table, not about the projection that names it.
+        _a1_d = a1.deref()
+        if (_get_sym(_a1_d) == '.' and '1' in _a1_d.attr_list
+                and '2' in _a1_d.attr_list
+                and not (_a1_d.flags & QUOTED_TRUE)):
+            _cell_ft = _resolve_dot_feat(_a1_d, eng)
+            if _cell_ft is not None:
+                a1 = _cell_ft
         a2 = t.attr_list.get('2')  # optional module name argument
         wl = eng.wl
 
@@ -4779,6 +4789,17 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
             _cell_rs = _resolve_dot_feat(_res_sync.deref(), eng)
             if _cell_rs is not None:
                 _res_sync = _cell_rs
+        # A rule whose value is a global's or a persistent's name answers
+        # what the name holds: SuperLint's `current_declarations` answers
+        # the declarations table, and `current_declarations.struct_
+        # declarations` reads a feature of that table.
+        if (_res_sync is not None and _res_sync.deref() is not t
+                and not _res_sync.deref().attr_list
+                and _res_sync.deref().value is None):
+            _cell_rs3 = (_global_cell(_res_sync.deref(), eng)
+                         or _persistent_cell(_res_sync.deref(), eng))
+            if _cell_rs3 is not None:
+                _res_sync = _cell_rs3
         return _res_sync
     except RecursionError:
         # A chain of reductions longer than the Python stack holds is one
@@ -8616,9 +8637,15 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
         _0a_mark = eng.trail.mark()
         _b_evaled = _eval_user_func_sync(b_d, eng, 0)
         # Copied while the bindings that made it are still standing, since the
-        # trail is wound back next.
-        _b_evaled_d = (copy_term(_b_evaled.deref(), {})
-                       if _b_evaled is not None else None)
+        # trail is wound back next.  A term that lives in the store is the
+        # answer itself, not a copy of it: SuperLint's `Y = current_
+        # declaration` hands Y the declaration that later writes link up.
+        if (_b_evaled is not None
+                and _in_store_term(_b_evaled.deref())):
+            _b_evaled_d = _b_evaled.deref()
+        else:
+            _b_evaled_d = (copy_term(_b_evaled.deref(), {})
+                           if _b_evaled is not None else None)
         eng.trail.undo_to(_0a_mark)  # undo coref-linking of atom with rule-head copy
         if _b_evaled_d is not None:
             # A concrete value is taken as the answer.  A compound one is too,
@@ -10644,6 +10671,38 @@ def _read_dots_before_write(t: PsiTerm, eng, visited: set,
         _read_dots_before_write(child, eng, visited, _depth + 1)
 
 
+def _in_store_term(t: PsiTerm) -> bool:
+    """Whether a term lives in persistent store (a cell, or written there)."""
+    _d = t.__dict__
+    return bool(_d.get('_wl_persistent_cell', False)
+                or _d.get('_wl_persistent_written', False))
+
+
+def _cells_for_names(t: PsiTerm, eng) -> None:
+    """Point the global and persistent names written in a term at their cells.
+
+    Such a name stands for the term its cell holds, the very term and not a
+    copy: SuperLint's `the_current_declarations <<- ref(top_declarations)`
+    files the declarations table itself, and what is written through
+    `current_declarations` is written into top_declarations.
+    """
+    _seen: set = set()
+    _stack = [t]
+    while _stack:
+        _n = _stack.pop().deref()
+        if id(_n) in _seen or (_n.flags & QUOTED_TRUE):
+            continue
+        _seen.add(id(_n))
+        for _k in list(_n.attr_list.keys()):
+            _c = _n.attr_list[_k].deref()
+            if not _c.attr_list and _c.value is None:
+                _cell = _global_cell(_c, eng) or _persistent_cell(_c, eng)
+                if _cell is not None and _cell.deref() is not _c:
+                    eng.unifier.set_attr(_n, _k, _cell)
+                continue
+            _stack.append(_c)
+
+
 def bi_store_arrow(goal: PsiTerm, eng) -> bool:
     """X <- V / X <<- V — assignment operators.
 
@@ -10792,6 +10851,7 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
                 # written, built-in ones too: SuperLint's `the_current_token
                 # <<- ref(get_the_token)` files the token get_the_token
                 # answers, and `the_token <<- ref(str2psi(";"))` the symbol.
+                _cells_for_names(rhs_d, eng)
                 _reduce_embedded_calls(rhs_d, eng, 0, set())
                 _eval_embedded_user_funcs(rhs_d, eng, 0, set())
         elif (not _rhs_quoted and not rhs_d.attr_list
@@ -10981,6 +11041,17 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         # are the caller's variables — left shared, the query that made the
         # entry takes its own bindings back out of the store on the way out
         # and leaves `(@,@)` behind.
+        # A term already in the store is linked to, not copied field by
+        # field: SuperLint chains its declarations with `previous_
+        # declaration.next <<- current_declaration`, and what is later
+        # written on the current declaration has to show through the link.
+        _rt_ld = rhs_term.deref()
+        if (not ok_arith and _rt_ld is not lhs and _in_store_term(_rt_ld)
+                and lhs.value is None and not lhs.attr_list
+                and (lhs.type is None or lhs.type is eng.wl.top)):
+            lhs.coref = _rt_ld
+            eng.unifier._wakeup_resid(lhs, lhs)
+            return True
         if rhs_term.attr_list or rhs_term.coref is not None:
             rhs_term = _store_copy(rhs_term, eng)
         _mark_persistent_deep(rhs_term, set())
