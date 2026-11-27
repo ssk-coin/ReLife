@@ -1153,10 +1153,16 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     # std_expander asks `root_sort(traverse_method)` for the sort of the
     # method it was handed, not for the sort of the name.  The reading is done
     # through a stand-in so that the term the caller holds is left as it is.
-    if t.attr_list and eng is not None and eng.wl.global_defs:
+    if t.attr_list and eng is not None:
         _sub = None
         for _gk, _gv in t.attr_list.items():
-            _gc = _global_cell(_gv.deref(), eng)
+            _gc = (_global_cell(_gv.deref(), eng) if eng.wl.global_defs
+                   else None)
+            # A persistent name is read for what it holds too: SuperLint's
+            # `get_current_char -> root_sort(the_current_char)` answers the
+            # character the tokenizer has just read.
+            if _gc is None and not _gv.deref().attr_list:
+                _gc = _persistent_cell(_gv.deref(), eng)
             if _gc is None:
                 continue
             if _sub is None:
@@ -4072,6 +4078,18 @@ def _feature_arg_term(feat: PsiTerm, eng):
                                     or (_ev.type is not None
                                         and _ev.type.keyword is not None)):
                 return _ev
+    # So is a function of no arguments written there: SuperLint's tokenizer
+    # asks `has_feature(current_char, separators_table, Separator)` about
+    # the character current_char answers.
+    if (_written and not feat.attr_list and eng is not None
+            and feat.value is None
+            and not (feat.flags & QUOTED_TRUE)
+            and _is_user_function(feat) and _has_applicable_rule(feat)
+            and feat.type.type is not DefType.GLOBAL
+            and not getattr(feat.type, 'is_persistent', False)):
+        _ev0 = _eval_user_func_sync(feat, eng, 0)
+        if _ev0 is not None and _ev0.deref() is not feat:
+            return _ev0.deref()
     return feat
 
 
@@ -10758,9 +10776,11 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
             elif (a2.coref is None
                     and not (rhs_d.flags & (QUOTED_TRUE | _NST_SWAP))):
                 # The calls written inside it are asked before the name is
-                # written: SuperLint's `the_current_token <<-
-                # ref(get_the_token)` files the token get_the_token answers.
+                # written, built-in ones too: SuperLint's `the_current_token
+                # <<- ref(get_the_token)` files the token get_the_token
+                # answers, and `the_token <<- ref(str2psi(";"))` the symbol.
                 _reduce_embedded_calls(rhs_d, eng, 0, set())
+                _eval_embedded_user_funcs(rhs_d, eng, 0, set())
         elif (not _rhs_quoted and not rhs_d.attr_list
                 and rhs_d.value is None
                 and not (rhs_d.flags & QUOTED_TRUE)
