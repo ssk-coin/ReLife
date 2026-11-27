@@ -1379,6 +1379,16 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
                 _rs_ev = _try_eval_string_func(a1, eng)
             if _rs_ev is not None and _rs_ev.deref() is not a1:
                 a1 = _rs_ev
+        # A feature read written as the argument is read first: SuperLint's
+        # `Head = root_sort(Expression.1)` asks for the sort of the head of
+        # the rule it has read, not for the sort of the projection.
+        _a1_rs = a1.deref()
+        if (eng is not None and _get_sym(_a1_rs) == '.'
+                and '1' in _a1_rs.attr_list and '2' in _a1_rs.attr_list
+                and not (_a1_rs.flags & QUOTED_TRUE)):
+            _cell_rs2 = _resolve_dot_feat(_a1_rs, eng)
+            if _cell_rs2 is not None:
+                a1 = _cell_rs2
         a1 = a1.deref()
         defn = a1.type
         if defn is None or defn.keyword is None:
@@ -2437,7 +2447,8 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
     # So is a call that is being worked out right now: until it has an
     # answer it is the call, and debug.lf's traced append writes the head it
     # matched, `append([],[d,e,f])`, not what that call is about to answer.
-    _is_qt = _is_qt or _call_in_progress(t)
+    _is_qt = (_is_qt or _call_in_progress(t)
+              or bool(t.__dict__.get('_wl_read_data')))
     try:
         t_eval = (_try_eval_arith_to_term(t, eng)
                   if not _is_nst and not _self_call and not _partial_call
@@ -3021,6 +3032,33 @@ def bi_get_code(goal: PsiTerm, eng) -> bool:
     return _unify(eng, arg, _read_one_char(eng, True)) if arg else False
 
 
+def _mark_read_data(t: PsiTerm) -> None:
+    """Mark a term read with read/1,2 as data.
+
+    What read hands back is a term, not code: SuperLint's rule compiler
+    reads `Block = Declaration.scope` out of a rules file and rewrites it
+    into the rule it writes out, and the `Declaration.scope` in it is a
+    projection to write, not a feature to read now.  The calls in such a
+    term are not worked out by the passes that look into what a goal is
+    handed; a call the term is as a whole is still asked for its value
+    where a value is wanted.
+    """
+    _seen: set = set()
+    _stack = [t]
+    while _stack:
+        _n = _stack.pop()
+        if _n is None:
+            continue
+        _n = _n.deref()
+        if id(_n) in _seen:
+            continue
+        _seen.add(id(_n))
+        if _n.attr_list:
+            _n._wl_read_data = True
+            _n.flags |= QUOTED_TRUE
+            _stack.extend(_n.attr_list.values())
+
+
 def _read_from_stream(goal: PsiTerm, eng, stream) -> bool:
     """read(T[, Kind]) from a file opened with open_in.
 
@@ -3050,6 +3088,7 @@ def _read_from_stream(goal: PsiTerm, eng, stream) -> bool:
         _WL_rd.noisy = _noisy_rd
     if term is None:
         term = PsiTerm(type_def=eng.wl.eof)
+    _mark_read_data(term)
     a1 = goal.attr_list.get('1')
     a2 = goal.attr_list.get('2')
     if a1 is not None and not _unify(eng, a1.deref(), term):
@@ -3103,6 +3142,7 @@ def bi_read(goal: PsiTerm, eng) -> bool:
             result = t or PsiTerm(type_def=eng.wl.top)
         except Exception:
             result = PsiTerm(type_def=eng.wl.top)
+        _mark_read_data(result)
     return _unify(eng, arg, result) if arg else bool(result)
 
 
@@ -6184,6 +6224,9 @@ def _eval_embedded_user_funcs(
     if id(td) in visited:
         return
     visited.add(id(td))
+    # A term read in is data: nothing written in it is asked here.
+    if td.__dict__.get('_wl_read_data'):
+        return
     # A backtick holds its term as it is written: the `1 + 2` of
     # ``write(X:`(1+2), eval(X))`` is printed as the sum, not as 3.
     if (td.type is not None and td.type.keyword is not None
@@ -6372,6 +6415,8 @@ def _reduce_embedded_calls(t: PsiTerm, eng, _depth: int, visited: set) -> None:
     if id(td) in visited:
         return
     visited.add(id(td))
+    if td.__dict__.get('_wl_read_data'):
+        return
     if (td.type is not None and td.type.keyword is not None
             and td.type.keyword.symbol == '`'):
         return
@@ -7463,7 +7508,11 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
         # `ExpressionResult = `(Value | Body)`, which proves nothing.
         if (_is_user_function(td) or _is_cond_builtin_local(td)
                 or (_td_sym_bq in ('.', 'eval', 'evalin') and td.attr_list)
-                or (td.type is eng.wl.such_that and td.attr_list)):
+                or (td.type is eng.wl.such_that and td.attr_list)
+                # A choice under a backquote is the choice written out:
+                # SuperLint's `rewrite_choices` builds `{while; for}` for
+                # the rule it writes, not one alternative at a time.
+                or (td.type is eng.wl.disjunction and td.attr_list)):
             eng.trail.trail_psi(td, 'flags')
             td.flags |= _QT_bq
 
@@ -8004,7 +8053,11 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
             return _apply_and_conjunction_to_var(a_d, b_d, eng)
 
     # Handle disjunction on RHS: A = {b1;b2;...} → try A=b1, choice for rest
-    if b_d.type is not None and b_d.type is eng.wl.disjunction:
+    # A quoted disjunction is a term like any other: the rule SuperLint's
+    # compiler reads in holds `Declaration == {while; for}`, and taking it
+    # apart hands on the choice as written, not one alternative at a time.
+    if (b_d.type is not None and b_d.type is eng.wl.disjunction
+            and not (b_d.flags & QUOTED_TRUE)):
         elems = _collect_disjunction(b_d, eng)
         if elems:
             # Push choice points in reverse order (last alternative first)
@@ -8013,7 +8066,8 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
             return _unify(eng, a_d, elems[0])
 
     # Handle disjunction on LHS: {a1;a2} = B → try a1=B with choice for rest
-    if a_d.type is not None and a_d.type is eng.wl.disjunction:
+    if (a_d.type is not None and a_d.type is eng.wl.disjunction
+            and not (a_d.flags & QUOTED_TRUE)):
         elems = _collect_disjunction(a_d, eng)
         if elems:
             for alt in reversed(elems[1:]):
@@ -9379,6 +9433,11 @@ def _eval_sort_comparison(t: PsiTerm, eng) -> Optional[PsiTerm]:
     if t is None:
         return None
     t = t.deref()
+    # A quoted comparison is a term: the rule SuperLint's compiler reads in
+    # holds `Declaration == {while; for}`, and taking it apart reads the
+    # comparison written there, not whether it holds.
+    if t.flags & QUOTED_TRUE:
+        return None
     sym = t.type.keyword.symbol if (t.type and t.type.keyword) else ''
     fn = _SORT_CMP_FUNCS.get(sym)
     if fn is None or '1' not in t.attr_list or '2' not in t.attr_list:
@@ -10786,6 +10845,18 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         # What is written in is a value, so a call is asked for the one it
         # answers: `V <<- term_explore(X, Seen)` stores the count, not the
         # call.  A call nothing can work out yet is stored as it stands.
+        if (not rhs_term.attr_list and rhs_term.value is None
+                and not (rhs_term.flags & QUOTED_TRUE)
+                and _is_user_function(rhs_term)
+                and _has_applicable_rule(rhs_term)
+                and rhs_term.type.type is not DefType.GLOBAL
+                and not getattr(rhs_term.type, 'is_persistent', False)):
+            # A function of no arguments written on the right is a call:
+            # SuperLint's `previous_token.previous <<- previous_token`
+            # links the token to itself, not to the name that reads it.
+            _rhs_0l = _eval_user_func_sync(rhs_term, eng, 0)
+            if _rhs_0l is not None and _rhs_0l.deref() is not rhs_term:
+                rhs_term = _rhs_0l.deref()
         if rhs_term.attr_list:
             _rhs_ev = (_eval_sort_comparison(rhs_term, eng)
                        or _try_eval_any_func(rhs_term, eng))

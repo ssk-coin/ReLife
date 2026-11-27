@@ -3234,7 +3234,13 @@ class Engine:
                         self.unifier.set_attr(thegoal, _k_pa, _mr_pa)
                         continue
                 if _a_pa_d.attr_list and not _iuf_pa(_a_pa_d):
-                    _eeuf_pa(_a_pa_d, self, 0, set())
+                    # A conjunction or a disjunction handed over is code:
+                    # only the calls written into it here are made.
+                    _eeuf_pa(_a_pa_d, self, 0, set(),
+                             follow_bound=not (
+                                 _a_pa_d.type is not None
+                                 and _a_pa_d.type in (wl.commasym,
+                                                      wl.life_or)))
 
         # Multiple clauses → set up choice point for first, then proceed.
         # Record cut_barrier BEFORE pushing the multi-clause choice point so

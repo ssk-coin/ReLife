@@ -1232,8 +1232,13 @@ class Unifier:
                 if u is v:
                     return True
 
-        _dot_check = _is_dot_access
-        if _is_dot_access(u) or _is_dot_access(v):
+        # A projection in a term read in is data, and meets as a term:
+        # SuperLint's rule compiler takes `Declaration.scope` out of the
+        # rules file to write into the rule it builds.
+        def _dot_check(_x):
+            return (_is_dot_access(_x)
+                    and not _x.__dict__.get('_wl_read_data'))
+        if _dot_check(u) or _dot_check(v):
             if self.engine is not None:
                 from wild_life.built_ins import _resolve_dot_feat as _rdf
                 if _dot_check(u):
