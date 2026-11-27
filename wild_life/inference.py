@@ -2605,6 +2605,12 @@ class Engine:
                     if not (_iuf_w(_a_w) and _a_w.attr_list
                             and _har_w(_a_w) and not _tri_w(_a_w)):
                         continue
+                    # A call already being worked out is written as the
+                    # call: `A:ap([],B) -> B | write(A)` writes ap([],[d]).
+                    from wild_life.built_ins import (
+                        _call_in_progress as _cip_w)
+                    if _cip_w(_a_w):
+                        continue
                     self.goal_stack = aim.next
                     self.goal_count += 1
                     # The argument becomes the variable the call fills in, so
@@ -3945,6 +3951,10 @@ class Engine:
                 # No rules at all — return the compound as-is
                 return self.unifier.unify(result, funct)
             return False
+
+        # A call this goal works out has its answer once `result` is filled
+        # in; the head match notes where that is (see match_call_head).
+        self.unifier._eval_result_for_match = result
 
         # A choice written inside a call is settled before the call is
         # reduced, and settled on the disjunction itself: check_func binds

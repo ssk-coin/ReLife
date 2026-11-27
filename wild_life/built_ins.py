@@ -1404,7 +1404,13 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         # term whose type is the term's own, and building a fresh atom out
         # of the symbol looks it up in whatever module is current, which
         # turns accumulators#gram_init into an undefined user#gram_init.
-        return PsiTerm(type_def=defn)
+        # It is a sort, not a call written in a clause: debug.lf puts
+        # `root_sort(append)` into the head it hands clause/1, and once a
+        # catch-all `append -> @ | …` rule exists, asking the name for a
+        # value runs that rule.
+        _rs_out = PsiTerm(type_def=defn)
+        _rs_out._wl_sort_value = True
+        return _rs_out
 
     elif sym == 'getenv':
         # getenv(Name) is what the environment says Name is worth.  A name the
@@ -2291,6 +2297,26 @@ def _psi_to_python(t: Optional[PsiTerm], eng):
     return t
 
 
+def _call_in_progress(t: PsiTerm) -> bool:
+    """Whether t is a function call that is being worked out right now.
+
+    Until it has an answer such a call is the call itself: debug.lf's traced
+    rules write the head they matched, `A:ap([],B) -> B | write(A)`, and
+    asking that call for a value would start it over.  Once its answer is
+    in, writing it shows the answer as before.
+    """
+    d = t.__dict__
+    if not d.get('_wl_eval_started'):
+        return False
+    r = d.get('_wl_eval_result')
+    if r is None:
+        return True
+    r = r.deref()
+    return (not r.attr_list and r.value is None
+            and (r.type is None or r.type.keyword is None
+                 or r.type.keyword.symbol == '@'))
+
+
 def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> None:
     from wild_life.print_term import write_term
     var_tree = getattr(eng, '_last_var_tree', None)
@@ -2403,12 +2429,24 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
     # writes as itself: `fact` alone is `fact`, not the 1 that `fact(0) -> 1`
     # would answer if the missing argument were filled in.
     _partial_call = _is_user_function(t) and not _has_applicable_rule(t)
+    # A quoted call is data, and is written as it stands: the head of a rule
+    # that clause/1 hands back, `append([],L)`, is not the L that a call to
+    # append would answer -- the debugger writes such heads in its traces.
+    _is_qt = (bool(t.flags & QUOTED_TRUE) and t.type is not None
+              and t.type.type == DefType.FUNCTION)
+    # So is a call that is being worked out right now: until it has an
+    # answer it is the call, and debug.lf's traced append writes the head it
+    # matched, `append([],[d,e,f])`, not what that call is about to answer.
+    _is_qt = _is_qt or _call_in_progress(t)
     try:
         t_eval = (_try_eval_arith_to_term(t, eng)
                   if not _is_nst and not _self_call and not _partial_call
+                  and not _is_qt
                   else None)
         if t_eval is not None:
             t = t_eval
+        elif _is_qt:
+            pass
         else:
             # Evaluate '.' (feature access) in write context.
             # write(C.1) evaluates C.1 and prints the result (e.g. 'a' for a cons head).
@@ -2424,6 +2462,7 @@ def _write_term(t: PsiTerm, eng, stream=None, quoted=True, compact=False) -> Non
                 if _dot_cell is not None:
                     t = _dot_cell.deref()
             elif (_is_user_function(t) and eng is not None
+                    and not _call_in_progress(t)
                     and not _term_reaches_itself(t)
                     and _has_applicable_rule(t)):
                 # A call that reaches itself is written as the call it is:
@@ -4659,6 +4698,8 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
     # backtrack into one would take the engine on from a goal it never
     # proved.
     _cs_sync = eng.choice_stack
+    _saved_er = getattr(eng.unifier, '_eval_result_for_match', None)
+    eng.unifier._eval_result_for_match = None
     try:
         return _eval_user_func_sync_inner(t, eng, _depth)
     except RecursionError:
@@ -4668,6 +4709,12 @@ def _eval_user_func_sync(t: PsiTerm, eng, _depth: int = 0) -> Optional[PsiTerm]:
     finally:
         _active_sync.discard(id(t))
         eng.choice_stack = _cs_sync
+        eng.unifier._eval_result_for_match = _saved_er
+        # Worked out: the call is no longer in progress.
+        _td_fin = t.deref()
+        if (_td_fin.__dict__.get('_wl_eval_started')
+                and _td_fin.__dict__.get('_wl_eval_result') is None):
+            _td_fin._wl_eval_started = False
 
 
 def _eval_user_func_sync_inner(t: PsiTerm, eng, _depth: int) -> Optional[PsiTerm]:
@@ -6205,6 +6252,13 @@ def _eval_embedded_user_funcs(
                 eng.unifier.set_attr(td, key, _rv_ch)
                 continue
         if child.__dict__.get('_wl_held_arith'):
+            continue
+        # A quoted call is data: the clauses debug.lf reads back with
+        # clause/1 are handed to rewrite_rules as a list, and the head
+        # `append([],L)` of the first one is the head, not the L that
+        # calling append would answer.
+        if (child.flags & QUOTED_TRUE) and child.type is not None \
+                and child.type.type == DefType.FUNCTION:
             continue
         evaled = _try_eval_any_func(child, eng)
         if evaled is not None and evaled is not child:
@@ -8408,7 +8462,8 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
     _a_is_user_fn_0 = (a_d.type is not None and a_d.type.type == DefType.FUNCTION
                        and a_d.type.rule and not callable(a_d.type.rule))
     if (_a_is_user_fn_0 and not (a_d.flags & _BI_NST) and not a_d.attr_list
-            and not _a_was_backtick):
+            and not _a_was_backtick
+            and not a_d.__dict__.get('_wl_sort_value')):
         _a_evaled = _eval_user_func_sync(a_d, eng, 0)
         if _a_evaled is not None:
             _a_ev_d = _a_evaled.deref()
@@ -8420,7 +8475,9 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
                     a_d.coref = _a_ev_d
                 a_d = _a_ev_d
 
-    if _b_is_user_fn and not _b_is_non_strict and not b_d.attr_list and not _b_was_backtick:
+    if (_b_is_user_fn and not _b_is_non_strict and not b_d.attr_list
+            and not _b_was_backtick
+            and not b_d.__dict__.get('_wl_sort_value')):
         _0a_mark = eng.trail.mark()
         _b_evaled = _eval_user_func_sync(b_d, eng, 0)
         # Copied while the bindings that made it are still standing, since the

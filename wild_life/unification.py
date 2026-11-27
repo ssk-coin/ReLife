@@ -1067,10 +1067,30 @@ class Unifier:
         """
         _saved = self._matching_call_head
         self._matching_call_head = True
+        _res = getattr(self, '_eval_result_for_match', None)
+        self._eval_result_for_match = None
         try:
-            return self.unify(call, head)
+            ok = self.unify(call, head)
         finally:
             self._matching_call_head = _saved
+        if ok:
+            # The call is being worked out from here on, under whichever
+            # node it now is.  Until it has an answer it is the call itself,
+            # and writing it -- `A:ap([],B) -> B | write(A)`, as debug.lf's
+            # traced rules do -- shows `ap([],[d])` instead of starting the
+            # call over.
+            _cd = call.deref()
+            if not _cd.__dict__.get('_wl_eval_started'):
+                _cd.__dict__.setdefault('_wl_eval_started', False)
+                self.trail.trail_psi(_cd, '_wl_eval_started')
+                _cd._wl_eval_started = True
+            # Where the answer goes, when the engine's own goal is working
+            # the call out: once that is filled in, the call has an answer.
+            if _res is not None:
+                _cd.__dict__.setdefault('_wl_eval_result', None)
+                self.trail.trail_psi(_cd, '_wl_eval_result')
+                _cd._wl_eval_result = _res
+        return ok
 
     def unify(self, u: PsiTerm, v: PsiTerm) -> bool:
         """2つの psi-term を単一化する
