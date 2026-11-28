@@ -6320,6 +6320,10 @@ def _eval_embedded_user_funcs(
     # A term read in is data: nothing written in it is asked here.
     if td.__dict__.get('_wl_read_data'):
         return
+    # So is what the store keeps, reached from the term: SuperLint's tokens
+    # and declarations lead to the whole tree it has built.
+    if _depth > 0 and _in_store_term(td):
+        return
     # A backtick holds its term as it is written: the `1 + 2` of
     # ``write(X:`(1+2), eval(X))`` is printed as the sum, not as 3.
     if (td.type is not None and td.type.keyword is not None

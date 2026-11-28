@@ -121,6 +121,40 @@ def _freeze_calls_deep(t: PsiTerm, quoted_flag: int,
         stack.extend(node.attr_list.values())
 
 
+def _nullary_head_calls(head: PsiTerm, eng) -> list:
+    """The calls of no arguments written below a clause head.
+
+    Each is given as (parent, feature, call) so that its place can be taken
+    by a variable while the head is matched.
+    """
+    from wild_life.data_structures import (QUOTED_TRUE as _QT_nh,
+                                           DefType as _DT_nh)
+    found: list = []
+    seen: set = set()
+
+    def walk(t: PsiTerm, depth: int) -> None:
+        if depth > 40 or id(t) in seen:
+            return
+        seen.add(id(t))
+        for k, v in list(t.attr_list.items()):
+            vd = v.deref()
+            d = vd.type
+            if (not vd.attr_list and vd.value is None
+                    and not (vd.flags & _QT_nh)
+                    and d is not None and d.type == _DT_nh.FUNCTION
+                    and getattr(d, '_builtin_func', None) is None
+                    and isinstance(d.rule, list) and d.rule
+                    and not getattr(d, 'is_persistent', False)
+                    and all(h is not None and not h.deref().attr_list
+                            for h, _b in d.rule)):
+                found.append((t, k, vd))
+                continue
+            walk(vd, depth + 1)
+
+    walk(head.deref(), 0)
+    return found
+
+
 def _eval_copy_thaw(t: PsiTerm, thaw_evalin: bool = False) -> bool:
     """Let a filed rule's calls go when it is copied to be run.
 
@@ -141,12 +175,24 @@ def _eval_copy_thaw(t: PsiTerm, thaw_evalin: bool = False) -> bool:
                                            NON_STRICT_TERM as _NST_ct,
                                            DefType as _DT_ct)
     _seen: dict = {}
+    # One record of what has been let go serves the whole copy: a node is
+    # let go once however many calls sit above it.
+    _cleared: set = set()
+
+    def _stored(n):
+        _d = n.__dict__
+        return bool(_d.get('_wl_persistent_cell', False)
+                    or _d.get('_wl_persistent_written', False))
 
     def _walk(n):
         n = n.deref()
         _id = id(n)
         if _id in _seen:
             return _seen[_id]
+        # What the store keeps is not part of the rule being copied.
+        if _stored(n):
+            _seen[_id] = False
+            return False
         _seen[_id] = False          # a cycle counts as holding nothing
         _sym = (n.type.keyword.symbol
                 if (n.type is not None and n.type.keyword is not None) else '')
@@ -168,13 +214,13 @@ def _eval_copy_thaw(t: PsiTerm, thaw_evalin: bool = False) -> bool:
             if (thaw_evalin and _in_sym in ('evalin', 'eval')
                     and '1' in _in_d.attr_list):
                 n.coref = _in_d
-                _clear(_in_d, set())
+                _clear(_in_d, _cleared)
                 _seen[_id] = True
                 return True
             if (_in_sym == '.' and '1' in _in_d.attr_list
                     and '2' in _in_d.attr_list):
                 n.coref = _in_d
-                _clear(_in_d, set())
+                _clear(_in_d, _cleared)
                 # Read when the rule it is written into runs, and not while
                 # that rule is still being put together: the profiler's
                 # `RewrittenCut = (!, StatsForWhat = `(profile_stats.What),
@@ -205,7 +251,7 @@ def _eval_copy_thaw(t: PsiTerm, thaw_evalin: bool = False) -> bool:
             if _walk(_sub):
                 _holds = True
         if _holds:
-            _clear(n, set())
+            _clear(n, _cleared)
         _seen[_id] = _holds
         return _holds
 
@@ -214,6 +260,8 @@ def _eval_copy_thaw(t: PsiTerm, thaw_evalin: bool = False) -> bool:
         if id(n) in _done:
             return
         _done.add(id(n))
+        if _stored(n):
+            return
         if (n.type is not None and n.type.keyword is not None
                 and n.type.keyword.symbol == '`'):
             return
@@ -3359,7 +3407,9 @@ class Engine:
                 _hcs = _term_has_callable_sub(head_orig)
                 head_orig._wl_has_call = _hcs
             if _hcs:
-                self._reduce_settled_head_calls(head)
+                self._reduce_settled_head_calls(
+                    head, skip_nullary=(defn is not None
+                                        and defn.type == DefType.PREDICATE))
 
         # Fix A: such_that daemon setup for FUNCTION rules.
         # When the body is `val | cond` (such_that), and the call has free
@@ -3471,8 +3521,39 @@ class Engine:
                 head_orig._wl_has_arith = _ha_ns
             if _ha_ns:
                 _ns_head_arith = _head_arith_nodes(head)
+        # A function of no arguments written in a predicate's head stands
+        # for what it answers, and what the caller brings is matched against
+        # that answer: SuperLint's `scan_specifiers([S : store_class_specifier
+        # | …], …)` takes an `extern` token, store_class_specifier being
+        # `{auto; register; static; extern}`.  The call's place is held by a
+        # variable while the head is matched, and the call is made right
+        # after.
+        _head_calls = None
+        if (defn is not None and defn.type == DefType.PREDICATE
+                and head.attr_list):
+            _hn0 = head_orig.__dict__.get('_wl_has_nullary_call')
+            if _hn0 is None:
+                _hn0 = bool(_nullary_head_calls(head_orig, self))
+                head_orig._wl_has_nullary_call = _hn0
+            if _hn0:
+                _head_calls = []
+                for _hp, _hk, _hc in _nullary_head_calls(head, self):
+                    # The node is the clause's own (a fresh copy), and the
+                    # body may name it — `S : store_class_specifier` — so it
+                    # is the node that becomes the variable, and the call a
+                    # term of its own.
+                    _call_hc = PsiTerm(type_def=_hc.type)
+                    _hc.type = wl.top
+                    _head_calls.append((_hc, _call_hc))
         mark = self.trail.mark()
         ok = self.unifier.unify(thegoal, head)
+        if ok and _head_calls:
+            _eq_defn_hc = (getattr(wl, 'eqsym', None)
+                           or wl.syntax_module.symbol_table.get('='))
+            for _hv, _hc in reversed(_head_calls):
+                _eq_hc = PsiTerm(type_def=_eq_defn_hc)
+                _eq_hc.attr_list = {'1': _hv, '2': _hc}
+                self.push_goal(GoalType.PROVE, _eq_hc, _DEFRULES, None)
         if _non_strict:
             self.no_arith_eval = _prev_no_arith
             if ok:
@@ -3683,7 +3764,8 @@ class Engine:
 
         walk(head, 0)
 
-    def _reduce_settled_head_calls(self, head: 'PsiTerm') -> None:
+    def _reduce_settled_head_calls(self, head: 'PsiTerm',
+                                   skip_nullary: bool = False) -> None:
         """Reduce the calls under a clause head that a rule already fits.
 
         A call whose arguments are not specific enough for any rule is left
@@ -3710,6 +3792,11 @@ class Engine:
             seen.add(id(td))
             for key in list(td.attr_list.keys()):
                 child = td.attr_list[key].deref()
+                # A predicate's call of no arguments is made once the head
+                # has matched (see _nullary_head_calls).
+                if (skip_nullary and not child.attr_list
+                        and child.value is None):
+                    continue
                 if _iuf_h(child) and self._head_call_is_settled(child):
                     # A call is worked out from terms that carry what their
                     # sorts promise: `const(X2:tree(nom,[]), …)` reads the
