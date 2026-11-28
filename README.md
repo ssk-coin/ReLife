@@ -1,5 +1,7 @@
 # ReLife — Wild Life 1.02 Python Port
 
+Current release: **ReLife 0.01**
+
 Python rewrite of the **Wild Life 1.02** interpreter — an implementation of the
 **LIFE** (Logic, Inheritance, Functions, Equations) programming language,
 originally developed at DEC Paris Research Laboratory (1991–1995). 
@@ -42,6 +44,30 @@ python -m wild_life -q
 # Load a .lf file
 python -m wild_life program.lf
 ```
+
+## Release Notes
+
+### ReLife 0.01
+
+First release.  The interpreter runs the original Wild Life 1.02 regression
+suite (`tests_original/`, run with `python run_tests.py`): 308 of 324 tests
+match the reference output.  The 16 remaining differences are not errors in
+the LIFE semantics:
+
+- output that shows the original implementation's internals: execution
+  trace format, internal sort codes, symbol-table listings, stream records,
+  library definitions shown by `listing` (`another_bug`, `babcode`, `t`,
+  `children`, `test03`, `libtest`, `listing1`, `parser`);
+- memory-overflow tests (`t8101`, `t8105`);
+- syntax-error recovery and end-of-file handling on malformed input
+  (`eoftest`, `eoftest2`), and an input-echo artifact (`glob_test2`);
+- `testslc`, where the test writes standard output and its output file into
+  the same file;
+- `canonical`, where the original rejects the unspaced
+  `` `( `a & `b.c.`d) `` that ReLife accepts;
+- `testsl` (SuperLint), whose output matches the reference except for the
+  banner when the C preprocessor emits old-style line markers, but which
+  takes about 17 minutes and so exceeds the test time limit.
 
 ## Original C Source
 

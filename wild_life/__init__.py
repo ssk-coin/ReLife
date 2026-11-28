@@ -9,5 +9,6 @@ Prolog風のロジックプログラミングと関数型プログラミング�
 実験的なプログラミング言語です。
 """
 
-__version__ = "1.02"
+__version__ = "1.02"          # Wild Life language version implemented
+__relife_version__ = "0.01"   # ReLife (this Python port) release
 __author__ = "DEC Paris Research Laboratory (original C), Python translation"

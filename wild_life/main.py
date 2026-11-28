@@ -34,8 +34,10 @@ sys.setrecursionlimit(10000)
 # ---------------------------------------------------------------------------
 
 _VERSION = "1.02"
+_RELIFE_VERSION = "0.01"
 _BANNER = (
-    f"Wild_Life Interpreter Version {_VERSION} (Python port)\n"
+    f"Wild_Life Interpreter Version {_VERSION} "
+    f"(ReLife {_RELIFE_VERSION}, Python port)\n"
 )
 
 
