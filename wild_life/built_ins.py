@@ -15180,6 +15180,15 @@ def register_all(wl) -> None:
             _cell_hf = _resolve_dot_feat(_host, eng)
             if _cell_hf is not None:
                 _host = _cell_hf.deref()
+        # A call written as the term is asked for the term it answers, a
+        # module's own `.` included: SuperLint's `has_feature(init,
+        # Declarations.Name)` asks about the declaration its `.` hands back.
+        if (_host.value is None and _host.attr_list
+                and not (_host.flags & QUOTED_TRUE)
+                and _is_user_function(_host) and _has_applicable_rule(_host)):
+            _ev_hf = _eval_user_func_sync(_host, eng, 0)
+            if _ev_hf is not None:
+                _host = _ev_hf.deref()
         # A name declared `global` or `persistent` stands for its cell, and
         # the features belong to the cell: acc_declarations.lf asks
         # `has_feature(Acc,accumulators,AccInfo)` of the table it files
