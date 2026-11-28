@@ -799,6 +799,8 @@ def _eval_arith_comparison(t: PsiTerm, eng) -> Optional[PsiTerm]:
     sym = _get_sym(t)
     if sym not in ('>', '<', '>=', '=<', '=:=', '=\\='):
         return None
+    if not all(k.isdigit() for k in t.attr_list):
+        return None
     a1, a2 = _get_two_args(t)
     if a1 is None or a2 is None:
         return None
@@ -1144,6 +1146,21 @@ def _psi_root_string(t: PsiTerm, eng) -> Optional[str]:
     return None
 
 
+def _string_arg_value(a: PsiTerm, eng) -> PsiTerm:
+    """The string a call written as a string built-in's argument answers.
+
+    `strlen(Declaration.name.id)` in a SuperLint rule measures the name the
+    rule's own `.` reads, so the call is worked out before it is measured.
+    """
+    if (eng is not None and a.value is None and a.attr_list
+            and not (a.flags & QUOTED_TRUE)
+            and _is_user_function(a) and _has_applicable_rule(a)):
+        _ev = _eval_user_func_sync(a, eng, 0)
+        if _ev is not None:
+            return _ev.deref()
+    return a
+
+
 def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
     """Try to evaluate string built-in functions (psi2str, str2psi, strcon).
 
@@ -1309,7 +1326,7 @@ def _try_eval_string_func(t: PsiTerm, eng) -> Optional[PsiTerm]:
         a1 = t.attr_list.get('1')
         if a1 is None:
             return None
-        a1d = a1.deref()
+        a1d = _string_arg_value(a1.deref(), eng)
         if eng is None or a1d.value is None:
             return None
         wl = eng.wl
@@ -3625,7 +3642,7 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         a1 = t.attr_list.get('1')
         if a1 is None:
             return False, 0.0
-        a1d = a1.deref()
+        a1d = _string_arg_value(a1.deref(), eng)
         # Only evaluate when the argument is a concrete string value
         if a1d.value is not None and eng is not None:
             wl = eng.wl
@@ -6877,6 +6894,10 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
         return None
     if dot_term.type.keyword.symbol != '.':
         return None
+    # A module that defines `.` for itself calls its own function rather
+    # than reading the feature.
+    if dot_term.type.rule:
+        return None
     # A projection written under a backquote is the reading written out, not
     # a reading to make now: `` `(profile_stats.Function) `` is handed on as
     # the term it is.
@@ -7097,11 +7118,15 @@ def _resolve_dot_feat(dot_term: 'PsiTerm', eng,
         if host.__dict__.get('_wl_persistent_written', False):
             fresh._wl_persistent_written = True
         eng.persistent_store_touched = True
-    else:
+    if not _host_keeps:
         eng.trail.trail_psi(host, 'attr_list')
-    new_attrs = dict(host.attr_list)
-    new_attrs[fkey] = fresh
-    host.attr_list = new_attrs
+        new_attrs = dict(host.attr_list)
+        new_attrs[fkey] = fresh
+        host.attr_list = new_attrs
+    else:
+        # In place, so that a cell sharing the stored term's features sees
+        # the new one too.
+        host.attr_list[fkey] = fresh
     # Fix D: fire pending daemon resids on host after a new attribute is added.
     # e.g. X.set = true? fires the daemon write(X) that was set by such_that.
     if host.resid and eng is not None and getattr(eng, 'unifier', None) is not None:
@@ -7516,6 +7541,7 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
     # value like any other.
     _dot_sym_check = (lambda td: td.type is not None and td.type.keyword is not None
                       and td.type.keyword.symbol == '.'
+                      and not td.type.rule
                       and '1' in td.attr_list and '2' in td.attr_list)
 
     def _project_as_dot(td):
@@ -8366,6 +8392,9 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
         from wild_life.data_structures import NON_STRICT_TERM as _NST_CMP
         return (_get_sym(t) in _CMP_FUNC_SYMS and '1' in t.attr_list
                 and '2' in t.attr_list
+                # One with named features is a structure built with the
+                # comparison as its sort, as SuperLint's expression nodes are.
+                and all(k.isdigit() for k in t.attr_list)
                 and not (t.flags & (_NST_CMP | QUOTED_TRUE)))
 
     _b_is_cmp = _is_cmp_expr(b_d)
@@ -10784,6 +10813,17 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
     if _g_cell is not None:
         lhs = _g_cell.deref()
     elif (lhs.type is not None and lhs.type.keyword is not None
+            and lhs.type.keyword.symbol == '.' and lhs.type.rule
+            and _is_user_function(lhs)):
+        # A module's own `.` is a function like any other, and what it
+        # answers is the cell written to: SuperLint's `Operation.1 <<-
+        # ref(What)` goes through `Node.Feature -> '*protected_project*'(
+        # Feature, Node)`, which hands back the feature Operation holds.
+        _ev_ud = _eval_user_func_sync(lhs, eng, 0)
+        if _ev_ud is None:
+            return False
+        lhs = _ev_ud.deref()
+    elif (lhs.type is not None and lhs.type.keyword is not None
             and lhs.type.keyword.symbol == '.'):
         # `sieve.M <- multiple_of(P)` writes the feature, not the dot-term:
         # the sieve keeps what was written under M.
@@ -10932,7 +10972,21 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
             if getattr(defn, 'is_persistent', False):
                 _old_cell = _persistent_cell(lhs, eng)
                 if _old_cell is not None:
-                    _oc = _old_cell.deref()
+                    # The cell is followed only as far as the store goes.  A
+                    # query that matched the name against a term of its own
+                    # -- SuperLint's `the_current_declarations = ref(Parent)`
+                    # -- may have pointed the cell at that term for the
+                    # moment, and what is written goes into the cell, not
+                    # into a term the query takes back when it backtracks.
+                    _oc = _old_cell
+                    for _h_oc, _b_oc in (defn.rule or ()):
+                        if _b_oc is not None:
+                            _oc = _b_oc
+                            break
+                    while (_oc.coref is not None
+                           and _oc.coref.__dict__.get(
+                               '_wl_persistent_written', False)):
+                        _oc = _oc.coref
                     if _oc is not rhs_d:
                         _oc.value = rhs_d.value
                         _oc.type = rhs_d.type
@@ -11019,7 +11073,13 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
             # `X <<- s([1+6],X)` reads X before it writes it, so the X inside
             # the new term is the 3 that was there — `s([7],3)`, not a term
             # that points back at itself the way `X <- s(1+4,X)` does.
-            rhs_term = _substitute_old_self(rhs_term, lhs, eng)
+            # A term the store already holds is written in as it is, even
+            # when it reaches this cell: SuperLint's function definition
+            # points back through `previous` at the declaration whose
+            # `next` it is being written into.
+            if not (_rt_pre is not lhs and _in_store_term(_rt_pre)
+                    and lhs.__dict__.get('_wl_persistent_cell', False)):
+                rhs_term = _substitute_old_self(rhs_term, lhs, eng)
 
     # `X <- T` points X at T rather than taking a copy of what T holds, so a
     # later `T <- U` moves X along with it: boites keeps a list of pointers
@@ -11125,7 +11185,15 @@ def bi_store_arrow(goal: PsiTerm, eng) -> bool:
         rhs = rhs_term
         lhs.value = rhs.value
         lhs.type = rhs.type
-        lhs.attr_list = dict(rhs.attr_list)
+        # Written over with a term the store already holds, the cell takes
+        # that term's features themselves rather than a copy of them:
+        # SuperLint writes the function it is building into the `next` of
+        # the declaration before it, and goes on giving the function
+        # features that the declaration's `next` has to show.
+        if _persistent and _in_store_term(rhs.deref()):
+            lhs.attr_list = rhs.deref().attr_list
+        else:
+            lhs.attr_list = dict(rhs.attr_list)
         lhs.coref = rhs.coref if _backtrackable else None
         lhs.flags = rhs.flags
     # An equation suspended on this variable was waiting for exactly this:
@@ -15099,6 +15167,15 @@ def register_all(wl) -> None:
         if fname is None:
             return False
         _host = a2.deref()
+        # A feature read written as the term is read first: SuperLint asks
+        # `has_feature(Name, Declarations.local_declarations)` about the
+        # table the projection names.
+        if (_get_sym(_host) == '.' and '1' in _host.attr_list
+                and '2' in _host.attr_list
+                and not (_host.flags & QUOTED_TRUE)):
+            _cell_hf = _resolve_dot_feat(_host, eng)
+            if _cell_hf is not None:
+                _host = _cell_hf.deref()
         # A name declared `global` or `persistent` stands for its cell, and
         # the features belong to the cell: acc_declarations.lf asks
         # `has_feature(Acc,accumulators,AccInfo)` of the table it files

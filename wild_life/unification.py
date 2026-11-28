@@ -2114,6 +2114,15 @@ class Unifier:
         # reads that back as `box(_A: 3,1)` in one list and `box(_A,-1)` in
         # the other.
         from wild_life.data_structures import NON_STRICT_TERM as _NST_merge
+        # A term the store keeps is not pointed at a query's own term: that
+        # pointer goes when the query backtracks, and with it everything
+        # the stored term was read as.  SuperLint matches the token it has
+        # filed against a clause's `Identifier : identifier(Name)` and files
+        # what it matched as a declaration's name; the token has to be what
+        # was filed, not the clause's pattern.
+        if (_in_store(u) and not _in_store(v) and v.coref is None
+                and u.coref is None):
+            u, v = v, u
         # Bind u → v so deref(u) returns v (the canonical psi-term).
         # This matches C Wild Life's convention: the second argument (v) is preferred
         # as the canonical representative. For example, when unifying A.c (T_c) with A,
@@ -3084,6 +3093,10 @@ def _is_dot_access(t: PsiTerm) -> bool:
     _ty = t.type
     if (_ty is None or _ty.keyword is None or _ty.keyword.symbol != '.'
             or t.attr_list.get('1') is None):
+        return False
+    # A module that defines `.` for itself -- SuperLint's `Node.Feature ->
+    # '*protected_project*'(Feature, Node)` -- calls its own function.
+    if _ty.rule:
         return False
     from wild_life.data_structures import (
         NON_STRICT_TERM as _NST_da)
