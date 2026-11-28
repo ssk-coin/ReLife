@@ -35,16 +35,38 @@ sys.setrecursionlimit(10000)
 
 _VERSION = "1.02"
 _RELIFE_VERSION = "0.01"
-_BANNER = (
-    f"Wild_Life Interpreter Version {_VERSION} "
-    f"(ReLife {_RELIFE_VERSION}, Python port)\n"
-)
+
+
+def _source_commit() -> Optional[str]:
+    """The short hash of the commit the interpreter is running from.
+
+    None when the package does not sit in a git checkout or git is not
+    available.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "-C", os.path.dirname(os.path.abspath(__file__)),
+             "rev-parse", "--short", "HEAD"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    commit = out.stdout.strip()
+    return commit if out.returncode == 0 and commit else None
+
+
+def _banner() -> str:
+    commit = _source_commit()
+    where = f", commit {commit}" if commit else ""
+    return (f"Wild_Life Interpreter Version {_VERSION} "
+            f"(ReLife {_RELIFE_VERSION}{where}, Python port)\n")
 
 
 def title(quiet: bool = False) -> None:
-    """Print the startup banner (mirrors C's title() in Info.c)."""
+    """Print the startup banner."""
     if not quiet:
-        sys.stdout.write(_BANNER)
+        sys.stdout.write(_banner())
         sys.stdout.flush()
 
 
