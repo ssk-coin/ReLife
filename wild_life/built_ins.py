@@ -2000,6 +2000,13 @@ def _eval_and_conjunction(t: PsiTerm, eng,
                 return inner.deref()
         return x
 
+    # A term of sort `&` that carries named features is a structure, not a
+    # meet to make: SuperLint's parser builds `root_sort(Op) & @(L, R,
+    # operator => Op, mode => infix)` for a C `a & b`, and hands it around
+    # as the expression node it is.
+    if any(not str(_k).isdigit() for _k in t.attr_list):
+        return t
+
     t1_ref = t.attr_list.get('1')
     t2_ref = t.attr_list.get('2')
     if t1_ref is None or t2_ref is None:
@@ -2011,7 +2018,11 @@ def _eval_and_conjunction(t: PsiTerm, eng,
     def _eval_side(s: PsiTerm) -> Optional[PsiTerm]:
         """Evaluate one side of & before conjunction: user func, cond, nested &."""
         s = s.deref()
-        if s.type is not None and s.type is wl.and_sym:
+        # Only a meet with two sides is one to make: the bare sort `&` --
+        # what SuperLint's `root_sort(Op)` answers for a C `a & b` -- is a
+        # sort like any other, met as it is.
+        if (s.type is not None and s.type is wl.and_sym
+                and '1' in s.attr_list and '2' in s.attr_list):
             return _eval_and_conjunction(s, eng, keep)
         # A side written with a backquote is the term itself, not something
         # to work out: the profiler meets `CondForFailOccurence` with
@@ -3286,6 +3297,12 @@ def _eval_arith(t: PsiTerm, eng, _depth: int = 0) -> Tuple[bool, float]:
         return False, 0.0
     t = t.deref()
     wl = eng.wl
+    # A term of an operator's sort with named features is a structure a
+    # program built (SuperLint's expression nodes), not a sum.
+    if (t.attr_list and t.value is None
+            and _get_sym(t) in _ARITH_OPS_SET
+            and any(not str(_k).isdigit() for _k in t.attr_list)):
+        return False, 0.0
 
     # A number is its own value, and that is what most of these calls are
     # asked about, so it is answered before anything else is looked at.  A
@@ -5943,7 +5960,8 @@ def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
     # the value.  A cond hands its chosen branch back as its value and
     # checks it out, and a such-that is a function like any other.
     if (body_d.type is not None and body_d.type is eng.wl.such_that
-            and body_d.attr_list):
+            and body_d.attr_list
+            and all(k.isdigit() for k in body_d.attr_list)):
         return _eval_suchthat_sync(body_d, eng, _depth)
 
     # User-defined function call?
@@ -6020,7 +6038,8 @@ def _eval_body_sync(body_d: 'PsiTerm', eng, _depth: int) -> Optional['PsiTerm']:
     #   `result_term & where(side_effects)` — where() runs side effects, returns @
     _and_kw = body_d.type.keyword if body_d.type else None
     if (_and_kw is not None and _and_kw.symbol == '&'
-            and '1' in body_d.attr_list and '2' in body_d.attr_list):
+            and '1' in body_d.attr_list and '2' in body_d.attr_list
+            and all(k.isdigit() for k in body_d.attr_list)):
         _lhs = body_d.attr_list['1'].deref()
         _rhs = body_d.attr_list['2'].deref()
         # Evaluate RHS first — side effects (e.g. where()) may bind vars
@@ -8106,13 +8125,17 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
     # computing the result in a local fresh variable and then unifying, which
     # caused choice points to bind the local fresh var rather than the target,
     # so backtracking would leave the target unbound.
-    if b_d.type is not None and b_d.type is eng.wl.and_sym:
+    # (A `&` term that carries named features is an expression node a
+    # program built, not a meet: see _eval_and_conjunction.)
+    if (b_d.type is not None and b_d.type is eng.wl.and_sym
+            and all(str(_k).isdigit() for _k in b_d.attr_list)):
         t1_r = b_d.attr_list.get('1')
         t2_r = b_d.attr_list.get('2')
         if t1_r is not None and t2_r is not None:
             return _apply_and_conjunction_to_var(b_d, a_d, eng)
 
-    if a_d.type is not None and a_d.type is eng.wl.and_sym:
+    if (a_d.type is not None and a_d.type is eng.wl.and_sym
+            and all(str(_k).isdigit() for _k in a_d.attr_list)):
         t1_r = a_d.attr_list.get('1')
         t2_r = a_d.attr_list.get('2')
         if t1_r is not None and t2_r is not None:
@@ -8315,7 +8338,10 @@ def _bi_unify_inner(goal: PsiTerm, eng) -> bool:
     for _cand in (b_d, a_d):
         if (_cand.type is not None and _cand.type is eng.wl.such_that
                 and '1' in _cand.attr_list and '2' in _cand.attr_list
-                and not (_cand.flags & QUOTED_TRUE)):
+                and not (_cand.flags & QUOTED_TRUE)
+                # One with named features is a structure that happens to
+                # have `|` as its sort, not a value and its guard.
+                and all(k.isdigit() for k in _cand.attr_list)):
             _st_side = _cand
             break
     if _st_side is not None:

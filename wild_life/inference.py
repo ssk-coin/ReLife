@@ -2462,7 +2462,8 @@ class Engine:
         # A meet the two sides do not make a goal of is read as a pair, which
         # is what the conjunction below does with it.
         if defn is wl.and_sym and '1' in thegoal.attr_list \
-                and '2' in thegoal.attr_list:
+                and '2' in thegoal.attr_list \
+                and all(str(_kk).isdigit() for _kk in thegoal.attr_list):
             from wild_life.built_ins import (
                 _eval_and_conjunction as _eac_pg)
             _mark_pg = self.trail.mark()
@@ -2634,6 +2635,8 @@ class Engine:
                     # a time: `write(posint_stream_to(N) & prime)` writes the
                     # 2 and comes back for the 3.
                     if (_w_a.type is wl.and_sym and '1' in _w_a.attr_list
+                            and all(str(_kk).isdigit()
+                                    for _kk in _w_a.attr_list)
                             and '2' in _w_a.attr_list
                             and not (_w_a.flags & (_QUOTED_TRUE
                                                    | _NON_STRICT_TERM))):
@@ -3121,6 +3124,8 @@ class Engine:
                     if (_ad_and.type is wl.and_sym
                             and '1' in _ad_and.attr_list
                             and '2' in _ad_and.attr_list
+                            and all(str(_kk).isdigit()
+                                    for _kk in _ad_and.attr_list)
                             and not (_ad_and.flags & (_QT_and | _NST_and))):
                         _eq_and = (getattr(wl, 'eqsym', None)
                                    or wl.syntax_module.symbol_table.get('='))
