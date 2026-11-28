@@ -74,4 +74,4 @@ the LIFE semantics:
 Wild Life 1.02, Copyright © 1991–1993 Digital Equipment Corporation  
 Extensions, Copyright © 1994–1995 Intelligent Software Group, SFU
 
-Python port — 2024
+Python port — 2026
